@@ -7,8 +7,8 @@ use scat_core::core::diff::{
     ScriptDiffResult, diff_catalog_vs_checkout, diff_catalog_vs_file, diff_files, render_diff_text,
 };
 use scat_core::core::resolve::PathResolver;
-use scat_core::core::vc::{REVISION_TYPE_DEVELOP, load_vc_config};
 use scat_core::core::search::{CatalogDiff, compare_catalogs, open_search_api};
+use scat_core::core::vc::{REVISION_TYPE_DEVELOP, load_vc_config};
 use scat_core::indexer::builder::{BuildOptions, build_index};
 use scat_core::indexer::scanner::max_mtime_in_roots_with_shutdown;
 use tracing::{error, warn};

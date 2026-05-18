@@ -834,10 +834,7 @@ impl SearchApi {
                 row.insert("language".into(), Value::Null);
                 row.insert("owner".into(), Value::Null);
                 row.insert("purpose".into(), Value::Null);
-                row.insert(
-                    "vc_warnings".into(),
-                    Value::String(orphan_warning.clone()),
-                );
+                row.insert("vc_warnings".into(), Value::String(orphan_warning.clone()));
                 row
             })
             .collect())

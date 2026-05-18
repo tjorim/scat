@@ -208,10 +208,7 @@ fn scan_checkouts_includes_archive_records() {
     let records = scan_checkouts(&config, "/catalog/linux/scripts");
 
     assert_eq!(records.len(), 1);
-    assert_eq!(
-        records[0].logical_path,
-        "/catalog/linux/scripts/tool.py"
-    );
+    assert_eq!(records[0].logical_path, "/catalog/linux/scripts/tool.py");
     assert_eq!(records[0].revision_type, REVISION_TYPE_ARCHIVE);
     assert_eq!(records[0].user, "bob");
 }
