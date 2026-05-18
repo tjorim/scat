@@ -1,0 +1,394 @@
+name: Rust Release Artifacts
+
+on:
+  push:
+    branches:
+      - main
+      - rust-rewrite
+      - feat/rust-phase-*
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - main
+      - rust-rewrite
+      - feat/rust-phase-*
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Linux test and release build
+    runs-on: ubuntu-latest
+    env:
+      CC_x86_64_unknown_linux_musl: musl-gcc
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install musl toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes musl-tools
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+
+      - name: Run tests
+        run: cargo test --locked
+
+      - name: Build Linux binary
+        run: cargo build --release --locked --target x86_64-unknown-linux-musl
+
+      - name: Smoke test Linux binary
+        run: |
+          ./target/x86_64-unknown-linux-musl/release/scat --help
+          ./target/x86_64-unknown-linux-musl/release/scat tui --help
+
+      - name: Create compatibility database
+        run: |
+          mkdir -p target/compat
+          python - <<'PY'
+          import json
+          import sqlite3
+          from pathlib import Path
+
+          db = Path("target/compat/scripts.sqlite")
+          conn = sqlite3.connect(db)
+          conn.executescript("""
+          CREATE TABLE scripts (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              logical_path TEXT NOT NULL UNIQUE,
+              language TEXT,
+              size INTEGER,
+              mtime REAL,
+              content TEXT,
+              owner TEXT,
+              purpose TEXT,
+              tags TEXT,
+              entry_points TEXT,
+              related TEXT,
+              symlink_target TEXT,
+              metadata_json TEXT,
+              checkout_user TEXT,
+              checkout_timestamp TEXT,
+              checkout_os TEXT,
+              checkout_age_seconds REAL,
+              vc_warnings TEXT,
+              indexed_at TEXT
+          );
+          CREATE INDEX idx_scripts_symlink_target ON scripts(symlink_target) WHERE symlink_target IS NOT NULL;
+          CREATE VIRTUAL TABLE script_fts USING fts5(
+              logical_path,
+              content,
+              owner,
+              purpose,
+              tags,
+              content='scripts',
+              content_rowid='id'
+          );
+          CREATE TRIGGER scripts_ai AFTER INSERT ON scripts BEGIN
+              INSERT INTO script_fts(rowid, logical_path, content, owner, purpose, tags)
+              VALUES (new.id, new.logical_path, new.content, new.owner, new.purpose, new.tags);
+          END;
+          CREATE TRIGGER scripts_ad AFTER DELETE ON scripts BEGIN
+              INSERT INTO script_fts(script_fts, rowid, logical_path, content, owner, purpose, tags)
+              VALUES ('delete', old.id, old.logical_path, old.content, old.owner, old.purpose, old.tags);
+          END;
+          CREATE TRIGGER scripts_au AFTER UPDATE ON scripts BEGIN
+              INSERT INTO script_fts(script_fts, rowid, logical_path, content, owner, purpose, tags)
+              VALUES ('delete', old.id, old.logical_path, old.content, old.owner, old.purpose, old.tags);
+              INSERT INTO script_fts(rowid, logical_path, content, owner, purpose, tags)
+              VALUES (new.id, new.logical_path, new.content, new.owner, new.purpose, new.tags);
+          END;
+          CREATE TABLE dependencies (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              script_id INTEGER NOT NULL REFERENCES scripts(id) ON DELETE CASCADE,
+              depends_on_path TEXT NOT NULL,
+              resolved_script_id INTEGER REFERENCES scripts(id) ON DELETE SET NULL,
+              UNIQUE (script_id, depends_on_path)
+          );
+          CREATE INDEX idx_dependencies_resolved_script_id ON dependencies(resolved_script_id);
+          CREATE TABLE vc_checkouts (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              logical_path TEXT NOT NULL,
+              physical_path TEXT NOT NULL,
+              os_flavor TEXT NOT NULL,
+              user TEXT NOT NULL,
+              timestamp TEXT NOT NULL,
+              age_seconds REAL,
+              UNIQUE (physical_path)
+          );
+          CREATE INDEX idx_vc_checkouts_logical_path ON vc_checkouts(logical_path);
+          CREATE TABLE function_definitions (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              script_id INTEGER NOT NULL REFERENCES scripts(id) ON DELETE CASCADE,
+              name TEXT NOT NULL,
+              kind TEXT NOT NULL,
+              line INTEGER NOT NULL,
+              docstring TEXT,
+              decorators TEXT,
+              UNIQUE (script_id, kind, name, line)
+          );
+          CREATE INDEX idx_function_definitions_script_id ON function_definitions(script_id);
+          CREATE INDEX idx_function_definitions_name ON function_definitions(name);
+          CREATE TABLE function_calls (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              script_id INTEGER NOT NULL REFERENCES scripts(id) ON DELETE CASCADE,
+              caller TEXT NOT NULL,
+              callee TEXT NOT NULL,
+              line INTEGER NOT NULL,
+              resolved_target_name TEXT,
+              resolved_target_script_id INTEGER REFERENCES scripts(id) ON DELETE SET NULL
+          );
+          CREATE INDEX idx_function_calls_script_id ON function_calls(script_id);
+          CREATE INDEX idx_function_calls_resolved_target_script_id ON function_calls(resolved_target_script_id);
+          CREATE INDEX idx_function_calls_callee ON function_calls(callee);
+          CREATE INDEX idx_function_calls_resolved_target_name ON function_calls(resolved_target_name);
+          CREATE TABLE index_metadata (
+              id INTEGER PRIMARY KEY CHECK (id = 1),
+              build_timestamp TEXT NOT NULL,
+              schema_version INTEGER NOT NULL
+          );
+          """)
+          conn.execute(
+              """
+              INSERT INTO scripts
+                  (logical_path, language, size, mtime, content, owner, purpose,
+                   tags, entry_points, related, metadata_json, vc_warnings,
+                   indexed_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              """,
+              (
+                  "/catalog/scripts/patch_check.py",
+                  "python",
+                  42,
+                  0.0,
+                  "def main():\n    return 'patch freeze'\n",
+                  "owner@example.com",
+                  "Verify patch freeze consistency",
+                  json.dumps(["patching"]),
+                  json.dumps(["main"]),
+                  json.dumps([]),
+                  json.dumps({"source": "python-compat-fixture"}),
+                  json.dumps([]),
+                  "2026-05-07T00:00:00Z",
+              ),
+          )
+          conn.execute(
+              "INSERT INTO index_metadata (id, build_timestamp, schema_version) VALUES (1, ?, ?)",
+              ("2026-05-07T00:00:00Z", 8),
+          )
+          conn.commit()
+          conn.close()
+          PY
+
+      - name: Smoke test Linux database compatibility
+        run: |
+          ./target/x86_64-unknown-linux-musl/release/scat --db target/compat/scripts.sqlite catalog info
+          ./target/x86_64-unknown-linux-musl/release/scat --db target/compat/scripts.sqlite search patch --output json
+
+      - name: Report Linux binary size
+        run: ls -lh target/x86_64-unknown-linux-musl/release/scat
+
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: scat-linux-x86_64-musl
+          path: target/x86_64-unknown-linux-musl/release/scat
+          if-no-files-found: error
+
+  windows:
+    name: Windows release build
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+
+      - name: Build Windows binary
+        run: cargo build --release --locked
+
+      - name: Smoke test Windows binary
+        run: |
+          .\target\release\scat.exe --help
+          .\target\release\scat.exe tui --help
+
+      - name: Create compatibility database
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force target\compat | Out-Null
+          $script = @'
+          import json
+          import sqlite3
+          from pathlib import Path
+
+          db = Path("target/compat/scripts.sqlite")
+          conn = sqlite3.connect(db)
+          conn.executescript("""
+          CREATE TABLE scripts (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              logical_path TEXT NOT NULL UNIQUE,
+              language TEXT,
+              size INTEGER,
+              mtime REAL,
+              content TEXT,
+              owner TEXT,
+              purpose TEXT,
+              tags TEXT,
+              entry_points TEXT,
+              related TEXT,
+              symlink_target TEXT,
+              metadata_json TEXT,
+              checkout_user TEXT,
+              checkout_timestamp TEXT,
+              checkout_os TEXT,
+              checkout_age_seconds REAL,
+              vc_warnings TEXT,
+              indexed_at TEXT
+          );
+          CREATE INDEX idx_scripts_symlink_target ON scripts(symlink_target) WHERE symlink_target IS NOT NULL;
+          CREATE VIRTUAL TABLE script_fts USING fts5(
+              logical_path,
+              content,
+              owner,
+              purpose,
+              tags,
+              content='scripts',
+              content_rowid='id'
+          );
+          CREATE TRIGGER scripts_ai AFTER INSERT ON scripts BEGIN
+              INSERT INTO script_fts(rowid, logical_path, content, owner, purpose, tags)
+              VALUES (new.id, new.logical_path, new.content, new.owner, new.purpose, new.tags);
+          END;
+          CREATE TRIGGER scripts_ad AFTER DELETE ON scripts BEGIN
+              INSERT INTO script_fts(script_fts, rowid, logical_path, content, owner, purpose, tags)
+              VALUES ('delete', old.id, old.logical_path, old.content, old.owner, old.purpose, old.tags);
+          END;
+          CREATE TRIGGER scripts_au AFTER UPDATE ON scripts BEGIN
+              INSERT INTO script_fts(script_fts, rowid, logical_path, content, owner, purpose, tags)
+              VALUES ('delete', old.id, old.logical_path, old.content, old.owner, old.purpose, old.tags);
+              INSERT INTO script_fts(rowid, logical_path, content, owner, purpose, tags)
+              VALUES (new.id, new.logical_path, new.content, new.owner, new.purpose, new.tags);
+          END;
+          CREATE TABLE dependencies (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              script_id INTEGER NOT NULL REFERENCES scripts(id) ON DELETE CASCADE,
+              depends_on_path TEXT NOT NULL,
+              resolved_script_id INTEGER REFERENCES scripts(id) ON DELETE SET NULL,
+              UNIQUE (script_id, depends_on_path)
+          );
+          CREATE INDEX idx_dependencies_resolved_script_id ON dependencies(resolved_script_id);
+          CREATE TABLE vc_checkouts (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              logical_path TEXT NOT NULL,
+              physical_path TEXT NOT NULL,
+              os_flavor TEXT NOT NULL,
+              user TEXT NOT NULL,
+              timestamp TEXT NOT NULL,
+              age_seconds REAL,
+              UNIQUE (physical_path)
+          );
+          CREATE INDEX idx_vc_checkouts_logical_path ON vc_checkouts(logical_path);
+          CREATE TABLE function_definitions (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              script_id INTEGER NOT NULL REFERENCES scripts(id) ON DELETE CASCADE,
+              name TEXT NOT NULL,
+              kind TEXT NOT NULL,
+              line INTEGER NOT NULL,
+              docstring TEXT,
+              decorators TEXT,
+              UNIQUE (script_id, kind, name, line)
+          );
+          CREATE INDEX idx_function_definitions_script_id ON function_definitions(script_id);
+          CREATE INDEX idx_function_definitions_name ON function_definitions(name);
+          CREATE TABLE function_calls (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              script_id INTEGER NOT NULL REFERENCES scripts(id) ON DELETE CASCADE,
+              caller TEXT NOT NULL,
+              callee TEXT NOT NULL,
+              line INTEGER NOT NULL,
+              resolved_target_name TEXT,
+              resolved_target_script_id INTEGER REFERENCES scripts(id) ON DELETE SET NULL
+          );
+          CREATE INDEX idx_function_calls_script_id ON function_calls(script_id);
+          CREATE INDEX idx_function_calls_resolved_target_script_id ON function_calls(resolved_target_script_id);
+          CREATE INDEX idx_function_calls_callee ON function_calls(callee);
+          CREATE INDEX idx_function_calls_resolved_target_name ON function_calls(resolved_target_name);
+          CREATE TABLE index_metadata (
+              id INTEGER PRIMARY KEY CHECK (id = 1),
+              build_timestamp TEXT NOT NULL,
+              schema_version INTEGER NOT NULL
+          );
+          """)
+          conn.execute(
+              """
+              INSERT INTO scripts
+                  (logical_path, language, size, mtime, content, owner, purpose,
+                   tags, entry_points, related, metadata_json, vc_warnings,
+                   indexed_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              """,
+              (
+                  "/catalog/scripts/patch_check.py",
+                  "python",
+                  42,
+                  0.0,
+                  "def main():\n    return 'patch freeze'\n",
+                  "owner@example.com",
+                  "Verify patch freeze consistency",
+                  json.dumps(["patching"]),
+                  json.dumps(["main"]),
+                  json.dumps([]),
+                  json.dumps({"source": "python-compat-fixture"}),
+                  json.dumps([]),
+                  "2026-05-07T00:00:00Z",
+              ),
+          )
+          conn.execute(
+              "INSERT INTO index_metadata (id, build_timestamp, schema_version) VALUES (1, ?, ?)",
+              ("2026-05-07T00:00:00Z", 8),
+          )
+          conn.commit()
+          conn.close()
+          '@
+          Set-Content -Path target\compat\create_fixture.py -Value $script
+          python target\compat\create_fixture.py
+
+      - name: Smoke test Windows database compatibility
+        run: |
+          .\target\release\scat.exe --db target\compat\scripts.sqlite catalog info
+          .\target\release\scat.exe --db target\compat\scripts.sqlite search patch --output json
+
+      - name: Report Windows binary size
+        shell: pwsh
+        run: Get-Item target\release\scat.exe | Select-Object Name, Length
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: scat-windows-x86_64-msvc
+          path: target/release/scat.exe
+          if-no-files-found: error

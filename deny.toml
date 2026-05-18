@@ -1,0 +1,32 @@
+[licenses]
+version = 2
+confidence-threshold = 0.8
+allow = [
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "CC0-1.0",
+  "ISC",
+  "MIT",
+  "MPL-2.0",
+  "NCSA",
+  "Unicode-3.0",
+  "Unlicense",
+  "Zlib",
+]
+
+[licenses.private]
+ignore = true
+
+[bans]
+multiple-versions = "deny"
+wildcards = "deny"
+skip = [
+  # rusqlite (via hashlink) and indexmap pull different hashbrown versions;
+  # both are transitive-only and will converge when upstreams align.
+  { name = "hashbrown" },
+  # getrandom's WASI support currently resolves two transitive wit-bindgen
+  # versions (via wasip2/wasip3); allow this duplicate until upstream converges.
+  { name = "wit-bindgen" },
+]

@@ -1,0 +1,1315 @@
+use std::path::{Path, PathBuf};
+use std::process;
+
+use anyhow::{Context, Result};
+use clap::Parser;
+use scat_core::core::diff::{
+    ScriptDiffResult, diff_catalog_vs_checkout, diff_catalog_vs_file, diff_files, render_diff_text,
+};
+use scat_core::core::resolve::PathResolver;
+use scat_core::core::vc::{REVISION_TYPE_DEVELOP, load_vc_config};
+use scat_core::core::search::{CatalogDiff, compare_catalogs, open_search_api};
+use scat_core::indexer::builder::{BuildOptions, build_index};
+use scat_core::indexer::scanner::max_mtime_in_roots_with_shutdown;
+use tracing::{error, warn};
+
+mod cli;
+mod output;
+mod runtime;
+mod tui;
+
+use crate::cli::{CatalogCommands, Cli, Commands, OutputFormat, SearchOutput};
+use crate::output::{
+    canonicalize_row_keys, checkout_label, contributors_from_script, dep_entry_to_json,
+    json_array_field, json_script_field, mtime_field, print_json, print_script_table,
+    print_script_table_with_fields, render_script_csv, render_table, script_rows_to_json,
+    selected_script_fields, size_field, str_field, used_by_row_to_json, warning_kinds,
+};
+use crate::runtime::{audit_exit_code, cmd_vc, init_tracing};
+
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
+
+fn main() {
+    let cli = Cli::parse();
+    init_tracing(cli.verbose);
+
+    if let Err(e) = run(cli) {
+        error!(error = ?e, "command failed");
+        process::exit(1);
+    }
+}
+
+fn run(cli: Cli) -> Result<()> {
+    // Load config early; provides db_path fallback and index settings.
+    let scat_config =
+        load_vc_config(cli.config.as_deref()).with_context(|| "Failed to load config")?;
+
+    // --old/--new diff needs no catalog at all.
+    if let Commands::Diff {
+        path: None,
+        against: _,
+        old: Some(ref old_path),
+        new: Some(ref new_path),
+        json,
+    } = cli.command
+    {
+        return cmd_script_diff_explicit(old_path, new_path, json);
+    }
+
+    // vc pass-through needs no catalog either.
+    if let Commands::Vc { ref args, json } = cli.command {
+        return cmd_vc(args, json, scat_config.vc_executable);
+    }
+
+    // Resolve database path: CLI flag / env var takes precedence over config file.
+    let db_path_buf: PathBuf;
+    let no_db_hint =
+        "No database specified. Use --db <path>, set SCAT_DB, or add db_path to the config file.";
+    let db_path: &Path = if let Some(p) = cli.db.as_deref() {
+        p
+    } else if let Some(ref p) = scat_config.db_path {
+        db_path_buf = p.clone();
+        &db_path_buf
+    } else {
+        anyhow::bail!(no_db_hint);
+    };
+
+    match cli.command {
+        Commands::Tui { mapping } => {
+            let resolver = match mapping.as_deref() {
+                Some(path) => PathResolver::from_file(path)
+                    .with_context(|| format!("Failed to load mapping file: {}", path.display()))?,
+                None => PathResolver::new(),
+            };
+            return tui::run(db_path, resolver);
+        }
+        Commands::Catalog { command } => {
+            return cmd_catalog(command, db_path, cli.no_color, scat_config);
+        }
+        _ => {}
+    }
+
+    let api = open_search_api(db_path)
+        .with_context(|| format!("Failed to open database: {}", db_path.display()))?;
+
+    match cli.command {
+        Commands::Search {
+            text,
+            lang,
+            owner,
+            tag,
+            limit,
+            fields,
+            output,
+            regex,
+            function,
+        } => {
+            // Resolve @bookmark alias when text starts with '@'.
+            let text = text.map(|t| {
+                if let Some(alias) = t.strip_prefix('@') {
+                    if let Some(expanded) = scat_config.bookmarks.get(alias) {
+                        expanded.clone()
+                    } else {
+                        warn!(alias = %alias, "bookmark not found in config; using alias as query");
+                        alias.to_string()
+                    }
+                } else {
+                    t
+                }
+            });
+            cmd_search(
+                &api,
+                SearchOpts {
+                    text,
+                    regex,
+                    function,
+                    lang,
+                    owner,
+                    tag,
+                    limit,
+                    fields: &fields,
+                    output,
+                    no_color: cli.no_color,
+                },
+            )
+        }
+        Commands::Show {
+            path,
+            fields,
+            output,
+            functions,
+        } => cmd_show(
+            &api,
+            &path,
+            &fields,
+            output,
+            scat_config.configured(),
+            functions,
+        ),
+        Commands::Status { path, all, output } => cmd_status(&api, path, all, output, cli.no_color),
+        Commands::Deps { path, output } => cmd_deps(&api, &path, output, cli.no_color),
+        Commands::Symlinks { path, output } => cmd_symlinks(&api, &path, output, cli.no_color),
+        Commands::Diff {
+            path: Some(logical_path),
+            against,
+            old: _,
+            new: _,
+            json,
+        } => cmd_script_diff_catalog(&api, &logical_path, against.as_deref(), json),
+        Commands::Vc { .. }
+        | Commands::Tui { .. }
+        | Commands::Catalog { .. }
+        | Commands::Diff { .. } => unreachable!(),
+    }
+}
+
+fn cmd_catalog(
+    command: CatalogCommands,
+    db_path: &std::path::Path,
+    no_color: bool,
+    config: scat_core::core::vc::VcConfig,
+) -> Result<()> {
+    if let CatalogCommands::Build {
+        ref scan_root,
+        ref logical_prefix,
+        head_lines,
+        ref ignore_file,
+        keep_copies,
+        dry_run,
+        quiet,
+        no_resume,
+        force,
+        json,
+    } = command
+    {
+        return cmd_index(
+            scan_root,
+            db_path,
+            logical_prefix,
+            head_lines,
+            ignore_file,
+            keep_copies,
+            dry_run,
+            config,
+            json,
+            quiet,
+            no_resume,
+            force,
+        );
+    }
+
+    if let CatalogCommands::Diff {
+        against,
+        old,
+        new,
+        json,
+    } = command
+    {
+        return cmd_diff(db_path, against, old, new, json);
+    }
+
+    let api = open_search_api(db_path)
+        .with_context(|| format!("Failed to open database: {}", db_path.display()))?;
+
+    match command {
+        CatalogCommands::Stats { json } => cmd_stats(&api, json, no_color, config.configured()),
+        CatalogCommands::Info { json } => cmd_info(&api, json),
+        CatalogCommands::Audit {
+            checks,
+            strict,
+            stale_days,
+            json,
+        } => cmd_audit(&api, &checks, strict, stale_days, json),
+        CatalogCommands::Build { .. } | CatalogCommands::Diff { .. } => unreachable!(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Command handlers
+// ---------------------------------------------------------------------------
+
+struct SearchOpts<'a> {
+    text: Option<String>,
+    regex: Option<String>,
+    function: Option<String>,
+    lang: Option<String>,
+    owner: Option<String>,
+    tag: Option<String>,
+    limit: usize,
+    fields: &'a [String],
+    output: SearchOutput,
+    no_color: bool,
+}
+
+fn cmd_search(api: &scat_core::core::search::SearchApi, opts: SearchOpts<'_>) -> Result<()> {
+    let SearchOpts {
+        text,
+        regex,
+        function,
+        lang,
+        owner,
+        tag,
+        limit,
+        fields,
+        output,
+        no_color,
+    } = opts;
+
+    let (results, is_fts) = if let Some(ref name) = function {
+        let rows = api
+            .search_scripts_by_function_with_filters(
+                name,
+                limit,
+                lang.as_deref(),
+                owner.as_deref(),
+                tag.as_deref(),
+            )
+            .with_context(|| format!("Function search failed for {:?}", name))?;
+        (rows, false)
+    } else if let Some(ref pattern) = regex {
+        let rows = api
+            .search_by_regex_with_filters(
+                pattern,
+                limit,
+                lang.as_deref(),
+                owner.as_deref(),
+                tag.as_deref(),
+            )
+            .with_context(|| format!("Regex search failed for pattern {:?}", pattern))?;
+        (rows, false)
+    } else if let Some(ref q) = text {
+        let use_fts = query_uses_fts(q);
+        let rows = if use_fts {
+            api.search_with_filters(q, limit, lang.as_deref(), owner.as_deref(), tag.as_deref())?
+        } else {
+            api.search_by_path_with_filters(
+                q,
+                limit,
+                lang.as_deref(),
+                owner.as_deref(),
+                tag.as_deref(),
+            )?
+        };
+        (rows, use_fts)
+    } else {
+        (
+            api.list_scripts(lang.as_deref(), owner.as_deref(), tag.as_deref(), limit, 0)?,
+            false,
+        )
+    };
+
+    let ranked = if is_fts {
+        sort_by_name_relevance(results, text.as_deref().unwrap_or(""))
+    } else {
+        results
+    };
+
+    if output == SearchOutput::Json {
+        print_json(&script_rows_to_json(&ranked, fields));
+        return Ok(());
+    }
+
+    if output == SearchOutput::Csv {
+        print!("{}", render_script_csv(&ranked, fields));
+        return Ok(());
+    }
+
+    if ranked.is_empty() {
+        println!("No results found.");
+        return Ok(());
+    }
+
+    let selected_fields = selected_script_fields(fields);
+    print_script_table_with_fields(&group_by_symlinks(ranked), &selected_fields, no_color);
+    Ok(())
+}
+
+/// Re-sort results so exact and prefix filename matches appear first.
+/// Preserves the original (BM25) order within each tier.
+fn query_uses_fts(query: &str) -> bool {
+    !query.contains('/') && !query.contains('.')
+}
+
+fn sort_by_name_relevance(
+    mut results: Vec<scat_core::core::db::JsonRow>,
+    query: &str,
+) -> Vec<scat_core::core::db::JsonRow> {
+    let q = query.to_lowercase();
+    results.sort_by_cached_key(|row| {
+        let path = str_field(row, "logical_path");
+        let basename = path.rsplit('/').next().unwrap_or(&path);
+        let stem = basename
+            .rsplit_once('.')
+            .map(|(s, _)| s)
+            .unwrap_or(basename);
+        let stem_lower = stem.to_lowercase();
+        let base_lower = basename.to_lowercase();
+        if stem_lower == q {
+            0 // exact stem match  (checkmc.py for query "checkmc")
+        } else if base_lower == q {
+            1 // exact basename    (checkmc for query "checkmc")
+        } else if stem_lower.starts_with(&q) {
+            2 // prefix stem match (checkmc_v2.py for query "checkmc")
+        } else if base_lower.contains(&q) {
+            3 // anywhere in basename
+        } else {
+            4 // only in path/content/metadata
+        }
+    });
+    results
+}
+
+/// showing its target path.
+///
+/// If the target also appears in the result set it is suppressed as a
+/// standalone entry — it is already visible via the ↳ row.  If the target is
+/// not in the result set the symlink still appears as primary with a ↳ row
+/// pointing at the (absent) target.
+fn group_by_symlinks(
+    results: Vec<scat_core::core::db::JsonRow>,
+) -> Vec<scat_core::core::db::JsonRow> {
+    use std::collections::HashSet;
+
+    // Collect target paths covered by symlinks present in these results.
+    let covered_targets: HashSet<String> = results
+        .iter()
+        .filter_map(|r| {
+            r.get("symlink_target")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+        })
+        .collect();
+
+    let mut output: Vec<scat_core::core::db::JsonRow> = Vec::new();
+
+    for row in results {
+        let target = row
+            .get("symlink_target")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+
+        if let Some(target_path) = target {
+            // Symlink is the primary entry; show its target as a sub-row.
+            output.push(row);
+            let mut sub = scat_core::core::db::JsonRow::new();
+            sub.insert("logical_path".into(), format!("  ↳ {target_path}").into());
+            output.push(sub);
+        } else {
+            // Non-symlink: skip if it's already shown as a ↳ sub-row above.
+            let path = str_field(&row, "logical_path");
+            if !covered_targets.contains(&path) {
+                output.push(row);
+            }
+        }
+    }
+
+    output
+}
+
+const DEFAULT_SHOW_FIELDS: &[&str] = &[
+    "language", "owner", "purpose", "checkout", "size", "indexed", "uses", "used_by",
+];
+
+fn cmd_show(
+    api: &scat_core::core::search::SearchApi,
+    path: &str,
+    fields: &[String],
+    output: OutputFormat,
+    vc_configured: bool,
+    show_functions: bool,
+) -> Result<()> {
+    let raw = match api.get_script(path)? {
+        Some(s) => s,
+        None => {
+            error!(path = %path, "script not found");
+            process::exit(1);
+        }
+    };
+
+    // If the script is a symlink, resolve to the target and show that instead.
+    let symlink_note = raw
+        .get("symlink_target")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|t| t.to_string());
+    let resolved = symlink_note
+        .as_deref()
+        .map(|t| api.get_script(t))
+        .transpose()?
+        .flatten();
+    let (script, resolved_path): (&scat_core::core::db::JsonRow, &str) =
+        match (&resolved, &symlink_note) {
+            (Some(t), Some(target)) => (t, target.as_str()),
+            _ => (&raw, path),
+        };
+
+    // --functions: list function definitions table and return early.
+    if show_functions {
+        let fns = api.get_functions_defined_in(resolved_path)?;
+        if output == OutputFormat::Json {
+            print_json(&fns);
+            return Ok(());
+        }
+        if fns.is_empty() {
+            println!("No function definitions indexed for {resolved_path}.");
+            return Ok(());
+        }
+        let rows: Vec<Vec<String>> = fns
+            .iter()
+            .map(|f| {
+                vec![
+                    str_field(f, "name"),
+                    str_field(f, "kind"),
+                    f.get("line")
+                        .and_then(|v| v.as_i64())
+                        .map(|n| n.to_string())
+                        .unwrap_or_else(|| str_field(f, "line")),
+                    str_field(f, "docstring"),
+                ]
+            })
+            .collect();
+        println!(
+            "{}",
+            render_table(&["Name", "Kind", "Line", "Docstring"], &rows, false)
+        );
+        return Ok(());
+    }
+
+    let effective: Vec<&str> = if fields.is_empty() {
+        DEFAULT_SHOW_FIELDS.to_vec()
+    } else {
+        fields.iter().map(String::as_str).collect()
+    };
+    let revisions = if vc_configured {
+        api.checkouts_for(resolved_path)?
+    } else {
+        Vec::new()
+    };
+
+    if output == OutputFormat::Json {
+        let needs_graph = effective.iter().any(|f| *f == "uses" || *f == "used_by");
+        let graph = if needs_graph {
+            Some(api.dependency_graph(resolved_path)?)
+        } else {
+            None
+        };
+
+        let mut out = scat_core::core::db::JsonRow::new();
+        // Always include path as the record identifier, mirroring how the table
+        // branch always prints the path before the field list.
+        out.insert("path".to_string(), json_script_field(script, "path"));
+        for &field in &effective {
+            match field {
+                "uses" => {
+                    let uses: Vec<serde_json::Value> = graph
+                        .as_ref()
+                        .map(|g| g.uses.iter().map(dep_entry_to_json).collect())
+                        .unwrap_or_default();
+                    out.insert("uses".to_string(), serde_json::json!(uses));
+                }
+                "used_by" => {
+                    let used_by: Vec<serde_json::Value> = graph
+                        .as_ref()
+                        .map(|g| g.used_by.iter().map(used_by_row_to_json).collect())
+                        .unwrap_or_default();
+                    out.insert("used_by".to_string(), serde_json::json!(used_by));
+                }
+                "contributors" => {
+                    let contribs = contributors_from_script(script);
+                    out.insert("contributors".to_string(), serde_json::json!(contribs));
+                }
+                _ => {
+                    out.entry(field.to_string())
+                        .or_insert_with(|| json_script_field(script, field));
+                }
+            }
+        }
+        if vc_configured {
+            out.insert("revisions".to_string(), revisions_to_json(revisions));
+        }
+        print_json(&out);
+        return Ok(());
+    }
+
+    if let Some(ref target) = symlink_note {
+        println!("{path}");
+        println!("  symlink → {target}");
+        println!();
+    }
+    println!("{}", str_field(script, "logical_path"));
+
+    let needs_deps = effective.iter().any(|f| *f == "uses" || *f == "used_by");
+    let graph = needs_deps
+        .then(|| api.dependency_graph(resolved_path))
+        .transpose()?;
+
+    for field in &effective {
+        match *field {
+            "language" => println!("  Language     : {}", str_field(script, "language")),
+            "owner" => println!("  Owner        : {}", str_field(script, "owner")),
+            "purpose" => println!("  Purpose      : {}", str_field(script, "purpose")),
+            "checkout" => println!("  Checkout     : {}", checkout_label(script)),
+            "size" => println!("  Size         : {}", size_field(script)),
+            "indexed" => println!("  Indexed      : {}", str_field(script, "indexed_at")),
+            "symlink" => println!("  Symlink      : {}", str_field(script, "symlink_target")),
+            "uses" => {
+                if let Some(g) = &graph {
+                    println!("  Uses         : {}", g.uses.len());
+                }
+            }
+            "used_by" => {
+                if let Some(g) = &graph {
+                    println!("  Used by      : {}", g.used_by.len());
+                }
+            }
+            "mtime" => println!("  Modified     : {}", mtime_field(script)),
+            "tags" => println!("  Tags         : {}", json_array_field(script, "tags")),
+            "entry_points" => {
+                println!(
+                    "  Entries      : {}",
+                    json_array_field(script, "entry_points")
+                )
+            }
+            "related" => println!("  Related      : {}", json_array_field(script, "related")),
+            "contributors" => {
+                let contribs = contributors_from_script(script);
+                println!("  Contributors : {}", contribs.join(", "));
+            }
+            unknown => eprintln!("warning: unknown field '{unknown}'"),
+        }
+    }
+    if vc_configured && !revisions.is_empty() {
+        println!();
+        println!("Revisions");
+        for line in render_revision_lines(revisions) {
+            println!("{line}");
+        }
+    }
+    Ok(())
+}
+
+fn render_revision_lines(mut revisions: Vec<scat_core::core::db::JsonRow>) -> Vec<String> {
+    revisions.sort_by(|a, b| {
+        let os_a = str_field(a, "os_flavor");
+        let os_b = str_field(b, "os_flavor");
+        let type_a = str_field(a, "revision_type");
+        let type_b = str_field(b, "revision_type");
+        let ts_a = str_field(a, "timestamp");
+        let ts_b = str_field(b, "timestamp");
+        let rank = |t: &str| if t == REVISION_TYPE_DEVELOP { 0u8 } else { 1u8 };
+        rank(&type_a)
+            .cmp(&rank(&type_b))
+            .then_with(|| os_a.cmp(&os_b))
+            .then_with(|| ts_b.cmp(&ts_a))
+            .then_with(|| str_field(a, "user").cmp(&str_field(b, "user")))
+    });
+
+    revisions
+        .into_iter()
+        .map(|row| {
+            let revision_type = str_field(&row, "revision_type");
+            let os = str_field(&row, "os_flavor");
+            let user = str_field(&row, "user");
+            let timestamp = str_field(&row, "timestamp");
+            let age = row
+                .get("age_seconds")
+                .and_then(serde_json::Value::as_f64)
+                .map(relative_age);
+            let age_suffix = age.map(|value| format!("   ({value})")).unwrap_or_default();
+            format!("  {revision_type:<7} {os:<7} {user:<12} {timestamp:<13}{age_suffix}")
+        })
+        .collect()
+}
+
+fn revisions_to_json(revisions: Vec<scat_core::core::db::JsonRow>) -> serde_json::Value {
+    serde_json::Value::Array(
+        revisions
+            .into_iter()
+            .map(serde_json::Value::Object)
+            .collect(),
+    )
+}
+
+fn relative_age(age_seconds: f64) -> String {
+    let age_seconds = age_seconds.max(0.0);
+    if age_seconds < 3_600.0 {
+        format!("{:.0}m ago", age_seconds / 60.0)
+    } else if age_seconds < 86_400.0 {
+        format!("{:.0}h ago", age_seconds / 3_600.0)
+    } else {
+        format!("{:.0}d ago", age_seconds / 86_400.0)
+    }
+}
+
+fn cmd_status(
+    api: &scat_core::core::search::SearchApi,
+    path: Option<String>,
+    all: bool,
+    output: OutputFormat,
+    no_color: bool,
+) -> Result<()> {
+    if path.is_none() && !all {
+        anyhow::bail!("Provide a script path or use --all.");
+    }
+
+    let rows = api.checkout_status(path.as_deref())?;
+
+    if output == OutputFormat::Json {
+        let canonical: Vec<scat_core::core::db::JsonRow> =
+            rows.iter().map(canonicalize_row_keys).collect();
+        print_json(&canonical);
+        return Ok(());
+    }
+
+    if rows.is_empty() {
+        println!("No vc checkout state found.");
+        return Ok(());
+    }
+
+    let table_rows = rows
+        .iter()
+        .map(|row| {
+            vec![
+                str_field(row, "logical_path"),
+                checkout_label(row),
+                str_field(row, "checkout_os"),
+                warning_kinds(row),
+            ]
+        })
+        .collect::<Vec<_>>();
+    println!(
+        "{}",
+        render_table(
+            &["Path", "Checkout", "OS", "Warnings"],
+            &table_rows,
+            no_color
+        )
+    );
+    Ok(())
+}
+
+fn cmd_deps(
+    api: &scat_core::core::search::SearchApi,
+    path: &str,
+    output: OutputFormat,
+    no_color: bool,
+) -> Result<()> {
+    let _ = match api.get_script(path)? {
+        Some(s) => s,
+        None => {
+            error!(path = %path, "script not found");
+            process::exit(1);
+        }
+    };
+
+    if output == OutputFormat::Json {
+        let graph = api.dependency_graph(path)?;
+        let uses: Vec<serde_json::Value> = graph.uses.iter().map(dep_entry_to_json).collect();
+        let used_by: Vec<serde_json::Value> =
+            graph.used_by.iter().map(used_by_row_to_json).collect();
+        print_json(&serde_json::json!({ "uses": uses, "used_by": used_by }));
+        return Ok(());
+    }
+
+    let related = api.related_scripts(path)?;
+    let graph = api.dependency_graph(path)?;
+    if graph.uses.is_empty() && graph.used_by.is_empty() && related.is_empty() {
+        println!("No dependencies found for {path}.");
+        return Ok(());
+    }
+
+    if !graph.uses.is_empty() {
+        println!("Uses:");
+        let rows = graph
+            .uses
+            .iter()
+            .map(|u| {
+                vec![
+                    u.logical_path.clone(),
+                    u.language.as_str().unwrap_or("—").to_string(),
+                    if u.indexed { "yes" } else { "no" }.to_string(),
+                ]
+            })
+            .collect::<Vec<_>>();
+        println!(
+            "{}",
+            render_table(&["Path", "Language", "Indexed"], &rows, no_color)
+        );
+    }
+    if !graph.used_by.is_empty() {
+        println!("Used by:");
+        print_script_table(&graph.used_by, no_color);
+    }
+    Ok(())
+}
+
+fn cmd_stats(
+    api: &scat_core::core::search::SearchApi,
+    json: bool,
+    no_color: bool,
+    vc_configured: bool,
+) -> Result<()> {
+    let mut data = api.stats()?;
+    if !vc_configured {
+        data.revisions = None;
+    }
+
+    if json {
+        print_json(&data);
+        return Ok(());
+    }
+
+    println!("Total scripts: {}", data.total_scripts);
+    println!("\nBy language:");
+    let by_language = data
+        .by_language
+        .iter()
+        .map(|row| vec![row.language.clone(), row.count.to_string()])
+        .collect::<Vec<_>>();
+    println!(
+        "{}",
+        render_table(&["Language", "Count"], &by_language, no_color)
+    );
+    println!("\nBy owner:");
+    let by_owner = data
+        .by_owner
+        .iter()
+        .map(|row| vec![row.owner.clone(), row.count.to_string()])
+        .collect::<Vec<_>>();
+    println!("{}", render_table(&["Owner", "Count"], &by_owner, no_color));
+    if let Some(revisions) = &data.revisions {
+        println!("\nRevision statistics");
+        for line in render_revision_stats_lines(revisions) {
+            println!("{line}");
+        }
+    }
+    Ok(())
+}
+
+fn render_revision_stats_lines(stats: &scat_core::core::search::RevisionStats) -> Vec<String> {
+    vec![
+        format!(
+            "  Scripts with active checkouts: {}",
+            stats.scripts_with_active_checkouts
+        ),
+        format!(
+            "  Scripts with archive entries: {}",
+            stats.scripts_with_archive_entries
+        ),
+        format!(
+            "  Total DEVELOP revision files: {}",
+            stats.total_develop_revision_files
+        ),
+        format!(
+            "  Total ARCHIVE revision files: {}",
+            stats.total_archive_revision_files
+        ),
+        format!(
+            "  Scripts checked out by >1 user: {}",
+            stats.scripts_checked_out_by_multiple_users
+        ),
+    ]
+}
+
+fn cmd_symlinks(
+    api: &scat_core::core::search::SearchApi,
+    path: &str,
+    output: OutputFormat,
+    no_color: bool,
+) -> Result<()> {
+    let inbound = api.symlinks_to(path)?;
+    let script = api.get_script(path)?;
+
+    let outbound_target: Option<String> = script
+        .as_ref()
+        .and_then(|r| r.get("symlink_target"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let outbound_row: Option<scat_core::core::db::JsonRow> = outbound_target
+        .as_deref()
+        .map(|t| api.get_script(t))
+        .transpose()?
+        .flatten();
+
+    if output == OutputFormat::Json {
+        let combined = serde_json::json!({
+            "points_to": outbound_row.as_ref().map(canonicalize_row_keys),
+            "pointed_to_by": inbound.iter().map(canonicalize_row_keys).collect::<Vec<_>>(),
+        });
+        print_json(&combined);
+        return Ok(());
+    }
+
+    let has_outbound = outbound_target.is_some();
+    let has_inbound = !inbound.is_empty();
+
+    if !has_outbound && !has_inbound {
+        println!("No symlink relationships for {path}.");
+        return Ok(());
+    }
+
+    if let Some(ref target) = outbound_target {
+        if let Some(ref row) = outbound_row {
+            println!("{path} points to:");
+            print_script_table(std::slice::from_ref(row), no_color);
+        } else {
+            println!("{path} points to: {target} (not indexed)");
+        }
+    }
+
+    if has_outbound && has_inbound {
+        println!();
+    }
+
+    if has_inbound {
+        println!("Symlinks pointing to {path}:");
+        print_script_table(&inbound, no_color);
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Script diff command handlers
+// ---------------------------------------------------------------------------
+
+/// `scat diff /catalog/foo.py` or `scat diff /catalog/foo.py --against <file>`
+fn cmd_script_diff_catalog(
+    api: &scat_core::core::search::SearchApi,
+    logical_path: &str,
+    against: Option<&std::path::Path>,
+    json: bool,
+) -> Result<()> {
+    let result = if let Some(file) = against {
+        diff_catalog_vs_file(&api.conn, logical_path, file)
+    } else {
+        diff_catalog_vs_checkout(&api.conn, logical_path)
+    }
+    .with_context(|| format!("Script diff failed for '{logical_path}'"))?;
+
+    print_script_diff(&result, json)
+}
+
+/// `scat diff --old <file> --new <file>`
+fn cmd_script_diff_explicit(
+    old: &std::path::Path,
+    new: &std::path::Path,
+    json: bool,
+) -> Result<()> {
+    let result =
+        diff_files(old, new).with_context(|| "Script diff failed for explicit file pair")?;
+    print_script_diff(&result, json)
+}
+
+fn print_script_diff(result: &ScriptDiffResult, json: bool) -> Result<()> {
+    if json {
+        print_json(result);
+    } else {
+        print!("{}", render_diff_text(result));
+    }
+    Ok(())
+}
+
+fn cmd_info(api: &scat_core::core::search::SearchApi, json: bool) -> Result<()> {
+    let meta = api.index_metadata()?;
+
+    if json {
+        print_json(&meta);
+        return Ok(());
+    }
+
+    println!("Last indexed       : {}", meta.build_timestamp);
+    println!("Schema version (DB): {}", meta.schema_version);
+    println!("Schema version (app): {}", meta.current_schema_version);
+    Ok(())
+}
+
+fn cmd_audit(
+    api: &scat_core::core::search::SearchApi,
+    checks: &[String],
+    strict: bool,
+    stale_days: i64,
+    json: bool,
+) -> Result<()> {
+    let selected = (!checks.is_empty()).then_some(checks);
+    let result = api.audit(selected, stale_days)?;
+
+    if json {
+        print_json(&result);
+    } else {
+        println!("scat audit — {} findings", result.findings.len());
+        println!();
+        for finding in &result.findings {
+            println!(
+                "{:<5} {:<16} {} — {}",
+                finding.severity.to_uppercase(),
+                finding.check,
+                finding.logical_path,
+                finding.detail
+            );
+        }
+        if !result.findings.is_empty() {
+            println!();
+        }
+        println!(
+            "Summary: {} error, {} warn, {} info",
+            result.summary.error, result.summary.warn, result.summary.info
+        );
+    }
+
+    let exit_code = audit_exit_code(&result.summary, strict);
+    if exit_code != 0 {
+        process::exit(exit_code);
+    }
+    Ok(())
+}
+
+fn cmd_diff(
+    db_path: &std::path::Path,
+    against: Option<std::path::PathBuf>,
+    old: Option<std::path::PathBuf>,
+    new: Option<std::path::PathBuf>,
+    json: bool,
+) -> Result<()> {
+    if against.is_some() && (old.is_some() || new.is_some()) {
+        anyhow::bail!("Cannot combine --against with --old/--new.");
+    }
+    if old.is_some() != new.is_some() {
+        anyhow::bail!("Provide both --old and --new together.");
+    }
+
+    let (old_db, new_db) = match (old, new) {
+        (Some(old), Some(new)) => (old, new),
+        _ => {
+            let new_db = db_path.to_path_buf();
+            let old_db = against
+                .unwrap_or_else(|| std::path::PathBuf::from(format!("{}.1", db_path.display())));
+            if !old_db.exists() {
+                anyhow::bail!(
+                    "No previous snapshot found at {}. Run index again or pass --against / --old and --new.",
+                    old_db.display()
+                );
+            }
+            (old_db, new_db)
+        }
+    };
+
+    let diff = compare_catalogs(&old_db, &new_db)?;
+    if json {
+        print_json(&diff);
+    } else {
+        print_catalog_diff(&diff);
+    }
+    Ok(())
+}
+
+fn print_catalog_diff(diff: &CatalogDiff) {
+    println!("Added ({})", diff.added.len());
+    for row in &diff.added {
+        println!(
+            "  + {}  {}  {}",
+            row.logical_path,
+            json_display(&row.language),
+            json_display(&row.owner)
+        );
+    }
+
+    println!("\nRemoved ({})", diff.removed.len());
+    for row in &diff.removed {
+        println!(
+            "  - {}  {}  {}",
+            row.logical_path,
+            json_display(&row.language),
+            json_display(&row.owner)
+        );
+    }
+
+    println!("\nChanged ({})", diff.changed.len());
+    for row in &diff.changed {
+        println!("  ~ {}", row.logical_path);
+        for (field, values) in &row.fields {
+            println!(
+                "      {field}: {}  ->  {}",
+                json_display(&values[0]),
+                json_display(&values[1])
+            );
+        }
+        if !row.deps_added.is_empty() {
+            println!("      deps added:   {}", row.deps_added.join(", "));
+        }
+        if !row.deps_removed.is_empty() {
+            println!("      deps removed: {}", row.deps_removed.join(", "));
+        }
+        println!();
+    }
+}
+
+fn json_display(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => "-".to_string(),
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cmd_index(
+    scan_roots: &[PathBuf],
+    db_path: &Path,
+    logical_prefix: &str,
+    head_lines: usize,
+    ignore_files: &[PathBuf],
+    keep_copies: usize,
+    dry_run: bool,
+    config: scat_core::core::vc::VcConfig,
+    json: bool,
+    quiet: bool,
+    no_resume: bool,
+    force: bool,
+) -> Result<()> {
+    let effective_scan_roots: Vec<PathBuf> = if scan_roots.is_empty() {
+        config.scan_roots.clone()
+    } else {
+        scan_roots.to_vec()
+    };
+    if effective_scan_roots.is_empty() {
+        anyhow::bail!(
+            "No scan roots specified. Use --scan-root or add scan_roots to the config file."
+        );
+    }
+
+    // Start with CLI-supplied ignore files, then append a temp file for any
+    // inline patterns from the config.  The temp file must stay alive until
+    // after build_index returns, so we keep it in scope here.
+    let mut effective_ignore: Vec<PathBuf> = ignore_files.to_vec();
+    let _config_ignore_tmp: Option<tempfile::NamedTempFile> = if config.ignore_patterns.is_empty() {
+        None
+    } else {
+        use std::io::Write;
+        let mut tmp =
+            tempfile::NamedTempFile::new().with_context(|| "Failed to create temp ignore file")?;
+        for pattern in &config.ignore_patterns {
+            writeln!(tmp, "{pattern}")?;
+        }
+        effective_ignore.push(tmp.path().to_path_buf());
+        Some(tmp)
+    };
+
+    // Register Ctrl-C handler at the application entry point. The same signal
+    // is checked by pre-build change detection and the index build itself.
+    let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let shutdown_clone = std::sync::Arc::clone(&shutdown);
+        let _ = ctrlc::set_handler(move || {
+            shutdown_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+    }
+
+    // ---------------------------------------------------------------------------
+    // Change-detection: skip rebuild when nothing has changed.
+    // ---------------------------------------------------------------------------
+    if !force
+        && !dry_run
+        && db_path.exists()
+        && let Some(indexed_at_secs) = read_indexed_at(db_path)
+    {
+        let max_mtime =
+            max_mtime_in_roots_with_shutdown(&effective_scan_roots, &effective_ignore, &shutdown)
+                .with_context(|| "Failed to check scan root modification times")?;
+        if should_skip_catalog_rebuild(indexed_at_secs, max_mtime) {
+            if json {
+                print_json(&serde_json::json!({
+                    "up_to_date": true,
+                    "db_path": db_path.display().to_string(),
+                }));
+            } else {
+                println!("catalog is up to date — skipping rebuild");
+            }
+            return Ok(());
+        }
+    }
+
+    let opts = BuildOptions {
+        logical_prefix: logical_prefix.to_string(),
+        head_lines,
+        ignore_files: effective_ignore,
+        keep_copies,
+        dry_run,
+        vc_config: Some(config),
+        quiet: quiet || json,
+        no_resume,
+        shutdown: Some(shutdown),
+    };
+
+    let result = build_index(&effective_scan_roots, db_path, opts)
+        .with_context(|| format!("Failed to build index at {}", db_path.display()))?;
+
+    if json {
+        print_json(&serde_json::json!({
+            "scripts_indexed": result.scripts_indexed,
+            "dependencies_indexed": result.dependencies_indexed,
+            "db_path": result.db_path.display().to_string(),
+            "dry_run": result.dry_run,
+            "errors": result.errors.iter().map(|(p, e)| serde_json::json!({"path": p, "error": e})).collect::<Vec<_>>(),
+        }));
+    } else {
+        println!(
+            "Indexed {} scripts in total ({} dependencies) → {}{}",
+            result.scripts_indexed,
+            result.dependencies_indexed,
+            result.db_path.display(),
+            if dry_run { " (dry run)" } else { "" }
+        );
+        if !result.errors.is_empty() {
+            warn!(
+                error_count = result.errors.len(),
+                "file(s) failed during indexing"
+            );
+            for (path, err) in &result.errors {
+                warn!(path = %path, error = %err, "indexing file failed");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn should_skip_catalog_rebuild(indexed_at_secs: f64, max_mtime: Option<f64>) -> bool {
+    max_mtime.is_some_and(|mtime| mtime.floor() < indexed_at_secs)
+}
+
+/// Open the existing catalog database and return the `build_timestamp` as UNIX
+/// epoch seconds, or `None` if the DB cannot be read, has no metadata row, or
+/// has a schema-version mismatch (all of which should trigger a rebuild).
+fn read_indexed_at(db_path: &Path) -> Option<f64> {
+    use rusqlite::{Connection, OpenFlags};
+    use scat_core::core::db::SCHEMA_VERSION;
+
+    let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    let (ts, schema_ver): (Option<String>, i64) = conn
+        .query_row(
+            "SELECT build_timestamp, schema_version FROM index_metadata WHERE id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .ok()?;
+
+    // Schema mismatch → always rebuild.
+    if schema_ver != SCHEMA_VERSION {
+        return None;
+    }
+
+    let ts = ts?;
+    chrono::DateTime::parse_from_rfc3339(&ts)
+        .ok()
+        .map(|dt| dt.timestamp() as f64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        relative_age, render_revision_lines, render_revision_stats_lines, revisions_to_json,
+    };
+    use scat_core::core::db::JsonRow;
+    use scat_core::core::search::RevisionStats;
+
+    fn revision_row(
+        os_flavor: &str,
+        user: &str,
+        timestamp: &str,
+        age_seconds: Option<f64>,
+    ) -> JsonRow {
+        let mut row = JsonRow::new();
+        row.insert("logical_path".to_string(), "/catalog/scripts/foo.py".into());
+        row.insert("physical_path".to_string(), "/tmp/foo_checkout".into());
+        row.insert("revision_type".to_string(), "DEVELOP".into());
+        row.insert("os_flavor".to_string(), os_flavor.into());
+        row.insert("user".to_string(), user.into());
+        row.insert("timestamp".to_string(), timestamp.into());
+        row.insert(
+            "age_seconds".to_string(),
+            age_seconds
+                .map(serde_json::Value::from)
+                .unwrap_or(serde_json::Value::Null),
+        );
+        row
+    }
+
+    #[test]
+    fn render_revision_lines_groups_by_os_and_sorts_newest_first() {
+        let rows = vec![
+            revision_row("ZOS", "alice", "20240101_1000", Some(3_600.0)),
+            revision_row("LINUX", "jdoe", "20240102_0900", Some(7_200.0)),
+            revision_row("LINUX", "bob", "20240101_0900", Some(86_400.0)),
+        ];
+
+        let lines = render_revision_lines(rows);
+
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].contains("LINUX"));
+        assert!(lines[0].contains("jdoe"));
+        assert!(lines[1].contains("LINUX"));
+        assert!(lines[1].contains("bob"));
+        assert!(lines[2].contains("ZOS"));
+    }
+
+    #[test]
+    fn revisions_to_json_emits_structured_array() {
+        let rows = vec![revision_row("LINUX", "jdoe", "20240102_0900", Some(120.0))];
+
+        let value = revisions_to_json(rows);
+        let array = value.as_array().expect("revisions should be an array");
+
+        assert_eq!(array.len(), 1);
+        assert_eq!(array[0]["os_flavor"], "LINUX");
+        assert_eq!(array[0]["user"], "jdoe");
+        assert_eq!(array[0]["timestamp"], "20240102_0900");
+        assert_eq!(array[0]["age_seconds"], 120.0);
+    }
+
+    #[test]
+    fn query_uses_fts_excludes_path_like_queries() {
+        assert!(super::query_uses_fts("checkmc"));
+        assert!(!super::query_uses_fts("scripts/checkmc"));
+        assert!(!super::query_uses_fts("checkmc.py"));
+    }
+
+    #[test]
+    fn skip_rebuild_requires_existing_older_file_mtime() {
+        assert!(super::should_skip_catalog_rebuild(100.0, Some(99.9)));
+        assert!(!super::should_skip_catalog_rebuild(100.0, Some(100.0)));
+        assert!(!super::should_skip_catalog_rebuild(100.0, Some(100.1)));
+        assert!(!super::should_skip_catalog_rebuild(100.0, None));
+    }
+
+    #[test]
+    fn relative_age_clamps_negative_values() {
+        assert_eq!(relative_age(-120.0), "0m ago");
+    }
+
+    #[test]
+    fn render_revision_stats_lines_matches_catalog_stats_labels() {
+        let lines = render_revision_stats_lines(&RevisionStats {
+            scripts_with_active_checkouts: 12,
+            scripts_with_archive_entries: 47,
+            total_develop_revision_files: 18,
+            total_archive_revision_files: 134,
+            scripts_checked_out_by_multiple_users: 2,
+        });
+
+        assert_eq!(
+            lines,
+            vec![
+                "  Scripts with active checkouts: 12",
+                "  Scripts with archive entries: 47",
+                "  Total DEVELOP revision files: 18",
+                "  Total ARCHIVE revision files: 134",
+                "  Scripts checked out by >1 user: 2",
+            ]
+        );
+    }
+}

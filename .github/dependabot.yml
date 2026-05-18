@@ -1,0 +1,39 @@
+version: 2
+updates:
+  # Monitor Rust dependencies
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "friday"
+      time: "18:00"
+      timezone: "Etc/UTC"
+    assignees:
+      - "tjorim"
+    commit-message:
+      prefix: "deps"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "rust"
+
+  # Monitor GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "friday"
+      time: "18:00"
+      timezone: "Etc/UTC"
+    assignees:
+      - "tjorim"
+    commit-message:
+      prefix: "ci"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "github-actions"
+    ignore:
+      # dtolnay/rust-toolchain's tag IS the Rust version — must match rust-version in Cargo.toml
+      - dependency-name: "dtolnay/rust-toolchain"
+        update-types: ["version-update:semver-major", "version-update:semver-minor", "version-update:semver-patch"]

@@ -1,0 +1,129 @@
+name: Scat CI
+
+on:
+  push:
+    branches:
+      - main
+      - rust-rewrite
+      - feat/rust-phase-*
+  pull_request:
+    branches:
+      - main
+      - rust-rewrite
+      - feat/rust-phase-*
+  workflow_dispatch:
+  schedule:
+    - cron: "0 5 * * 1"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  msrv:
+    name: Rust MSRV
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Rust 1.88.0
+        uses: dtolnay/rust-toolchain@1.88.0
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+
+      - name: Check MSRV build
+        run: cargo check --locked --all-targets
+
+  test:
+    name: Rust tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Run tests
+        run: cargo test --locked
+
+  dependency-audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@cargo-audit
+
+      - name: Fail on high-severity advisories
+        run: |
+          cargo audit --json > audit.json
+          python - <<'PY'
+          import json
+          import sys
+
+          with open("audit.json", "r", encoding="utf-8") as fh:
+              report = json.load(fh)
+
+          high = []
+          for vuln in report.get("vulnerabilities", {}).get("list", []):
+              advisory = vuln.get("advisory", {})
+              severity = (advisory.get("severity") or "").lower()
+              if severity in {"high", "critical"}:
+                  high.append(
+                      {
+                          "id": advisory.get("id", "unknown"),
+                          "package": (vuln.get("package") or {}).get("name", "unknown"),
+                          "severity": severity,
+                          "title": advisory.get("title", ""),
+                      }
+                  )
+
+          if high:
+              print("High-severity advisories found:")
+              for advisory in high:
+                  print(
+                      f"- [{advisory['severity']}] {advisory['id']} "
+                      f"({advisory['package']}): {advisory['title']}"
+                  )
+              sys.exit(1)
+
+          print("No high-severity advisories found.")
+          PY
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@cargo-deny
+
+      - name: Check licenses and duplicate dependencies
+        run: cargo deny check licenses bans

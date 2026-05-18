@@ -1,0 +1,111 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+## [Completed] VC Revision Indexing and Catalog Audit Hardening (May 2026)
+
+### Catalog Schema and Indexer
+
+- **Indexed revisions table** — added first-class `revisions` storage for vc `DEVELOP` / `ARCHIVE` rows, including logical path, physical path, revision type, OS flavor, user, timestamp, and age.
+- **Revision-aware indexing** — grouped vc revision files under parent script logical paths during catalog builds and persisted revision rows alongside legacy checkout summaries.
+- **Schema v8 rollout** — bumped the catalog schema and made old-schema failures actionable with `re-index required (scat catalog build)` guidance.
+- **Shared catalog upgrade notes** — documented the required one-time `scat catalog build` after deploying schema v8 binaries.
+
+### Audit, Stats, and TUI
+
+- **DB-backed audit warnings** — moved catalog audit warning inference onto indexed SQLite revision state instead of fresh filesystem scans, so audit output reflects the built catalog.
+- **Revision-backed checkout reads** — moved user-facing `scat status`, `scat diff`, and checkout audit reads onto the indexed `revisions` table; `vc_checkouts` remains a derived compatibility summary.
+- **Revision statistics** — added optional `revisions` counters to `scat catalog stats` and JSON output, including active checkout scripts, archive-entry scripts, total revision files by type, and multi-user active checkouts.
+- **TUI revisions pane** — loads indexed revision rows through the existing background detail worker and groups real `DEVELOP` / `ARCHIVE` entries in the revisions pane.
+
+## [Completed] Export, Ignore Rules, Regex, and TUI Workers (May 2026)
+
+### CLI and Indexer
+
+- [#91](https://github.com/tjorim/scat/issues/91) **Export formats** — added CSV and JSON export support to `scat search` (#96)
+- [#92](https://github.com/tjorim/scat/issues/92) **Regex search** — added `--regex` search alongside full-text search, with coverage for regex matching behavior (#99)
+- [#93](https://github.com/tjorim/scat/issues/93) **Ignore patterns** — added `.catignore` discovery and explicit `--ignore-file` support to `scat catalog build` (#101)
+- [#95](https://github.com/tjorim/scat/issues/95) **MSRV policy** — documented Rust 1.88.0 as the minimum supported Rust version and added a locked `cargo check --all-targets` CI job for it
+
+### TUI
+
+- **Background search worker** — moved TUI searches off the render path with debounce, stale-result guards, and in-flight indicators (#102)
+- **Background detail worker** — replaced per-selection detail threads with a long-lived `DetailWorker` to reduce churn during result navigation (#109)
+
+## [Completed] Search, Show, and UX improvements (May 2026)
+
+### CLI
+
+- **`show`** — merged `inspect` into `show`; added `--fields` flag (à la `ps -eo`) with 13 available fields and a sensible default set; auto-resolves symlinks with a clear redirect note; human-readable size formatting
+- **`symlinks`** — now shows both directions (outbound target + inbound aliases); groups cleanly when neither applies; correctly handles unindexed targets
+- **`search`** — auto-routes to `INSTR`-based path search when query contains `/` or `.` (fixes FTS5 syntax errors); filename relevance re-sort for FTS5 results; symlinks grouped under their targets with `↳` sub-rows; path column truncates from the left so filenames stay visible
+
+### Infrastructure
+
+- [#49](https://github.com/tjorim/scat/issues/49) **`cargo clippy -D warnings`** enforced in CI (#75)
+- [#48](https://github.com/tjorim/scat/issues/48) **Integration tests** for core search, indexer, and vc checkout scanning (#76)
+- [#55](https://github.com/tjorim/scat/issues/55) **Structured tracing** and global `-v`/`-vv` verbosity (#77)
+- [#56](https://github.com/tjorim/scat/issues/56) **Indexing UX** — progress bar, file rate, Ctrl-C abort (#78)
+- [#51](https://github.com/tjorim/scat/issues/51) **Rich-style table rendering** — dynamic column widths, left-truncation for paths (#79)
+- [#59](https://github.com/tjorim/scat/issues/59) **Schema version validation** on `open_db` (#81)
+- [#57](https://github.com/tjorim/scat/issues/57) **`scat catalog diff`** — compare catalog snapshots across index runs (#84)
+- [#58](https://github.com/tjorim/scat/issues/58) **`scat catalog audit`** — 7 health checks, filtered execution, strict exit codes (#85)
+- [#69](https://github.com/tjorim/scat/issues/69) **Python AST function/class dependency graphs** extracted and persisted (#86)
+- **rustdoc coverage** enforced with `missing_docs` warnings (#88)
+
+## [Completed] Rust Migration (May 2026)
+
+Complete rewrite of scat's CLI and indexer from Python to Rust, producing cross-platform native binaries. Tracked in [#40](https://github.com/tjorim/scat/issues/40) and phased in [#35–#39](https://github.com/tjorim/scat/issues).
+
+### Phase 0: Integration Spike ([#35](https://github.com/tjorim/scat/issues/35))
+- Validated SQLite (rusqlite) with bundled FTS5
+- Validated tree-sitter (Python + Bash grammars)
+- Validated YAML/JSON serialization (serde ecosystem)
+
+### Phase 1: Core Layer + CLI ([#36](https://github.com/tjorim/scat/issues/36))
+- Implemented SearchApi (full-text search, dependency graph, related scripts)
+- Implemented database layer with schema migration support
+- Implemented path resolution (logical → physical path mapping)
+- Implemented 11 CLI commands: `search`, `show`, `status`, `explain`, `depends`, `stats`, `symlinks`, `info`, `vc`, `index`, `tui`
+- Added JSON output support (`--json` flag)
+
+### Phase 2: Indexer ([#37](https://github.com/tjorim/scat/issues/37))
+- Implemented file scanner (recursive directory traversal)
+- Implemented metadata extractor (headers, docstrings, sidecar YAML)
+- Implemented AST-based dependency detection (Python imports)
+- Implemented tree-sitter-based dependency detection (shell sourcing)
+- Implemented atomic indexing (backup rotation, transactional updates)
+- Added vc config YAML/JSON support
+
+### Phase 3: CI/CD, Deployment, and Cleanup ([#38](https://github.com/tjorim/scat/issues/38))
+- Set up GitHub Actions workflows for automated builds
+- Configured Linux cross-compilation (x86_64-unknown-linux-musl with musl-tools)
+- Configured Windows builds (x86_64-pc-windows-msvc)
+- Added smoke tests for database compatibility
+- Added binary size reporting
+- Added artifact uploads for release distribution
+- **Cleanup complete**: Removed `wheelhouse/`, `third_party/`, `scat.sh`, `requirements.txt`, `native/`
+
+### Phase 4: TUI ([#39](https://github.com/tjorim/scat/issues/39))
+- Implemented multi-pane Ratatui TUI with live search
+- Implemented browse mode: search box + results + metadata + preview + related scripts
+- Implemented detail mode: full script content with scrolling
+- Added vim keybindings (j/k, g/G, Ctrl+u/d, Ctrl+b/f, etc.)
+- Added Tab/Shift+Tab pane navigation
+- Added terminal state management (raw mode, alternate screen)
+- Fixed `--mapping` flag to properly resolve and display native OS paths ([#47](https://github.com/tjorim/scat/issues/47), PR #74)
+
+## Technical Decisions
+
+- **CLI Framework**: `clap` (derive macros for ergonomic CLI definition)
+- **Database**: `rusqlite` with bundled SQLite + FTS5 (no external SQLite dependency)
+- **Serialization**: `serde` + `serde_json` + `yaml_serde` (official YAML org)
+- **Dependency Detection**: Tree-sitter + regex (AST-aware for Python imports, pattern-based for shell)
+- **Terminal UI**: `ratatui` + `crossterm` (cross-platform, reactive, vim-keybindings)
+- **YAML**: `yaml_serde` (actively maintained by official YAML organization)
+
+## Known Limitations
+
+- TUI shows first 500 lines of script content (configurable via `PREVIEW_LINES`)
+- Search limited to 200 results (configurable via `RESULT_LIMIT`)
+- No incremental indexing (full rebuild required)
