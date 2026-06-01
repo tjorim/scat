@@ -191,7 +191,7 @@ jobs:
           )
           conn.execute(
               "INSERT INTO index_metadata (id, build_timestamp, schema_version) VALUES (1, ?, ?)",
-              ("2026-05-07T00:00:00Z", 8),
+              ("2026-06-01T00:00:00Z", 9),
           )
           conn.commit()
           conn.close()
@@ -369,7 +369,7 @@ jobs:
           )
           conn.execute(
               "INSERT INTO index_metadata (id, build_timestamp, schema_version) VALUES (1, ?, ?)",
-              ("2026-05-07T00:00:00Z", 8),
+              ("2026-06-01T00:00:00Z", 9),
           )
           conn.commit()
           conn.close()
