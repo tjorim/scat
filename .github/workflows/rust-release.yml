@@ -4,15 +4,11 @@ on:
   push:
     branches:
       - main
-      - rust-rewrite
-      - feat/rust-phase-*
     tags:
       - "v*"
   pull_request:
     branches:
       - main
-      - rust-rewrite
-      - feat/rust-phase-*
   workflow_dispatch:
 
 concurrency:
