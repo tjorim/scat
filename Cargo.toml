@@ -37,7 +37,7 @@ indicatif = "0.18"
 ctrlc = { version = "3.5", features = ["termination"] }
 comfy-table = "7"
 unicode-width = "0.2"
-ignore = "0.4.25"
+ignore = "0.4.26"
 similar = "3"
 
 [dev-dependencies]
