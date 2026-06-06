@@ -31,8 +31,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Set up Rust 1.88.0
-        uses: dtolnay/rust-toolchain@1.88.0
+      - name: Set up Rust 1.89.0
+        uses: dtolnay/rust-toolchain@1.89.0
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
