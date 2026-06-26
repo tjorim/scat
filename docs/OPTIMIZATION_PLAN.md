@@ -38,12 +38,17 @@ Here is my detailed review of the current codebase.
 - **Stale schema comment.** `src/core/db.rs:15` labels the DDL block
   `DDL (schema version 8)` while `SCHEMA_VERSION = 9` (`db.rs:9`). Comment and
   constant have drifted.
-- **Dead schema: `vc_checkouts`.** The table is created (`db.rs:87`) and written
-  by the indexer (`indexer/builder/pipeline.rs`), but *no read path queries it* —
-  all user-facing revision reads go through the first-class `revisions` table
-  (the DDL comment itself says "prefer the first-class revisions table below").
-  This is wasted write + index work on every nightly build and a schema-surface
-  trap for future maintainers.
+- **Redundant intermediate table: `vc_checkouts`.** The table is created
+  (`db.rs:87`) and written by the indexer (`indexer/builder/pipeline.rs`). No
+  *client query* reads it — all user-facing revision reads go through the
+  first-class `revisions` table (the DDL comment itself says "prefer the
+  first-class revisions table below"). Its one remaining consumer is the
+  indexer's own `apply_checkout_summaries` (`pipeline.rs:407`), which `GROUP`s it
+  to populate the `scripts.checkout_*` columns. Since `revisions` already holds
+  the same per-checkout rows (filterable by `revision_type = 'DEVELOP'`),
+  `vc_checkouts` is a redundant intermediate: extra write + index work each
+  nightly build and a second source of truth for the same data. Retiring it means
+  repointing `apply_checkout_summaries` at `revisions`, not simply deleting it.
 - **Test-only public API.** `search.rs` exposes both `_with_filters` methods and
   their thin non-filter wrappers (`search`, `search_by_path`, `search_by_regex`,
   `search_scripts_by_function`, `get_callers_of`) plus `db::fts_query`. Grep
@@ -265,15 +270,23 @@ green.
   - **Success Criteria**: `tui.rs` materially smaller; all TUI tests pass;
     rendering unchanged.
 
-- [ ] **Step 10: Retire the unused `vc_checkouts` table**
-  - **Task**: Stop writing the derived `vc_checkouts` summary (confirm via grep
-    that nothing reads it), drop it from the DDL, and bump `SCHEMA_VERSION`
-    (9 → 10). Because clients reject mismatched schemas and the indexer is
-    CRON-only, this is a clean re-index, not a live migration — document it.
+- [ ] **Step 10: Retire the redundant `vc_checkouts` table**
+  - **Task**: Stop writing the derived `vc_checkouts` summary, drop it from the
+    DDL, and bump `SCHEMA_VERSION` (9 → 10). The table's only consumer is the
+    indexer's `apply_checkout_summaries` (`pipeline.rs:407`), which uses it to
+    fill the `scripts.checkout_*` columns — so this step **must** repoint that
+    `UPDATE` at the `revisions` table, grouping rows where
+    `revision_type = 'DEVELOP'` (the same predicate the client `checkout_status`
+    query already uses). Dropping the table without that refactor breaks indexing
+    with a "no such table: vc_checkouts" error. Because clients reject mismatched
+    schemas and the indexer is CRON-only, this is a clean re-index, not a live
+    migration — document it.
   - **Files**:
     - `src/core/db.rs`: remove the `vc_checkouts` DDL + its index; bump
       `SCHEMA_VERSION`.
-    - `src/indexer/builder/pipeline.rs`: remove the write path.
+    - `src/indexer/builder/pipeline.rs`: remove the `vc_checkouts` write path
+      **and** rewrite `apply_checkout_summaries` to `GROUP` `revisions`
+      (`WHERE revision_type = 'DEVELOP'`) instead of `vc_checkouts`.
     - `CHANGELOG.md`: note the schema bump + "re-index required".
   - **Step Dependencies**: Steps 1, 8 (avoids churn against moved code).
   - **User Instructions**: After deploy, the nightly CRON job must run
