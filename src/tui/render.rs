@@ -136,14 +136,16 @@ fn draw_detail_view(frame: &mut Frame<'_>, app: &mut TuiApp) {
         Paragraph::new(Line::from(vec![
             hint_key("d"),
             Span::raw(" diff  "),
+            hint_key("v"),
+            Span::raw(" view catalog  "),
+            hint_key("V"),
+            Span::raw(" view source  "),
             hint_key("Esc/Backspace"),
             Span::raw(" back  "),
             hint_key("j/k"),
             Span::raw(" scroll  "),
             hint_key("Ctrl+u/d"),
             Span::raw(" half-page  "),
-            hint_key("Ctrl+b/f"),
-            Span::raw(" page  "),
             hint_key("g"),
             Span::raw(" top  "),
             hint_key("q"),
@@ -421,12 +423,18 @@ fn draw_preview(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
     } else if app.cached_preview.is_empty() && app.detail.is_some() {
         (
             Cow::Borrowed(""),
-            format!("Preview (line {})", app.preview_scroll.saturating_add(1)),
+            format!(
+                "Catalog preview (line {})",
+                app.preview_scroll.saturating_add(1)
+            ),
         )
     } else {
         (
             Cow::Borrowed(app.cached_preview.as_str()),
-            format!("Preview (line {})", app.preview_scroll.saturating_add(1)),
+            format!(
+                "Catalog preview (line {})",
+                app.preview_scroll.saturating_add(1)
+            ),
         )
     };
     let text: Text = if !app.detail_loading && content.is_empty() {
@@ -741,7 +749,10 @@ fn draw_footer(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
         Span::raw(" scroll"),
         sep.clone(),
         hint_key("v"),
-        Span::raw(" view"),
+        Span::raw(" view catalog"),
+        sep.clone(),
+        hint_key("V"),
+        Span::raw(" view source"),
         sep.clone(),
     ];
     if app.fullscreen {

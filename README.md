@@ -79,6 +79,15 @@ This tool provides a **single searchable index** without:
 - Results list with script preview
 - Metadata, checkout state, and related scripts panes
 - Keyboard-first navigation
+- Open the full selected script in a read-only external viewer:
+  - `v` — view the **indexed catalog content** (`scripts.content`, exactly what
+    the preview/search show), written to a temp file with the original filename
+  - `V` — view the **live filesystem source** resolved through the configured
+    path mapping (fails clearly when no mapping resolves the path)
+  - The viewer command is taken from `$SCAT_EDITOR`, then `$VISUAL`, then
+    `$EDITOR`, falling back to `view`/`vim -R`/`vi -R`/`less` (or `notepad` on
+    Windows). Vim-compatible editors are opened read-only so you can search with
+    `/` without accidentally editing.
 
 Example commands:
 ```bash

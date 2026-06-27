@@ -12,6 +12,35 @@ pub(super) struct CatalogView {
     pub(super) content: String,
 }
 
+/// What the external read-only viewer should open.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ViewTarget {
+    /// Indexed catalog content from `scripts.content`, written to a temporary
+    /// file so it matches exactly what the TUI/search are showing.
+    Catalog(CatalogView),
+    /// The live filesystem source file, resolved through the path mapping.
+    LiveSource {
+        logical_path: String,
+        native_path: PathBuf,
+    },
+}
+
+/// Open `target` read-only in an external viewer/editor.
+///
+/// For catalog content this first materializes a temporary file (keeping the
+/// script's filename/extension); the temp directory is held alive for the
+/// duration of the viewer process. For live source it opens the resolved
+/// filesystem path directly.
+pub(super) fn open_target(target: &ViewTarget) -> Result<()> {
+    match target {
+        ViewTarget::Catalog(view) => {
+            let (_dir, path) = write_catalog_view_file(view)?;
+            open_readonly(&path)
+        }
+        ViewTarget::LiveSource { native_path, .. } => open_readonly(native_path),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ViewerCommand {
     program: String,
