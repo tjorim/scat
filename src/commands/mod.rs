@@ -133,7 +133,9 @@ fn sort_by_name_relevance(
     let q = query.to_lowercase();
     results.sort_by_cached_key(|row| {
         let path = ScriptView::new(row).logical_path();
-        let basename = path.rsplit('/').next().unwrap_or(path);
+        // Split on both separators so basenames resolve correctly even if a
+        // path carries Windows-style backslashes.
+        let basename = path.rsplit(['/', '\\']).next().unwrap_or(path);
         let stem = basename
             .rsplit_once('.')
             .map(|(s, _)| s)
