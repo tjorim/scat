@@ -218,7 +218,7 @@ constraints, vendored wheels, and the `scat.sh` bootstrap script.
 
 ### Features
 
-- **CLI**: 11 commands (search, show, status, explain, depends, stats, symlinks, info, vc, index, tui)
+- **CLI**: Commands for search, inspection, dependencies, symlinks, diffs, vc pass-through, TUI browsing, and catalog management (`catalog build/stats/info/audit/diff`)
 - **Indexer**: Metadata extraction, dependency detection (AST + tree-sitter), atomic operations
 - **TUI**: Multi-pane navigation with search, results, metadata, preview, and related scripts
 - **Cross-compilation**: CI builds for Linux (musl) and Windows (MSVC)

@@ -42,6 +42,9 @@ fn main() {
 }
 
 fn run(cli: Cli) -> Result<()> {
+    let no_color_env = std::env::var_os("NO_COLOR");
+    let no_color = cli::resolve_no_color(cli.no_color, no_color_env.as_deref());
+
     // Load config early; provides db_path fallback and index settings.
     let scat_config =
         load_vc_config(cli.config.as_deref()).with_context(|| "Failed to load config")?;
@@ -86,7 +89,7 @@ fn run(cli: Cli) -> Result<()> {
             return tui::run(db_path, resolver);
         }
         Commands::Catalog { command } => {
-            return cmd_catalog(command, db_path, cli.no_color, scat_config);
+            return cmd_catalog(command, db_path, no_color, scat_config);
         }
         _ => {}
     }
@@ -131,7 +134,7 @@ fn run(cli: Cli) -> Result<()> {
                     limit,
                     fields: &fields,
                     output,
-                    no_color: cli.no_color,
+                    no_color,
                 },
             )
         }
@@ -148,9 +151,9 @@ fn run(cli: Cli) -> Result<()> {
             scat_config.configured(),
             functions,
         ),
-        Commands::Status { path, all, output } => cmd_status(&api, path, all, output, cli.no_color),
-        Commands::Deps { path, output } => cmd_deps(&api, &path, output, cli.no_color),
-        Commands::Symlinks { path, output } => cmd_symlinks(&api, &path, output, cli.no_color),
+        Commands::Status { path, all, output } => cmd_status(&api, path, all, output, no_color),
+        Commands::Deps { path, output } => cmd_deps(&api, &path, output, no_color),
+        Commands::Symlinks { path, output } => cmd_symlinks(&api, &path, output, no_color),
         Commands::Diff {
             path: Some(logical_path),
             against,
@@ -424,10 +427,7 @@ fn cmd_show(
 ) -> Result<()> {
     let raw = match api.get_script(path)? {
         Some(s) => s,
-        None => {
-            error!(path = %path, "script not found");
-            process::exit(1);
-        }
+        None => anyhow::bail!("script '{path}' not found in catalog"),
     };
 
     // If the script is a symlink, resolve to the target and show that instead.
@@ -700,10 +700,7 @@ fn cmd_deps(
 ) -> Result<()> {
     let _ = match api.get_script(path)? {
         Some(s) => s,
-        None => {
-            error!(path = %path, "script not found");
-            process::exit(1);
-        }
+        None => anyhow::bail!("script '{path}' not found in catalog"),
     };
 
     if output == OutputFormat::Json {
@@ -1212,10 +1209,25 @@ fn read_indexed_at(db_path: &Path) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        relative_age, render_revision_lines, render_revision_stats_lines, revisions_to_json,
+        cmd_deps, cmd_show, relative_age, render_revision_lines, render_revision_stats_lines,
+        revisions_to_json,
     };
-    use scat_core::core::db::JsonRow;
-    use scat_core::core::search::RevisionStats;
+    use scat_core::core::db::{JsonRow, SCHEMA_VERSION, create_db};
+    use scat_core::core::search::{RevisionStats, SearchApi};
+    use tempfile::NamedTempFile;
+
+    fn make_api() -> (SearchApi, NamedTempFile) {
+        let file = NamedTempFile::new().unwrap();
+        let conn = create_db(file.path()).unwrap();
+        conn.execute(
+            "INSERT INTO index_metadata (id, build_timestamp, schema_version)
+             VALUES (1, '2024-01-01T00:00:00', ?1)",
+            rusqlite::params![SCHEMA_VERSION],
+        )
+        .unwrap();
+
+        (SearchApi::new(conn), file)
+    }
 
     fn revision_row(
         os_flavor: &str,
@@ -1289,6 +1301,42 @@ mod tests {
     #[test]
     fn relative_age_clamps_negative_values() {
         assert_eq!(relative_age(-120.0), "0m ago");
+    }
+
+    #[test]
+    fn cmd_show_missing_script_returns_plain_error() {
+        let (api, _file) = make_api();
+        let err = cmd_show(
+            &api,
+            "/catalog/scripts/missing.py",
+            &[],
+            super::OutputFormat::Table,
+            false,
+            false,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "script '/catalog/scripts/missing.py' not found in catalog"
+        );
+    }
+
+    #[test]
+    fn cmd_deps_missing_script_returns_plain_error() {
+        let (api, _file) = make_api();
+        let err = cmd_deps(
+            &api,
+            "/catalog/scripts/missing.py",
+            super::OutputFormat::Table,
+            true,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "script '/catalog/scripts/missing.py' not found in catalog"
+        );
     }
 
     #[test]

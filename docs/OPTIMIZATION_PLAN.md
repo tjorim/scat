@@ -144,7 +144,7 @@ green.
 
 ## Documentation & Quick Wins
 
-- [ ] **Step 1: Fix stale schema-version comment and README command list**
+- [x] **Step 1: Fix stale schema-version comment and README command list**
   - **Task**: Correct the DDL banner comment to stop referencing "version 8",
     and update the README technical-stack command list to match the real CLI
     surface (`search/show/status/deps/symlinks/diff/vc/tui` +
@@ -159,7 +159,7 @@ green.
     that disagrees with `SCHEMA_VERSION`; `README` command names all resolve to
     real `clap` subcommands.
 
-- [ ] **Step 2: Honor the `NO_COLOR` environment variable**
+- [x] **Step 2: Honor the `NO_COLOR` environment variable**
   - **Task**: Treat color as disabled when `--no-color` is passed *or* the
     `NO_COLOR` env var is present and non-empty. Compute this once in `main`/CLI
     and thread the existing `no_color: bool` through unchanged.
@@ -173,7 +173,7 @@ green.
     a new unit test asserts the resolution logic. Existing `--no-color` tests
     still pass.
 
-- [ ] **Step 3: Clean user-facing "not found" messages**
+- [x] **Step 3: Clean user-facing "not found" messages**
   - **Task**: Replace the `error!(...) + process::exit(1)` pattern in `cmd_show`
     and `cmd_deps` with returned `anyhow` errors carrying a plain message
     (`script '{path}' not found in catalog`). Let the existing `main()` funnel

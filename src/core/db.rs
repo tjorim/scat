@@ -12,7 +12,7 @@ pub const SCHEMA_VERSION: i64 = 9;
 pub type JsonRow = serde_json::Map<String, serde_json::Value>;
 
 // ---------------------------------------------------------------------------
-// DDL (schema version 8)
+// DDL (see SCHEMA_VERSION)
 // ---------------------------------------------------------------------------
 
 const DDL: &str = r#"
