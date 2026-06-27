@@ -104,7 +104,7 @@ fn run_search(api: &SearchApi, query: &str, limit: usize) -> Result<Vec<JsonRow>
             .list_scripts(None, None, None, limit, 0)
             .context("failed to list scripts");
     }
-    api.search(query, limit, None)
+    api.search_with_filters(query, limit, None, None, None)
         .context("failed to run search query")
 }
 

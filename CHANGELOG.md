@@ -2,6 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Catalog Schema and Indexer
+
+- **Schema v10 cleanup** — retired the redundant `vc_checkouts` table and now derives script checkout summaries from `revisions` rows with `revision_type = 'DEVELOP'`. Deployments must run `scat catalog build --force` once so old schema-9 catalogs are rebuilt.
+
+### CLI and Output
+
+- **`NO_COLOR` support** — `scat` now honors the [`NO_COLOR`](https://no-color.org/) environment variable in addition to the `--no-color` flag when deciding whether to colorize output.
+- **Clearer not-found errors** — `scat show` and `scat deps` now report a missing script through the central error path with a clean message instead of a raw `tracing` log line followed by a bare `exit(1)`.
+
+### TUI
+
+- **Read-only full-script viewer** ([#15](https://github.com/tjorim/scat/issues/15)) — added a TUI action to open the full selected script in an external read-only viewer/editor, bypassing the `PREVIEW_LINES` preview cap.
+  - `v` opens the **indexed catalog content** (`scripts.content`) written to a temp file that preserves the original filename/extension for syntax highlighting.
+  - `V` opens the **live filesystem source** resolved through the configured path mapping (falling back to the logical path when it is already a real file), and fails clearly when the source file cannot be found. The existence check runs on a background worker (with stale-request draining) to keep the render loop responsive on slow network mounts.
+  - Viewer selection prefers `$SCAT_EDITOR`, then `$VISUAL`, then `$EDITOR`, with a `view`/`vim -R`/`vi -R`/`less` (or `notepad`) fallback; Vim-compatible editors are forced into read-only mode.
+  - Clarified the preview pane title and footer hints so the catalog-vs-live-source distinction is explicit.
+  - When the indexed script is longer than the `PREVIEW_LINES` cap, the preview title shows `first 500 of N lines, v/V for full`, so it is clear the preview is clipped and the full-script viewer is available.
+- **Scroll clamping** — the preview, detail, diff, and revisions panes now clamp their scroll offset to the content height, removing the misleading blank-space scrolling past the end of shorter scripts.
+
 ## [Completed] VC Revision Indexing and Catalog Audit Hardening (May 2026)
 
 ### Catalog Schema and Indexer

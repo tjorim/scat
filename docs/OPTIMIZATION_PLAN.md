@@ -245,7 +245,7 @@ green.
 
 ## Structure & Schema
 
-- [ ] **Step 8: Split command handlers out of `main.rs`**
+- [x] **Step 8: Split command handlers out of `main.rs`**
   - **Task**: Move the `cmd_*` handlers and their presentation helpers into a new
     `src/commands/` module tree (e.g. `commands/search.rs`, `commands/show.rs`,
     `commands/catalog.rs`, `commands/diff.rs`), leaving `main.rs` as entry point +
@@ -258,7 +258,7 @@ green.
   - **Success Criteria**: `main.rs` under ~300 lines; `cargo test` green; no
     behavior change.
 
-- [ ] **Step 9: Split TUI rendering helpers out of `tui.rs`**
+- [x] **Step 9: Split TUI rendering helpers out of `tui.rs`**
   - **Task**: Move the detail/preview line builders and small pure formatters
     (`detail_lines`, `warning_messages`, `json_string_array`, `field_line`,
     `section`, …) into the existing `tui/render.rs` (or a new `tui/detail.rs`),
@@ -270,7 +270,7 @@ green.
   - **Success Criteria**: `tui.rs` materially smaller; all TUI tests pass;
     rendering unchanged.
 
-- [ ] **Step 10: Retire the redundant `vc_checkouts` table**
+- [x] **Step 10: Retire the redundant `vc_checkouts` table**
   - **Task**: Stop writing the derived `vc_checkouts` summary, drop it from the
     DDL, and bump `SCHEMA_VERSION` (9 → 10). The table's only consumer is the
     indexer's `apply_checkout_summaries` (`pipeline.rs:407`), which uses it to
@@ -298,7 +298,7 @@ green.
 
 ## Lower-Priority Polish
 
-- [ ] **Step 11: Tidy the test-only public API surface**
+- [x] **Step 11: Tidy the test-only public API surface**
   - **Task**: For the non-filter convenience wrappers used only by tests
     (`search`, `search_by_path`, `search_by_regex`, `search_scripts_by_function`,
     `get_callers_of`, `db::fts_query`), either (a) update the tests to call the
@@ -311,7 +311,7 @@ green.
   - **Success Criteria**: `cargo test` passes; public API has no undocumented
     test-only methods; `missing_docs` stays clean.
 
-- [ ] **Step 12: Replace `which_vc` subprocess lookup**
+- [x] **Step 12: Replace `which_vc` subprocess lookup**
   - **Task**: Resolve the vc executable by scanning `PATH` directly
     (honoring `PATHEXT` on Windows) instead of spawning `which`/`where`. Remove
     the `vc_exe.unwrap()` by restructuring `cmd_vc` to bind the resolved path in
