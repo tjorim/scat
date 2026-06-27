@@ -372,7 +372,7 @@ fn draw_metadata(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
         Line::from(vec![
             Span::styled("Contribs  ", detail::label_style()),
             Span::raw(if app.contributors.is_empty() {
-                "-".to_string()
+                "—".to_string()
             } else {
                 app.contributors.join(", ")
             }),
@@ -559,7 +559,7 @@ fn draw_functions(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
                     "  "
                 };
                 let doc = if function.docstring.is_empty() {
-                    "-".to_string()
+                    "—".to_string()
                 } else {
                     function.docstring.clone()
                 };

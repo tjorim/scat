@@ -19,7 +19,7 @@ pub(super) fn detail_lines(app: &TuiApp) -> Vec<Line<'static>> {
     let size = view
         .size()
         .map(|n| n.to_string())
-        .unwrap_or_else(|| "-".to_string());
+        .unwrap_or_else(|| "—".to_string());
     let mut lines = vec![
         section("Script"),
         field_line("Path", view.logical_path().to_string()),
@@ -88,20 +88,20 @@ pub(super) fn detail_lines(app: &TuiApp) -> Vec<Line<'static>> {
 }
 
 /// Format a `scripts` row field with the [`row_display`] semantics used by the
-/// detail/metadata panes (numbers stringified, empty values shown as `-`).
+/// detail/metadata panes (numbers stringified, empty values shown as `—`).
 ///
 /// Retained for row shapes that are not `scripts` rows (for example the
 /// `revisions` join rows rendered in the checkouts section).
 pub(super) fn display_field(row: &JsonRow, key: &str) -> String {
-    row_display(row, key, "-")
+    row_display(row, key, "—")
 }
 
-/// Substitute `-` for an empty string, otherwise return the value owned.
+/// Substitute `—` for an empty string, otherwise return the value owned.
 ///
 /// Matches [`row_display`] for the text `scripts` columns shown in the panes.
 pub(super) fn display_text(value: &str) -> String {
     if value.is_empty() {
-        "-".to_string()
+        "—".to_string()
     } else {
         value.to_string()
     }

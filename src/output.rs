@@ -204,9 +204,9 @@ pub(crate) fn json_script_field(view: ScriptView, field: &str) -> serde_json::Va
         "indexed" => cloned(view.indexed_at_value()),
         "symlink" => cloned(view.symlink_target_value()),
         "mtime" => cloned(view.mtime_value()),
-        "tags" => view.list_value_or_null(ListField::Tags),
-        "entry_points" => view.list_value_or_null(ListField::EntryPoints),
-        "related" => view.list_value_or_null(ListField::Related),
+        "tags" => view.list_value_or_empty(ListField::Tags),
+        "entry_points" => view.list_value_or_empty(ListField::EntryPoints),
+        "related" => view.list_value_or_empty(ListField::Related),
         _ => serde_json::Value::Null,
     }
 }
@@ -616,5 +616,21 @@ mod tests {
         assert_eq!(canonical.get("path"), Some(&json!("/foo/bar.py")));
         assert_eq!(canonical.get("checkout_user"), Some(&json!("alice")));
         assert_eq!(canonical.get("checkout_os"), Some(&json!("linux")));
+    }
+
+    #[test]
+    fn json_export_uses_empty_array_for_absent_list_fields() {
+        // A row with no tags/entry_points/related columns must still serialize
+        // those list fields as `[]`, matching the catalog-diff output rather
+        // than emitting `null`.
+        let mut row = scat_core::core::db::JsonRow::new();
+        row.insert("logical_path".into(), json!("/catalog/scripts/bare.py"));
+        let rows = script_rows_to_json(
+            &[row],
+            &["tags".into(), "entry_points".into(), "related".into()],
+        );
+        assert_eq!(rows[0].get("tags"), Some(&json!([])));
+        assert_eq!(rows[0].get("entry_points"), Some(&json!([])));
+        assert_eq!(rows[0].get("related"), Some(&json!([])));
     }
 }

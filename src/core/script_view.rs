@@ -184,21 +184,11 @@ impl<'a> ScriptView<'a> {
             .unwrap_or_default()
     }
 
-    /// Parse a list column into a JSON value, or [`Value::Null`] when missing or
-    /// unparseable.
-    ///
-    /// Preserves the raw decoded value (including non-string array elements),
-    /// matching the JSON export semantics.
-    pub fn list_value_or_null(&self, field: ListField) -> Value {
-        self.row
-            .get(field.column())
-            .and_then(Value::as_str)
-            .and_then(|raw| serde_json::from_str(raw).ok())
-            .unwrap_or(Value::Null)
-    }
-
     /// Parse a list column into a JSON array value, falling back to an empty
     /// array when the column is missing, unparseable, or not an array.
+    ///
+    /// A list field always serializes as a list — JSON callers share this so the
+    /// `show`, `search`, and `diff` outputs agree on `[]` for an absent list.
     pub fn list_value_or_empty(&self, field: ListField) -> Value {
         self.row
             .get(field.column())
@@ -349,10 +339,10 @@ mod tests {
     }
 
     #[test]
-    fn list_value_variants_differ_on_fallback() {
+    fn list_value_falls_back_to_empty_array() {
         let row = JsonRow::new();
         let view = ScriptView::new(&row);
-        assert_eq!(view.list_value_or_null(ListField::Tags), Value::Null);
+        // An absent list column serializes as `[]`, never `null`.
         assert_eq!(
             view.list_value_or_empty(ListField::Tags),
             Value::Array(Vec::new())

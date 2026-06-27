@@ -13,6 +13,7 @@ All notable changes to this project will be documented in this file.
 - **`NO_COLOR` support** — `scat` now honors the [`NO_COLOR`](https://no-color.org/) environment variable in addition to the `--no-color` flag when deciding whether to colorize output.
 - **Clearer not-found errors** — `scat show` and `scat deps` now report a missing script through the central error path with a clean message instead of a raw `tracing` log line followed by a bare `exit(1)`.
 - **Cross-platform basename ranking** — search result name-relevance ranking now splits on both `/` and `\` so basenames resolve correctly for paths carrying Windows-style separators.
+- **Consistent list-field JSON** — `tags`, `entry_points`, and `related` now always serialize as a JSON array in `scat show`/`scat search` output: an absent list renders as `[]` instead of `null`, matching the existing `scat diff` behavior.
 
 ### TUI
 
@@ -24,6 +25,7 @@ All notable changes to this project will be documented in this file.
   - Clarified the preview pane title and footer hints so the catalog-vs-live-source distinction is explicit.
   - When the indexed script is longer than the `PREVIEW_LINES` cap, the preview title shows `first 500 of N lines, v/V for full`, so it is clear the preview is clipped and the full-script viewer is available.
 - **Scroll clamping** — the preview, detail, diff, and revisions panes now clamp their scroll offset to the content height, removing the misleading blank-space scrolling past the end of shorter scripts.
+- **Consistent empty-field placeholder** — the detail/metadata/functions panes now show an em dash (`—`) for empty values, matching the placeholder already used across the CLI table, `show`, and `status` output instead of a plain hyphen.
 
 ### Internal
 
