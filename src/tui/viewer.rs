@@ -197,10 +197,7 @@ mod tests {
 
         let args = args_with_readonly(&command, std::path::Path::new("foo.py"));
 
-        assert_eq!(
-            args,
-            vec![OsString::from("-R"), OsString::from("foo.py")]
-        );
+        assert_eq!(args, vec![OsString::from("-R"), OsString::from("foo.py")]);
     }
 
     #[test]
@@ -213,10 +210,7 @@ mod tests {
 
         let args = args_with_readonly(&command, std::path::Path::new("foo.py"));
 
-        assert_eq!(
-            args,
-            vec![OsString::from("-R"), OsString::from("foo.py")]
-        );
+        assert_eq!(args, vec![OsString::from("-R"), OsString::from("foo.py")]);
     }
 
     #[test]
