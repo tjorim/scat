@@ -20,6 +20,7 @@ use scat_core::core::vc::compare_revision_rows;
 mod detail;
 mod detail_worker;
 mod diff_worker;
+mod file_check_worker;
 mod render;
 mod search_worker;
 mod viewer;
@@ -29,6 +30,7 @@ use self::detail_worker::{
     FunctionItem,
 };
 use self::diff_worker::{DiffRequest, DiffResponse, DiffWorker};
+use self::file_check_worker::{FileCheckRequest, FileCheckResponse, FileCheckWorker};
 use self::render::draw;
 use self::search_worker::{SearchRequest, SearchWorker};
 
@@ -105,6 +107,9 @@ struct TuiApp {
     fullscreen: bool,
     tick: u64,
     pending_view: Option<viewer::ViewTarget>,
+    file_check_worker: FileCheckWorker,
+    inflight_filecheck_id: Option<u64>,
+    next_filecheck_id: u64,
 }
 
 impl TuiApp {
@@ -156,6 +161,9 @@ impl TuiApp {
             fullscreen: false,
             tick: 0,
             pending_view: None,
+            file_check_worker: FileCheckWorker::new()?,
+            inflight_filecheck_id: None,
+            next_filecheck_id: 0,
         };
         app.dispatch_query()?;
         Ok(app)
@@ -772,14 +780,80 @@ impl TuiApp {
     }
 
     fn queue_live_source_view(&mut self) {
-        match self.live_source_target() {
-            Ok(target) => {
-                self.error = None;
-                self.pending_view = Some(target);
+        if let Err(err) = self.dispatch_live_source_check() {
+            self.error = Some(err.to_string());
+        }
+    }
+
+    /// Validate the selection and resolve the native path, then hand the
+    /// (potentially blocking) file-existence check to the background worker.
+    /// The view target or a clear error is produced from the worker response in
+    /// [`Self::apply_file_check_response`].
+    fn dispatch_live_source_check(&mut self) -> Result<()> {
+        if self.detail_loading {
+            anyhow::bail!("Script is still loading.");
+        }
+        let Some(row) = self.detail.as_ref() else {
+            anyhow::bail!("No script selected.");
+        };
+        let logical_path = str_field(row, "logical_path");
+        if logical_path.is_empty() {
+            anyhow::bail!("Selected script has no logical path.");
+        }
+        let native = self.resolver.to_native(&logical_path);
+        let mapped = native != logical_path;
+        let native_path = PathBuf::from(native);
+
+        let id = self.next_filecheck_id;
+        self.next_filecheck_id = self.next_filecheck_id.saturating_add(1);
+        self.inflight_filecheck_id = Some(id);
+        self.error = None;
+        self.file_check_worker.send(FileCheckRequest {
+            id,
+            logical_path,
+            native_path,
+            mapped,
+        })
+    }
+
+    fn drain_file_check_channel(&mut self) {
+        loop {
+            match self.file_check_worker.try_recv() {
+                Ok(Some(response)) => self.apply_file_check_response(response),
+                Ok(None) => break,
+                Err(_) => {
+                    self.inflight_filecheck_id = None;
+                    self.error = Some("File-check worker disconnected unexpectedly.".to_string());
+                    break;
+                }
             }
-            Err(err) => {
-                self.error = Some(err.to_string());
-            }
+        }
+    }
+
+    fn apply_file_check_response(&mut self, response: FileCheckResponse) {
+        if Some(response.id) != self.inflight_filecheck_id {
+            return;
+        }
+        self.inflight_filecheck_id = None;
+        if response.exists {
+            // The file may exist at the logical path itself (e.g. running scat
+            // on the host where the catalog was built, where logical paths are
+            // real filesystem paths), so a missing mapping is not an error here.
+            self.error = None;
+            self.pending_view = Some(viewer::ViewTarget::LiveSource {
+                logical_path: response.logical_path,
+                native_path: response.native_path,
+            });
+        } else if response.mapped {
+            self.error = Some(format!(
+                "Live source not found at {}",
+                response.native_path.display()
+            ));
+        } else {
+            self.error = Some(format!(
+                "No filesystem mapping for {}, and no file exists at that path; configure a path mapping to open the live source.",
+                response.logical_path
+            ));
         }
     }
 
@@ -798,37 +872,6 @@ impl TuiApp {
             logical_path,
             content: str_field(row, "content"),
         })
-    }
-
-    fn live_source_target(&self) -> Result<viewer::ViewTarget> {
-        if self.detail_loading {
-            anyhow::bail!("Script is still loading.");
-        }
-        let Some(row) = self.detail.as_ref() else {
-            anyhow::bail!("No script selected.");
-        };
-        let logical_path = str_field(row, "logical_path");
-        if logical_path.is_empty() {
-            anyhow::bail!("Selected script has no logical path.");
-        }
-        let native = self.resolver.to_native(&logical_path);
-        let native_path = PathBuf::from(&native);
-        // The file may exist at the logical path itself (e.g. running scat on
-        // the host where the catalog was built, where logical paths are real
-        // filesystem paths), so try the resolved path regardless of whether a
-        // mapping was actually applied.
-        if native_path.exists() {
-            return Ok(viewer::ViewTarget::LiveSource {
-                logical_path,
-                native_path,
-            });
-        }
-        if native == logical_path {
-            anyhow::bail!(
-                "No filesystem mapping for {logical_path}, and no file exists at that path; configure a path mapping to open the live source."
-            );
-        }
-        anyhow::bail!("Live source not found at {native}");
     }
 
     fn scroll_target(&mut self) -> Option<&mut u16> {
@@ -860,6 +903,7 @@ pub fn run(db_path: &Path, resolver: PathResolver) -> Result<()> {
         app.apply_results()?;
         app.drain_detail_channel();
         app.drain_diff_channel();
+        app.drain_file_check_channel();
         if app
             .last_keystroke_at
             .is_some_and(|keystroke| keystroke.elapsed() >= debounce)
@@ -867,6 +911,14 @@ pub fn run(db_path: &Path, resolver: PathResolver) -> Result<()> {
         {
             app.last_keystroke_at = None;
             app.dispatch_query()?;
+        }
+        // A view target may be queued synchronously (catalog content) or
+        // asynchronously once the file-check worker confirms the live source,
+        // so open it from the loop body rather than only after a keystroke.
+        if let Some(target) = app.pending_view.take()
+            && let Err(err) = terminal.open_view(&target)
+        {
+            app.error = Some(format!("Failed to open viewer: {err}"));
         }
         terminal.draw(|frame| draw(frame, &mut app))?;
         app.tick = app.tick.wrapping_add(1);
@@ -878,11 +930,6 @@ pub fn run(db_path: &Path, resolver: PathResolver) -> Result<()> {
             }
             if app.handle_key(key)? {
                 break;
-            }
-            if let Some(target) = app.pending_view.take()
-                && let Err(err) = terminal.open_view(&target)
-            {
-                app.error = Some(format!("Failed to open viewer: {err}"));
             }
         }
     }
@@ -1176,13 +1223,10 @@ mod tests {
         row
     }
 
-    #[test]
-    fn live_source_target_resolves_mapped_path() {
-        let dir = tempfile::tempdir().unwrap();
-        let script = dir.path().join("foo.py");
-        std::fs::write(&script, "print(1)\n").unwrap();
-
-        let root = dir.path().display().to_string();
+    /// Build a `PathResolver` mapping `/catalog/scripts` onto `root` for the
+    /// current platform (the other platform's field is a dummy value).
+    fn mapping_resolver(root: &std::path::Path) -> PathResolver {
+        let root = root.display().to_string();
         let mut file = tempfile::Builder::new().suffix(".yml").tempfile().unwrap();
         if cfg!(windows) {
             let root_escaped = root.replace('\\', "\\\\");
@@ -1198,15 +1242,38 @@ mod tests {
             )
             .unwrap();
         }
-        let resolver = PathResolver::from_file(file.path()).unwrap();
+        PathResolver::from_file(file.path()).unwrap()
+    }
+
+    /// Pump the file-check worker until the in-flight request resolves.
+    fn drain_until_file_check(app: &mut TuiApp) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while app.inflight_filecheck_id.is_some() {
+            app.drain_file_check_channel();
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for file-check worker response"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn live_source_view_resolves_mapped_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("foo.py");
+        std::fs::write(&script, "print(1)\n").unwrap();
 
         let db = super::make_test_db();
         let mut app = make_app(db.path());
-        app.resolver = resolver;
+        app.resolver = mapping_resolver(dir.path());
         app.detail = Some(detail_row("/catalog/scripts/foo.py"));
         app.detail_loading = false;
 
-        let target = app.live_source_target().expect("live source resolves");
+        app.queue_live_source_view();
+        drain_until_file_check(&mut app);
+
+        let target = app.pending_view.take().expect("live source queued");
         match target {
             viewer::ViewTarget::LiveSource {
                 logical_path,
@@ -1217,10 +1284,11 @@ mod tests {
             }
             other => panic!("expected live source target, got {other:?}"),
         }
+        assert!(app.error.is_none());
     }
 
     #[test]
-    fn live_source_target_opens_logical_path_without_mapping_when_file_exists() {
+    fn live_source_view_opens_logical_path_without_mapping_when_file_exists() {
         // No mapping configured, but the logical path is itself a real file on
         // disk (the catalog-build-host scenario): it should open directly.
         let dir = tempfile::tempdir().unwrap();
@@ -1233,8 +1301,12 @@ mod tests {
         app.detail = Some(detail_row(&logical));
         app.detail_loading = false;
 
+        app.queue_live_source_view();
+        drain_until_file_check(&mut app);
+
         let target = app
-            .live_source_target()
+            .pending_view
+            .take()
             .expect("existing file opens without mapping");
         match target {
             viewer::ViewTarget::LiveSource {
@@ -1249,55 +1321,41 @@ mod tests {
     }
 
     #[test]
-    fn live_source_target_errors_without_mapping() {
+    fn live_source_view_errors_without_mapping() {
         let db = super::make_test_db();
         let mut app = make_app(db.path());
         // Identity resolver: no mapping resolves the logical path to disk.
         app.detail = Some(detail_row("/catalog/scripts/foo.py"));
         app.detail_loading = false;
 
-        let err = app
-            .live_source_target()
-            .expect_err("identity mapping should fail to resolve live source");
+        app.queue_live_source_view();
+        drain_until_file_check(&mut app);
+
+        assert!(app.pending_view.is_none());
+        let err = app.error.as_deref().expect("error set");
         assert!(
-            err.to_string().contains("No filesystem mapping"),
+            err.contains("No filesystem mapping"),
             "unexpected error: {err}"
         );
     }
 
     #[test]
-    fn live_source_target_errors_when_file_missing() {
+    fn live_source_view_errors_when_file_missing() {
         let dir = tempfile::tempdir().unwrap();
         // Note: no file is created at the resolved path.
-        let root = dir.path().display().to_string();
-        let mut file = tempfile::Builder::new().suffix(".yml").tempfile().unwrap();
-        if cfg!(windows) {
-            let root_escaped = root.replace('\\', "\\\\");
-            writeln!(
-                file,
-                "mappings:\n  - logical_prefix: /catalog/scripts\n    windows: \"{root_escaped}\"\n    linux: /unused"
-            )
-            .unwrap();
-        } else {
-            writeln!(
-                file,
-                "mappings:\n  - logical_prefix: /catalog/scripts\n    linux: \"{root}\"\n    windows: \"Z:\\\\unused\""
-            )
-            .unwrap();
-        }
-        let resolver = PathResolver::from_file(file.path()).unwrap();
-
         let db = super::make_test_db();
         let mut app = make_app(db.path());
-        app.resolver = resolver;
+        app.resolver = mapping_resolver(dir.path());
         app.detail = Some(detail_row("/catalog/scripts/missing.py"));
         app.detail_loading = false;
 
-        let err = app
-            .live_source_target()
-            .expect_err("missing file should fail clearly");
+        app.queue_live_source_view();
+        drain_until_file_check(&mut app);
+
+        assert!(app.pending_view.is_none());
+        let err = app.error.as_deref().expect("error set");
         assert!(
-            err.to_string().contains("Live source not found"),
+            err.contains("Live source not found"),
             "unexpected error: {err}"
         );
     }
