@@ -83,7 +83,8 @@ This tool provides a **single searchable index** without:
   - `v` — view the **indexed catalog content** (`scripts.content`, exactly what
     the preview/search show), written to a temp file with the original filename
   - `V` — view the **live filesystem source** resolved through the configured
-    path mapping (fails clearly when no mapping resolves the path)
+    path mapping (or the logical path directly when it is already a real file),
+    failing clearly when the source file cannot be found
   - The viewer command is taken from `$SCAT_EDITOR`, then `$VISUAL`, then
     `$EDITOR`, falling back to `view`/`vim -R`/`vi -R`/`less` (or `notepad` on
     Windows). Vim-compatible editors are opened read-only so you can search with

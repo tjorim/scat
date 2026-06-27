@@ -813,19 +813,23 @@ impl TuiApp {
             anyhow::bail!("Selected script has no logical path.");
         }
         let native = self.resolver.to_native(&logical_path);
+        let native_path = PathBuf::from(&native);
+        // The file may exist at the logical path itself (e.g. running scat on
+        // the host where the catalog was built, where logical paths are real
+        // filesystem paths), so try the resolved path regardless of whether a
+        // mapping was actually applied.
+        if native_path.exists() {
+            return Ok(viewer::ViewTarget::LiveSource {
+                logical_path,
+                native_path,
+            });
+        }
         if native == logical_path {
             anyhow::bail!(
-                "No filesystem mapping for {logical_path}; configure a path mapping to open the live source."
+                "No filesystem mapping for {logical_path}, and no file exists at that path; configure a path mapping to open the live source."
             );
         }
-        let native_path = PathBuf::from(native);
-        if !native_path.exists() {
-            anyhow::bail!("Live source not found at {}", native_path.display());
-        }
-        Ok(viewer::ViewTarget::LiveSource {
-            logical_path,
-            native_path,
-        })
+        anyhow::bail!("Live source not found at {native}");
     }
 
     fn scroll_target(&mut self) -> Option<&mut u16> {
@@ -1384,6 +1388,35 @@ mod tests {
                 native_path,
             } => {
                 assert_eq!(logical_path, "/catalog/scripts/foo.py");
+                assert_eq!(native_path, script);
+            }
+            other => panic!("expected live source target, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn live_source_target_opens_logical_path_without_mapping_when_file_exists() {
+        // No mapping configured, but the logical path is itself a real file on
+        // disk (the catalog-build-host scenario): it should open directly.
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("foo.py");
+        std::fs::write(&script, "print(1)\n").unwrap();
+        let logical = script.display().to_string();
+
+        let db = super::make_test_db();
+        let mut app = make_app(db.path()); // identity resolver
+        app.detail = Some(detail_row(&logical));
+        app.detail_loading = false;
+
+        let target = app
+            .live_source_target()
+            .expect("existing file opens without mapping");
+        match target {
+            viewer::ViewTarget::LiveSource {
+                logical_path,
+                native_path,
+            } => {
+                assert_eq!(logical_path, logical);
                 assert_eq!(native_path, script);
             }
             other => panic!("expected live source target, got {other:?}"),
