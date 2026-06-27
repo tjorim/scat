@@ -424,18 +424,12 @@ fn draw_preview(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
     } else if app.cached_preview.is_empty() && app.detail.is_some() {
         (
             Cow::Borrowed(""),
-            format!(
-                "Catalog preview (line {})",
-                app.preview_scroll.saturating_add(1)
-            ),
+            preview_title(app.preview_scroll, app.preview_total_lines),
         )
     } else {
         (
             Cow::Borrowed(app.cached_preview.as_str()),
-            format!(
-                "Catalog preview (line {})",
-                app.preview_scroll.saturating_add(1)
-            ),
+            preview_title(app.preview_scroll, app.preview_total_lines),
         )
     };
     let text: Text = if !app.detail_loading && content.is_empty() {
@@ -773,6 +767,21 @@ fn line_count(text: &str) -> usize {
     text.lines().count().max(1)
 }
 
+/// Title for the catalog preview pane. When the indexed script is longer than
+/// `PREVIEW_LINES`, the preview is capped, so flag that and point at the
+/// full-script viewer keys.
+fn preview_title(scroll: u16, total_lines: usize) -> String {
+    let line = scroll.saturating_add(1);
+    if total_lines > super::PREVIEW_LINES {
+        format!(
+            "Catalog preview (line {line} — first {} of {total_lines} lines, v/V for full)",
+            super::PREVIEW_LINES
+        )
+    } else {
+        format!("Catalog preview (line {line})")
+    }
+}
+
 fn clamp_scroll_offset(scroll: &mut u16, line_count: usize, area: Rect) {
     let viewport_lines = usize::from(area.height.saturating_sub(2)).max(1);
     let max_scroll = line_count.saturating_sub(viewport_lines);
@@ -853,11 +862,38 @@ fn left_truncate_path(path: &str, max_chars: usize) -> String {
 mod tests {
     use serde_json::{Map, Value};
 
-    use super::{clamp_scroll_offset, left_truncate_path, line_count, revision_lines};
+    use super::{
+        clamp_scroll_offset, left_truncate_path, line_count, preview_title, revision_lines,
+    };
     use ratatui::layout::Rect;
 
     fn line_text(line: &ratatui::text::Line) -> String {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn preview_title_plain_when_not_truncated() {
+        // Total lines within the cap: no truncation hint.
+        assert_eq!(
+            preview_title(0, super::super::PREVIEW_LINES),
+            "Catalog preview (line 1)"
+        );
+        assert_eq!(preview_title(11, 0), "Catalog preview (line 12)");
+    }
+
+    #[test]
+    fn preview_title_flags_truncation_and_points_at_viewer() {
+        let total = super::super::PREVIEW_LINES + 1;
+        let title = preview_title(4, total);
+        assert!(title.contains("line 5"), "title: {title}");
+        assert!(
+            title.contains(&format!(
+                "first {} of {total} lines",
+                super::super::PREVIEW_LINES
+            )),
+            "title: {title}"
+        );
+        assert!(title.contains("v/V for full"), "title: {title}");
     }
 
     fn revision_row(

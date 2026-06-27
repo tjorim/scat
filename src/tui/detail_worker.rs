@@ -45,6 +45,9 @@ pub struct DetailPayload {
     pub function_call_sites: BTreeMap<String, Vec<FunctionCallSite>>,
     pub checkouts: Vec<JsonRow>,
     pub cached_preview: String,
+    /// Total number of lines in the indexed content (before the
+    /// `PREVIEW_LINES` cap); `cached_preview` is truncated when this exceeds it.
+    pub preview_total_lines: usize,
     pub error: Option<String>,
 }
 
@@ -122,6 +125,7 @@ fn worker_loop(
                 function_call_sites: BTreeMap::new(),
                 checkouts: vec![],
                 cached_preview: String::new(),
+                preview_total_lines: 0,
                 error: Some(err.clone()),
             },
         };
@@ -151,6 +155,7 @@ fn load_detail(api: &SearchApi, path: &str) -> DetailPayload {
         function_call_sites: BTreeMap::new(),
         checkouts: vec![],
         cached_preview: String::new(),
+        preview_total_lines: 0,
         error: None,
     };
 
@@ -293,6 +298,9 @@ fn load_detail(api: &SearchApi, path: &str) -> DetailPayload {
             .collect::<Vec<_>>()
             .join("\n")
     };
+    // Total line count of the indexed content, so the UI can flag when the
+    // preview is capped at `PREVIEW_LINES` and the full script is longer.
+    result.preview_total_lines = content.lines().count();
 
     result
 }

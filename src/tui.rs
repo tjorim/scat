@@ -96,6 +96,7 @@ struct TuiApp {
     detail_diff_scroll: u16,
     results_state: ListState,
     cached_preview: String,
+    preview_total_lines: usize,
     detail_loading: bool,
     inflight_detail_id: Option<u64>,
     next_detail_id: u64,
@@ -150,6 +151,7 @@ impl TuiApp {
             detail_diff_scroll: 0,
             results_state: ListState::default(),
             cached_preview: String::new(),
+            preview_total_lines: 0,
             detail_loading: false,
             inflight_detail_id: None,
             next_detail_id: 0,
@@ -260,6 +262,7 @@ impl TuiApp {
             self.function_xref = None;
             self.checkouts.clear();
             self.cached_preview.clear();
+            self.preview_total_lines = 0;
             return Ok(());
         };
 
@@ -313,6 +316,7 @@ impl TuiApp {
             function_call_sites,
             checkouts,
             cached_preview,
+            preview_total_lines,
             error,
         } = payload;
         self.detail = detail;
@@ -325,6 +329,7 @@ impl TuiApp {
         self.function_xref = None;
         self.checkouts = checkouts;
         self.cached_preview = cached_preview;
+        self.preview_total_lines = preview_total_lines;
         if error.is_some() {
             self.error = error;
         }
@@ -1413,6 +1418,7 @@ mod tests {
                 function_call_sites: std::collections::BTreeMap::new(),
                 checkouts: vec![],
                 cached_preview: "x".to_string(),
+                preview_total_lines: 0,
                 error: None,
             },
         });
@@ -1457,6 +1463,7 @@ mod tests {
                     checkout_row("LINUX", "jdoe", "20240102_0900"),
                 ],
                 cached_preview: String::new(),
+                preview_total_lines: 0,
                 error: None,
             },
         });
