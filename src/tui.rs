@@ -15,7 +15,7 @@ use ratatui::widgets::ListState;
 use ratatui::{Frame, Terminal};
 use serde_json::Value;
 
-use scat_core::core::db::JsonRow;
+use scat_core::core::db::{JsonRow, row_display, row_str, row_string as str_field};
 use scat_core::core::resolve::PathResolver;
 
 mod detail_worker;
@@ -1093,26 +1093,19 @@ fn detail_lines(app: &TuiApp) -> Vec<Line<'static>> {
     lines
 }
 
-fn str_field(row: &JsonRow, key: &str) -> String {
-    row.get(key)
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string()
-}
-
 fn sort_checkouts(checkouts: &mut [JsonRow]) {
     checkouts.sort_by(|a, b| {
-        let type_a = revision_type_rank(json_str_field(a, "revision_type"));
-        let type_b = revision_type_rank(json_str_field(b, "revision_type"));
-        let os_a = json_str_field(a, "os_flavor");
-        let os_b = json_str_field(b, "os_flavor");
-        let ts_a = json_str_field(a, "timestamp");
-        let ts_b = json_str_field(b, "timestamp");
+        let type_a = revision_type_rank(row_str(a, "revision_type"));
+        let type_b = revision_type_rank(row_str(b, "revision_type"));
+        let os_a = row_str(a, "os_flavor");
+        let os_b = row_str(b, "os_flavor");
+        let ts_a = row_str(a, "timestamp");
+        let ts_b = row_str(b, "timestamp");
         type_a
             .cmp(&type_b)
             .then_with(|| os_a.cmp(os_b))
             .then_with(|| ts_b.cmp(ts_a))
-            .then_with(|| json_str_field(a, "user").cmp(json_str_field(b, "user")))
+            .then_with(|| row_str(a, "user").cmp(row_str(b, "user")))
     });
 }
 
@@ -1124,17 +1117,8 @@ fn revision_type_rank(revision_type: &str) -> u8 {
     }
 }
 
-fn json_str_field<'a>(row: &'a JsonRow, key: &str) -> &'a str {
-    row.get(key).and_then(Value::as_str).unwrap_or("")
-}
-
 fn display_field(row: &JsonRow, key: &str) -> String {
-    match row.get(key) {
-        Some(Value::String(s)) if !s.is_empty() => s.clone(),
-        Some(Value::Number(n)) => n.to_string(),
-        Some(Value::Bool(b)) => b.to_string(),
-        _ => "-".to_string(),
-    }
+    row_display(row, key, "-")
 }
 
 fn checkout_label(row: &JsonRow) -> String {

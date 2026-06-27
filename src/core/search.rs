@@ -5,7 +5,9 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use crate::core::db::{JsonRow, SCHEMA_VERSION, fts_query_filtered, query_rows, row_to_map};
+use crate::core::db::{
+    JsonRow, SCHEMA_VERSION, fts_query_filtered, query_rows, row_string, row_to_map,
+};
 use crate::core::vc::{REVISION_TYPE_ARCHIVE, REVISION_TYPE_DEVELOP};
 use crate::error::{Error, Result};
 
@@ -525,8 +527,8 @@ impl SearchApi {
         let uses = uses_rows
             .into_iter()
             .map(|row| {
-                let dep = str_val(&row, "depends_on_path");
-                let lp = str_val(&row, "logical_path");
+                let dep = row_string(&row, "depends_on_path");
+                let lp = row_string(&row, "logical_path");
                 let indexed = !lp.is_empty();
                 DependencyEntry {
                     logical_path: if indexed { lp } else { dep.clone() },
@@ -964,7 +966,7 @@ impl SearchApi {
             findings.extend(rows.into_iter().map(|row| AuditFinding {
                 check: "unowned".to_string(),
                 severity: "warn".to_string(),
-                logical_path: str_val(&row, "logical_path"),
+                logical_path: row_string(&row, "logical_path"),
                 detail: "no techowner or funcowner".to_string(),
             }));
         }
@@ -981,7 +983,7 @@ impl SearchApi {
             findings.extend(rows.into_iter().map(|row| AuditFinding {
                 check: "no-purpose".to_string(),
                 severity: "warn".to_string(),
-                logical_path: str_val(&row, "logical_path"),
+                logical_path: row_string(&row, "logical_path"),
                 detail: "purpose/brief is missing".to_string(),
             }));
         }
@@ -997,11 +999,11 @@ impl SearchApi {
                 &[],
             )?;
             findings.extend(rows.into_iter().map(|row| {
-                let dep = str_val(&row, "dependency");
+                let dep = row_string(&row, "dependency");
                 AuditFinding {
                     check: "broken-deps".to_string(),
                     severity: "error".to_string(),
-                    logical_path: str_val(&row, "logical_path"),
+                    logical_path: row_string(&row, "logical_path"),
                     detail: format!("depends on {dep} (not indexed)"),
                 }
             }));
@@ -1022,7 +1024,7 @@ impl SearchApi {
             findings.extend(rows.into_iter().map(|row| AuditFinding {
                 check: "orphan-checkouts".to_string(),
                 severity: "warn".to_string(),
-                logical_path: str_val(&row, "logical_path"),
+                logical_path: row_string(&row, "logical_path"),
                 detail: "vc checkout exists without catalog entry".to_string(),
             }));
         }
@@ -1048,7 +1050,7 @@ impl SearchApi {
                 AuditFinding {
                     check: "stale-checkouts".to_string(),
                     severity: "info".to_string(),
-                    logical_path: str_val(&row, "logical_path"),
+                    logical_path: row_string(&row, "logical_path"),
                     detail: format!("checkout is stale ({age:.0} days old)"),
                 }
             }));
@@ -1073,7 +1075,7 @@ impl SearchApi {
             findings.extend(rows.into_iter().map(|row| AuditFinding {
                 check: "dead-scripts".to_string(),
                 severity: "info".to_string(),
-                logical_path: str_val(&row, "logical_path"),
+                logical_path: row_string(&row, "logical_path"),
                 detail: "no dependents, never checked out".to_string(),
             }));
         }
@@ -1091,7 +1093,7 @@ impl SearchApi {
             findings.extend(rows.into_iter().map(|row| AuditFinding {
                 check: "no-description".to_string(),
                 severity: "info".to_string(),
-                logical_path: str_val(&row, "logical_path"),
+                logical_path: row_string(&row, "logical_path"),
                 detail: "missing both docstring and @brief metadata".to_string(),
             }));
         }
@@ -1179,13 +1181,6 @@ impl SearchApi {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-fn str_val(row: &JsonRow, key: &str) -> String {
-    row.get(key)
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string()
-}
 
 fn should_run(selected: &Option<std::collections::HashSet<String>>, check: &str) -> bool {
     selected
@@ -1309,7 +1304,7 @@ fn scripts_for_diff(conn: &Connection) -> Result<BTreeMap<String, DiffScript>> {
     )?;
     let mut scripts = BTreeMap::new();
     for row in rows {
-        let logical_path = str_val(&row, "logical_path");
+        let logical_path = row_string(&row, "logical_path");
         let metadata = row
             .get("metadata_json")
             .and_then(Value::as_str)
@@ -1358,9 +1353,9 @@ fn dependencies_for_diff(conn: &Connection) -> Result<BTreeMap<String, BTreeSet<
     )?;
     let mut deps: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for row in rows {
-        deps.entry(str_val(&row, "logical_path"))
+        deps.entry(row_string(&row, "logical_path"))
             .or_default()
-            .insert(str_val(&row, "depends_on_path"));
+            .insert(row_string(&row, "depends_on_path"));
     }
     Ok(deps)
 }

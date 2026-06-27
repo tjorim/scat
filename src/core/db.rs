@@ -11,6 +11,34 @@ pub const SCHEMA_VERSION: i64 = 9;
 /// A database row serialised as a JSON object — every column becomes a key.
 pub type JsonRow = serde_json::Map<String, serde_json::Value>;
 
+/// Return a string column value from a [`JsonRow`], or `""` when the field is
+/// missing, null, or not stored as a JSON string.
+pub fn row_str<'a>(row: &'a JsonRow, key: &str) -> &'a str {
+    row.get(key)
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+}
+
+/// Return a string column value from a [`JsonRow`] as an owned [`String`].
+///
+/// Missing, null, and non-string fields become an empty string.
+pub fn row_string(row: &JsonRow, key: &str) -> String {
+    row_str(row, key).to_string()
+}
+
+/// Return a display-oriented field value from a [`JsonRow`].
+///
+/// Non-empty strings are returned as-is. Numbers and booleans are stringified.
+/// Missing, null, empty string, and other value types use `fallback`.
+pub fn row_display(row: &JsonRow, key: &str, fallback: &str) -> String {
+    match row.get(key) {
+        Some(serde_json::Value::String(value)) if !value.is_empty() => value.clone(),
+        Some(serde_json::Value::Number(value)) => value.to_string(),
+        Some(serde_json::Value::Bool(value)) => value.to_string(),
+        _ => fallback.to_string(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // DDL (see SCHEMA_VERSION)
 // ---------------------------------------------------------------------------
@@ -321,4 +349,50 @@ pub fn query_rows(
         .map(|r| r.map_err(Error::from))
         .collect();
     rows
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn row_str_returns_empty_for_missing_null_and_non_string_values() {
+        let mut row = JsonRow::new();
+        row.insert("null".into(), serde_json::Value::Null);
+        row.insert("number".into(), json!(42));
+        row.insert("string".into(), json!("value"));
+
+        assert_eq!(row_str(&row, "missing"), "");
+        assert_eq!(row_str(&row, "null"), "");
+        assert_eq!(row_str(&row, "number"), "");
+        assert_eq!(row_str(&row, "string"), "value");
+    }
+
+    #[test]
+    fn row_string_owns_raw_string_value() {
+        let mut row = JsonRow::new();
+        row.insert("string".into(), json!("value"));
+
+        assert_eq!(row_string(&row, "string"), "value");
+        assert_eq!(row_string(&row, "missing"), "");
+    }
+
+    #[test]
+    fn row_display_stringifies_scalars_and_uses_fallback() {
+        let mut row = JsonRow::new();
+        row.insert("string".into(), json!("value"));
+        row.insert("empty".into(), json!(""));
+        row.insert("number".into(), json!(42));
+        row.insert("bool".into(), json!(true));
+        row.insert("array".into(), json!(["x"]));
+
+        assert_eq!(row_display(&row, "string", "-"), "value");
+        assert_eq!(row_display(&row, "empty", "-"), "-");
+        assert_eq!(row_display(&row, "number", "-"), "42");
+        assert_eq!(row_display(&row, "bool", "-"), "true");
+        assert_eq!(row_display(&row, "array", "-"), "-");
+        assert_eq!(row_display(&row, "missing", "-"), "-");
+    }
 }

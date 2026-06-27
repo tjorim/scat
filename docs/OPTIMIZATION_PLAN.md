@@ -188,7 +188,7 @@ green.
 
 ## De-duplication (Quality)
 
-- [ ] **Step 4: Centralize row→string accessors**
+- [x] **Step 4: Centralize row→string accessors**
   - **Task**: Introduce one shared set of row accessors (`str_field` with the
     `—` fallback for display, plus a raw `str_or_empty`) in a single module and
     have `output.rs`, `main.rs`, `tui.rs`, and `core/search.rs` use them instead

@@ -1,6 +1,7 @@
 use comfy_table::{
     Attribute, Cell, Color, ContentArrangement, Table, presets::UTF8_FULL_CONDENSED,
 };
+use scat_core::core::db::row_str;
 use tracing::warn;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -439,9 +440,8 @@ pub(crate) fn warning_kinds(row: &scat_core::core::db::JsonRow) -> String {
 }
 
 pub(crate) fn str_field(row: &scat_core::core::db::JsonRow, key: &str) -> String {
-    row.get(key)
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
+    Some(row_str(row, key))
+        .filter(|value| !value.is_empty())
         .unwrap_or("—")
         .to_string()
 }
