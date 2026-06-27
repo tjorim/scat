@@ -245,7 +245,7 @@ green.
 
 ## Structure & Schema
 
-- [ ] **Step 8: Split command handlers out of `main.rs`**
+- [x] **Step 8: Split command handlers out of `main.rs`**
   - **Task**: Move the `cmd_*` handlers and their presentation helpers into a new
     `src/commands/` module tree (e.g. `commands/search.rs`, `commands/show.rs`,
     `commands/catalog.rs`, `commands/diff.rs`), leaving `main.rs` as entry point +
