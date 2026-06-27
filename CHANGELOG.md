@@ -12,6 +12,8 @@ All notable changes to this project will be documented in this file.
 
 - **`NO_COLOR` support** — `scat` now honors the [`NO_COLOR`](https://no-color.org/) environment variable in addition to the `--no-color` flag when deciding whether to colorize output.
 - **Clearer not-found errors** — `scat show` and `scat deps` now report a missing script through the central error path with a clean message instead of a raw `tracing` log line followed by a bare `exit(1)`.
+- **Cross-platform basename ranking** — search result name-relevance ranking now splits on both `/` and `\` so basenames resolve correctly for paths carrying Windows-style separators.
+- **Consistent list-field JSON** — `tags`, `entry_points`, and `related` now always serialize as a JSON array in `scat show`/`scat search` output: an absent list renders as `[]` instead of `null`, matching the existing `scat diff` behavior.
 
 ### TUI
 
@@ -19,9 +21,15 @@ All notable changes to this project will be documented in this file.
   - `v` opens the **indexed catalog content** (`scripts.content`) written to a temp file that preserves the original filename/extension for syntax highlighting.
   - `V` opens the **live filesystem source** resolved through the configured path mapping (falling back to the logical path when it is already a real file), and fails clearly when the source file cannot be found. The existence check runs on a background worker (with stale-request draining) to keep the render loop responsive on slow network mounts.
   - Viewer selection prefers `$SCAT_EDITOR`, then `$VISUAL`, then `$EDITOR`, with a `view`/`vim -R`/`vi -R`/`less` (or `notepad`) fallback; Vim-compatible editors are forced into read-only mode.
+  - On Windows, an unquoted editor path with backslashes (e.g. `C:\Tools\vim.exe`) is split on whitespace instead of through `shell_words`, so the backslashes are no longer consumed as shell escapes and the path is preserved.
   - Clarified the preview pane title and footer hints so the catalog-vs-live-source distinction is explicit.
   - When the indexed script is longer than the `PREVIEW_LINES` cap, the preview title shows `first 500 of N lines, v/V for full`, so it is clear the preview is clipped and the full-script viewer is available.
 - **Scroll clamping** — the preview, detail, diff, and revisions panes now clamp their scroll offset to the content height, removing the misleading blank-space scrolling past the end of shorter scripts.
+- **Consistent empty-field placeholder** — the detail/metadata/functions panes now show an em dash (`—`) for empty values, matching the placeholder already used across the CLI table, `show`, and `status` output instead of a plain hyphen.
+
+### Internal
+
+- **Typed `scripts` row view** ([#17](https://github.com/tjorim/scat/issues/17)) — introduced `scat_core::core::script_view::ScriptView`, a thin read-only wrapper over a queried `scripts` row that exposes typed accessors for the known columns plus parsed helpers for the JSON-encoded `tags`/`entry_points`/`related`/`metadata_json`/`vc_warnings` fields. The JSON, CSV, table, and TUI detail/metadata renderers (and the catalog-diff field extraction) now share this one definition of each column's name and parsing/fallback semantics instead of re-reading raw `JsonRow` keys by hand. Behavior-preserving: command and TUI output are unchanged.
 
 ## [Completed] VC Revision Indexing and Catalog Audit Hardening (May 2026)
 

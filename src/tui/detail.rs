@@ -1,9 +1,9 @@
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use serde_json::Value;
 
-use scat_core::core::db::{JsonRow, row_display, row_string as str_field};
+use scat_core::core::db::{JsonRow, row_display};
 use scat_core::core::resolve::PathResolver;
+use scat_core::core::script_view::{ListField, ScriptView};
 
 use super::{PREVIEW_LINES, TuiApp};
 
@@ -14,33 +14,38 @@ pub(super) fn detail_lines(app: &TuiApp) -> Vec<Line<'static>> {
     let Some(row) = app.detail.as_ref() else {
         return vec![Line::from("No script selected.")];
     };
+    let view = ScriptView::new(row);
 
+    let size = view
+        .size()
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| "—".to_string());
     let mut lines = vec![
         section("Script"),
-        field_line("Path", str_field(row, "logical_path")),
-        field_line("Language", display_field(row, "language")),
-        field_line("Owner", display_field(row, "owner")),
-        field_line("Purpose", display_field(row, "purpose")),
-        field_line("Size", format!("{} bytes", display_field(row, "size"))),
-        field_line("Indexed", display_field(row, "indexed_at")),
-        field_line("Checkout", checkout_label(row)),
+        field_line("Path", view.logical_path().to_string()),
+        field_line("Language", display_text(view.language())),
+        field_line("Owner", display_text(view.owner())),
+        field_line("Purpose", display_text(view.purpose())),
+        field_line("Size", format!("{size} bytes")),
+        field_line("Indexed", display_text(view.indexed_at())),
+        field_line("Checkout", view.checkout_label()),
     ];
     if let Some(native) = native_path_for_row(row, &app.resolver) {
         lines.push(field_line("OS path", native));
     }
 
-    for (label, key) in [
-        ("Tags", "tags"),
-        ("Entry points", "entry_points"),
-        ("Related metadata", "related"),
+    for (label, field) in [
+        ("Tags", ListField::Tags),
+        ("Entry points", ListField::EntryPoints),
+        ("Related metadata", ListField::Related),
     ] {
-        let values = json_string_array(row, key);
+        let values = view.string_list(field);
         if !values.is_empty() {
             lines.push(field_line(label, values.join(", ")));
         }
     }
 
-    let warnings = warning_messages(row);
+    let warnings = view.vc_warning_messages();
     if !warnings.is_empty() {
         lines.push(Line::from(""));
         lines.push(section("Warnings"));
@@ -70,7 +75,7 @@ pub(super) fn detail_lines(app: &TuiApp) -> Vec<Line<'static>> {
         }
     }
 
-    let content = str_field(row, "content");
+    let content = view.content();
     if !content.is_empty() {
         lines.push(Line::from(""));
         lines.push(section("Preview"));
@@ -82,25 +87,28 @@ pub(super) fn detail_lines(app: &TuiApp) -> Vec<Line<'static>> {
     lines
 }
 
+/// Format a `scripts` row field with the [`row_display`] semantics used by the
+/// detail/metadata panes (numbers stringified, empty values shown as `—`).
+///
+/// Retained for row shapes that are not `scripts` rows (for example the
+/// `revisions` join rows rendered in the checkouts section).
 pub(super) fn display_field(row: &JsonRow, key: &str) -> String {
-    row_display(row, key, "-")
+    row_display(row, key, "—")
 }
 
-pub(super) fn checkout_label(row: &JsonRow) -> String {
-    let user = str_field(row, "checkout_user");
-    if user.is_empty() {
-        return "clean".to_string();
-    }
-    let timestamp = str_field(row, "checkout_timestamp");
-    if timestamp.is_empty() {
-        format!("checked out by {user}")
+/// Substitute `—` for an empty string, otherwise return the value owned.
+///
+/// Matches [`row_display`] for the text `scripts` columns shown in the panes.
+pub(super) fn display_text(value: &str) -> String {
+    if value.is_empty() {
+        "—".to_string()
     } else {
-        format!("checked out by {user} since {timestamp}")
+        value.to_string()
     }
 }
 
 pub(super) fn native_path_for_row(row: &JsonRow, resolver: &PathResolver) -> Option<String> {
-    let path = row.get("logical_path")?.as_str()?;
+    let path = ScriptView::new(row).logical_path();
     if path.is_empty() {
         return None;
     }
@@ -109,30 +117,7 @@ pub(super) fn native_path_for_row(row: &JsonRow, resolver: &PathResolver) -> Opt
 }
 
 pub(super) fn warning_summary(row: &JsonRow) -> String {
-    warning_messages(row).join("; ")
-}
-
-pub(super) fn warning_messages(row: &JsonRow) -> Vec<String> {
-    let raw = str_field(row, "vc_warnings");
-    let Ok(Value::Array(warnings)) = serde_json::from_str::<Value>(&raw) else {
-        return Vec::new();
-    };
-    warnings
-        .iter()
-        .filter_map(|warning| warning.get("message").and_then(Value::as_str))
-        .map(str::to_string)
-        .collect()
-}
-
-pub(super) fn json_string_array(row: &JsonRow, key: &str) -> Vec<String> {
-    let raw = str_field(row, key);
-    let Ok(Value::Array(values)) = serde_json::from_str::<Value>(&raw) else {
-        return Vec::new();
-    };
-    values
-        .into_iter()
-        .filter_map(|value| value.as_str().map(str::to_string))
-        .collect()
+    ScriptView::new(row).vc_warning_messages().join("; ")
 }
 
 pub(super) fn label_style() -> Style {
@@ -165,7 +150,9 @@ fn bullet_line(value: String) -> Line<'static> {
 mod tests {
     use serde_json::{Map, Value, json};
 
-    use super::{json_string_array, warning_messages};
+    use scat_core::core::script_view::{ListField, ScriptView};
+
+    use super::warning_summary;
 
     #[test]
     fn parses_string_arrays_for_detail_view() {
@@ -174,7 +161,10 @@ mod tests {
             "tags".to_string(),
             Value::String(json!(["one", "two"]).to_string()),
         );
-        assert_eq!(json_string_array(&row, "tags"), vec!["one", "two"]);
+        assert_eq!(
+            ScriptView::new(&row).string_list(ListField::Tags),
+            vec!["one", "two"]
+        );
     }
 
     #[test]
@@ -184,6 +174,6 @@ mod tests {
             "vc_warnings".to_string(),
             Value::String(json!([{"message": "stale checkout"}]).to_string()),
         );
-        assert_eq!(warning_messages(&row), vec!["stale checkout"]);
+        assert_eq!(warning_summary(&row), "stale checkout");
     }
 }

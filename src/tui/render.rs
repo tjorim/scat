@@ -5,6 +5,7 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
+use scat_core::core::script_view::ScriptView;
 use scat_core::core::vc::relative_age;
 
 use super::{Focus, TuiApp, ViewMode, detail};
@@ -82,7 +83,8 @@ fn draw_header(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
     let path_text = app
         .detail
         .as_ref()
-        .and_then(|row| row.get("logical_path"))
+        .map(ScriptView::new)
+        .and_then(|view| view.logical_path_value())
         .and_then(serde_json::Value::as_str)
         .filter(|p| !p.is_empty())
         .map(|p| {
@@ -286,9 +288,10 @@ fn draw_results(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
         app.results
             .iter()
             .map(|row| {
-                let path = super::str_field(row, "logical_path");
-                let lang = super::str_field(row, "language");
-                let checkout = if super::str_field(row, "checkout_user").is_empty() {
+                let view = ScriptView::new(row);
+                let path = view.logical_path();
+                let lang = view.language();
+                let checkout = if view.checkout_user().is_empty() {
                     ""
                 } else {
                     " CO"
@@ -299,7 +302,7 @@ fn draw_results(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
                     .saturating_sub(2)
                     .saturating_sub(lang.len())
                     .saturating_sub(checkout.len());
-                let display = left_truncate_path(&path, max_name);
+                let display = left_truncate_path(path, max_name);
                 ListItem::new(format!("{display}  {lang}{checkout}"))
             })
             .collect()
@@ -351,35 +354,36 @@ fn draw_metadata(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
         );
         return;
     };
+    let view = ScriptView::new(row);
     let warnings = detail::warning_summary(row);
     let mut lines = vec![
         Line::from(vec![
             Span::styled("Path      ", detail::label_style()),
-            Span::raw(super::str_field(row, "logical_path")),
+            Span::raw(view.logical_path().to_string()),
         ]),
         Line::from(vec![
             Span::styled("Language  ", detail::label_style()),
-            Span::raw(super::str_field(row, "language")),
+            Span::raw(view.language().to_string()),
         ]),
         Line::from(vec![
             Span::styled("Owner     ", detail::label_style()),
-            Span::raw(detail::display_field(row, "owner")),
+            Span::raw(detail::display_text(view.owner())),
         ]),
         Line::from(vec![
             Span::styled("Contribs  ", detail::label_style()),
             Span::raw(if app.contributors.is_empty() {
-                "-".to_string()
+                "—".to_string()
             } else {
                 app.contributors.join(", ")
             }),
         ]),
         Line::from(vec![
             Span::styled("Purpose   ", detail::label_style()),
-            Span::raw(detail::display_field(row, "purpose")),
+            Span::raw(detail::display_text(view.purpose())),
         ]),
         Line::from(vec![
             Span::styled("Checkout  ", detail::label_style()),
-            Span::raw(detail::checkout_label(row)),
+            Span::raw(view.checkout_label()),
         ]),
     ];
     if !warnings.is_empty() {
@@ -555,7 +559,7 @@ fn draw_functions(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
                     "  "
                 };
                 let doc = if function.docstring.is_empty() {
-                    "-".to_string()
+                    "—".to_string()
                 } else {
                     function.docstring.clone()
                 };

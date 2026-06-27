@@ -9,6 +9,7 @@ use crate::core::db::{
     JsonRow, SCHEMA_VERSION, append_script_filters, fts_query_filtered, query_rows, row_string,
     row_to_map,
 };
+use crate::core::script_view::{ListField, ScriptView};
 use crate::core::vc::{REVISION_TYPE_ARCHIVE, REVISION_TYPE_DEVELOP};
 use crate::error::{Error, Result};
 
@@ -1182,16 +1183,15 @@ fn scripts_for_diff(conn: &Connection) -> Result<BTreeMap<String, DiffScript>> {
     )?;
     let mut scripts = BTreeMap::new();
     for row in rows {
-        let logical_path = row_string(&row, "logical_path");
-        let metadata = row
-            .get("metadata_json")
-            .and_then(Value::as_str)
-            .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
-            .and_then(|value| value.as_object().cloned())
-            .unwrap_or_default();
+        let view = ScriptView::new(&row);
+        let logical_path = view.logical_path().to_string();
+        let metadata = view.metadata();
 
         let mut fields = BTreeMap::new();
-        fields.insert("purpose".to_string(), value_or_null(&row, "purpose"));
+        fields.insert(
+            "purpose".to_string(),
+            view.purpose_value().cloned().unwrap_or(Value::Null),
+        );
         fields.insert(
             "techowner".to_string(),
             metadata.get("techowner").cloned().unwrap_or(Value::Null),
@@ -1200,14 +1200,26 @@ fn scripts_for_diff(conn: &Connection) -> Result<BTreeMap<String, DiffScript>> {
             "funcowner".to_string(),
             metadata.get("funcowner").cloned().unwrap_or(Value::Null),
         );
-        fields.insert("owner".to_string(), value_or_null(&row, "owner"));
-        fields.insert("language".to_string(), value_or_null(&row, "language"));
-        fields.insert("tags".to_string(), json_list_value(&row, "tags"));
+        fields.insert(
+            "owner".to_string(),
+            view.owner_value().cloned().unwrap_or(Value::Null),
+        );
+        fields.insert(
+            "language".to_string(),
+            view.language_value().cloned().unwrap_or(Value::Null),
+        );
+        fields.insert(
+            "tags".to_string(),
+            view.list_value_or_empty(ListField::Tags),
+        );
         fields.insert(
             "entry_points".to_string(),
-            json_list_value(&row, "entry_points"),
+            view.list_value_or_empty(ListField::EntryPoints),
         );
-        fields.insert("related".to_string(), json_list_value(&row, "related"));
+        fields.insert(
+            "related".to_string(),
+            view.list_value_or_empty(ListField::Related),
+        );
 
         scripts.insert(
             logical_path.clone(),
@@ -1236,16 +1248,4 @@ fn dependencies_for_diff(conn: &Connection) -> Result<BTreeMap<String, BTreeSet<
             .insert(row_string(&row, "depends_on_path"));
     }
     Ok(deps)
-}
-
-fn value_or_null(row: &JsonRow, key: &str) -> Value {
-    row.get(key).cloned().unwrap_or(Value::Null)
-}
-
-fn json_list_value(row: &JsonRow, key: &str) -> Value {
-    row.get(key)
-        .and_then(Value::as_str)
-        .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
-        .filter(Value::is_array)
-        .unwrap_or_else(|| Value::Array(Vec::new()))
 }

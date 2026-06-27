@@ -130,7 +130,15 @@ fn default_viewer_commands() -> Vec<ViewerCommand> {
 }
 
 fn parse_viewer_command(value: &str, fallback: bool) -> Result<ViewerCommand> {
-    let parts = shell_words::split(value).map_err(|err| anyhow!(err))?;
+    // On Windows an unquoted program path like `C:\Tools\vim.exe` would have its
+    // backslashes consumed as shell escapes by `shell_words::split`, corrupting
+    // the path (`C:Toolsvim.exe`). Fall back to whitespace splitting there when
+    // the value carries no quoting that would need shell-aware parsing.
+    let parts: Vec<String> = if cfg!(windows) && !value.contains('"') && !value.contains('\'') {
+        value.split_whitespace().map(String::from).collect()
+    } else {
+        shell_words::split(value).map_err(|err| anyhow!(err))?
+    };
     let Some((program, args)) = parts.split_first() else {
         bail!("viewer command is empty");
     };
@@ -214,6 +222,14 @@ mod tests {
         let command = parse_viewer_command("vim -R '+set number'", false).unwrap();
         assert_eq!(command.program, "vim");
         assert_eq!(command.args, vec!["-R", "+set number"]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn parse_viewer_command_preserves_unquoted_windows_path() {
+        let command = parse_viewer_command(r"C:\Tools\vim.exe -R", false).unwrap();
+        assert_eq!(command.program, r"C:\Tools\vim.exe");
+        assert_eq!(command.args, vec!["-R"]);
     }
 
     #[test]

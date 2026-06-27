@@ -6,6 +6,7 @@ use std::thread::{self, JoinHandle};
 use anyhow::{Context, Result, anyhow};
 
 use scat_core::core::db::JsonRow;
+use scat_core::core::script_view::ScriptView;
 use scat_core::core::search::{SearchApi, open_search_api};
 
 #[derive(Debug, Clone)]
@@ -143,7 +144,7 @@ fn worker_loop(
 
 /// Return the unique, sorted contributors for a script row (owner + history authors).
 fn contributors_from_row(row: &JsonRow) -> Vec<String> {
-    crate::output::contributors_from_script(row)
+    ScriptView::new(row).contributors()
 }
 
 fn load_detail(api: &SearchApi, path: &str) -> DetailPayload {
@@ -201,7 +202,7 @@ fn load_detail(api: &SearchApi, path: &str) -> DetailPayload {
             }
         }
         for item in g.used_by {
-            let lp = super::str_field(&item, "logical_path");
+            let lp = ScriptView::new(&item).logical_path().to_string();
             if lp.is_empty() {
                 continue;
             }
@@ -269,7 +270,7 @@ fn load_detail(api: &SearchApi, path: &str) -> DetailPayload {
                     .entry(function_name)
                     .or_insert_with(Vec::new)
                     .push(FunctionCallSite {
-                        caller_path: super::str_field(&row, "logical_path"),
+                        caller_path: ScriptView::new(&row).logical_path().to_string(),
                         line,
                         caller: super::str_field(&row, "caller"),
                         callee: super::str_field(&row, "callee"),
@@ -287,7 +288,7 @@ fn load_detail(api: &SearchApi, path: &str) -> DetailPayload {
     let content = result
         .detail
         .as_ref()
-        .map(|row| super::str_field(row, "content"))
+        .map(|row| ScriptView::new(row).content().to_string())
         .unwrap_or_default();
     result.cached_preview = if content.is_empty() {
         "No content indexed.".to_string()
