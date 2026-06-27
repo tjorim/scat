@@ -8,7 +8,7 @@ use scat_core::core::diff::{
 };
 use scat_core::core::resolve::PathResolver;
 use scat_core::core::search::{CatalogDiff, compare_catalogs, open_search_api};
-use scat_core::core::vc::{REVISION_TYPE_DEVELOP, load_vc_config};
+use scat_core::core::vc::{compare_revision_rows, load_vc_config, relative_age};
 use scat_core::indexer::builder::{BuildOptions, build_index};
 use scat_core::indexer::scanner::max_mtime_in_roots_with_shutdown;
 use tracing::{error, warn};
@@ -593,20 +593,7 @@ fn cmd_show(
 }
 
 fn render_revision_lines(mut revisions: Vec<scat_core::core::db::JsonRow>) -> Vec<String> {
-    revisions.sort_by(|a, b| {
-        let os_a = str_field(a, "os_flavor");
-        let os_b = str_field(b, "os_flavor");
-        let type_a = str_field(a, "revision_type");
-        let type_b = str_field(b, "revision_type");
-        let ts_a = str_field(a, "timestamp");
-        let ts_b = str_field(b, "timestamp");
-        let rank = |t: &str| if t == REVISION_TYPE_DEVELOP { 0u8 } else { 1u8 };
-        rank(&type_a)
-            .cmp(&rank(&type_b))
-            .then_with(|| os_a.cmp(&os_b))
-            .then_with(|| ts_b.cmp(&ts_a))
-            .then_with(|| str_field(a, "user").cmp(&str_field(b, "user")))
-    });
+    revisions.sort_by(compare_revision_rows);
 
     revisions
         .into_iter()
@@ -632,17 +619,6 @@ fn revisions_to_json(revisions: Vec<scat_core::core::db::JsonRow>) -> serde_json
             .map(serde_json::Value::Object)
             .collect(),
     )
-}
-
-fn relative_age(age_seconds: f64) -> String {
-    let age_seconds = age_seconds.max(0.0);
-    if age_seconds < 3_600.0 {
-        format!("{:.0}m ago", age_seconds / 60.0)
-    } else if age_seconds < 86_400.0 {
-        format!("{:.0}h ago", age_seconds / 3_600.0)
-    } else {
-        format!("{:.0}d ago", age_seconds / 86_400.0)
-    }
 }
 
 fn cmd_status(

@@ -219,7 +219,7 @@ green.
     `tests/search.rs` (filters, listing, FTS) passes unchanged; the 8-arm match
     is gone.
 
-- [ ] **Step 6: De-duplicate `relative_age` and revision sorting**
+- [x] **Step 6: De-duplicate `relative_age` and revision sorting**
   - **Task**: Move `relative_age` into the library (e.g. `core/vc.rs` or a small
     `core/format.rs`) and call it from both `main.rs` and `tui.rs`. Extract the
     shared DEVELOP-first/os/newest-first revision comparator into one function
@@ -232,7 +232,7 @@ green.
   - **Success Criteria**: One definition each; `render_revision_lines` and
     `sort_checkouts` tests still pass; identical ordering/age output.
 
-- [ ] **Step 7: Collapse duplicated TUI scroll handling**
+- [x] **Step 7: Collapse duplicated TUI scroll handling**
   - **Task**: Add `fn scroll_target(&mut self) -> Option<&mut u16>` returning the
     active pane's scroll field, and a helper that maps a key event to a scroll
     delta. Replace the ~7 repeated `match self.focus { … }` blocks in `handle_key`

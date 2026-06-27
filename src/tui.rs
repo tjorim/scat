@@ -15,8 +15,9 @@ use ratatui::widgets::ListState;
 use ratatui::{Frame, Terminal};
 use serde_json::Value;
 
-use scat_core::core::db::{JsonRow, row_display, row_str, row_string as str_field};
+use scat_core::core::db::{JsonRow, row_display, row_string as str_field};
 use scat_core::core::resolve::PathResolver;
+use scat_core::core::vc::{compare_revision_rows, relative_age};
 
 mod detail_worker;
 mod diff_worker;
@@ -54,6 +55,12 @@ enum ViewMode {
     Browse,
     Detail,
     DetailDiff,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScrollCommand {
+    Delta(i16),
+    Top,
 }
 
 struct TuiApp {
@@ -512,122 +519,6 @@ impl TuiApp {
                     move_selection(self.functions_selected, self.functions.len(), 1);
             }
             KeyEvent {
-                code: KeyCode::Up, ..
-            }
-            | KeyEvent {
-                code: KeyCode::Char('k'),
-                ..
-            } if matches!(self.focus, Focus::Preview | Focus::Revisions) => {
-                let scroll = match self.focus {
-                    Focus::Preview => &mut self.preview_scroll,
-                    Focus::Revisions => &mut self.revisions_scroll,
-                    _ => unreachable!(),
-                };
-                *scroll = scroll_by(*scroll, -1);
-            }
-            KeyEvent {
-                code: KeyCode::Down,
-                ..
-            }
-            | KeyEvent {
-                code: KeyCode::Char('j'),
-                ..
-            } if matches!(self.focus, Focus::Preview | Focus::Revisions) => {
-                let scroll = match self.focus {
-                    Focus::Preview => &mut self.preview_scroll,
-                    Focus::Revisions => &mut self.revisions_scroll,
-                    _ => unreachable!(),
-                };
-                *scroll = scroll_by(*scroll, 1);
-            }
-            KeyEvent {
-                code: KeyCode::PageUp,
-                ..
-            } if matches!(self.focus, Focus::Preview | Focus::Revisions) => {
-                let scroll = match self.focus {
-                    Focus::Preview => &mut self.preview_scroll,
-                    Focus::Revisions => &mut self.revisions_scroll,
-                    _ => unreachable!(),
-                };
-                *scroll = scroll_by(*scroll, -PAGE_SCROLL_LINES);
-            }
-            KeyEvent {
-                code: KeyCode::PageDown,
-                ..
-            } if matches!(self.focus, Focus::Preview | Focus::Revisions) => {
-                let scroll = match self.focus {
-                    Focus::Preview => &mut self.preview_scroll,
-                    Focus::Revisions => &mut self.revisions_scroll,
-                    _ => unreachable!(),
-                };
-                *scroll = scroll_by(*scroll, PAGE_SCROLL_LINES);
-            }
-            KeyEvent {
-                code: KeyCode::Char('u'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            } if matches!(self.focus, Focus::Preview | Focus::Revisions) => {
-                let scroll = match self.focus {
-                    Focus::Preview => &mut self.preview_scroll,
-                    Focus::Revisions => &mut self.revisions_scroll,
-                    _ => unreachable!(),
-                };
-                *scroll = scroll_by(*scroll, -HALF_PAGE_SCROLL_LINES);
-            }
-            KeyEvent {
-                code: KeyCode::Char('d'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            } if matches!(self.focus, Focus::Preview | Focus::Revisions) => {
-                let scroll = match self.focus {
-                    Focus::Preview => &mut self.preview_scroll,
-                    Focus::Revisions => &mut self.revisions_scroll,
-                    _ => unreachable!(),
-                };
-                *scroll = scroll_by(*scroll, HALF_PAGE_SCROLL_LINES);
-            }
-            KeyEvent {
-                code: KeyCode::Char('b'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            } if matches!(self.focus, Focus::Preview | Focus::Revisions) => {
-                let scroll = match self.focus {
-                    Focus::Preview => &mut self.preview_scroll,
-                    Focus::Revisions => &mut self.revisions_scroll,
-                    _ => unreachable!(),
-                };
-                *scroll = scroll_by(*scroll, -FULL_PAGE_SCROLL_LINES);
-            }
-            KeyEvent {
-                code: KeyCode::Char('f'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            } if matches!(self.focus, Focus::Preview | Focus::Revisions) => {
-                let scroll = match self.focus {
-                    Focus::Preview => &mut self.preview_scroll,
-                    Focus::Revisions => &mut self.revisions_scroll,
-                    _ => unreachable!(),
-                };
-                *scroll = scroll_by(*scroll, FULL_PAGE_SCROLL_LINES);
-            }
-            KeyEvent {
-                code: KeyCode::Char('g'),
-                modifiers: KeyModifiers::NONE,
-                ..
-            } if matches!(self.focus, Focus::Preview | Focus::Revisions) => match self.focus {
-                Focus::Preview => self.preview_scroll = 0,
-                Focus::Revisions => self.revisions_scroll = 0,
-                _ => unreachable!(),
-            },
-            KeyEvent {
-                code: KeyCode::Home,
-                ..
-            } if matches!(self.focus, Focus::Preview | Focus::Revisions) => match self.focus {
-                Focus::Preview => self.preview_scroll = 0,
-                Focus::Revisions => self.revisions_scroll = 0,
-                _ => unreachable!(),
-            },
-            KeyEvent {
                 code: KeyCode::Char('f'),
                 modifiers: KeyModifiers::NONE,
                 ..
@@ -644,7 +535,9 @@ impl TuiApp {
                 self.query.push(ch);
                 self.schedule_query();
             }
-            _ => {}
+            _ => {
+                self.apply_focused_scroll(key);
+            }
         }
         Ok(false)
     }
@@ -679,79 +572,9 @@ impl TuiApp {
                 self.dispatch_diff()?;
                 self.mode = ViewMode::DetailDiff;
             }
-            KeyEvent {
-                code: KeyCode::Up, ..
+            _ => {
+                apply_scroll_key(&mut self.detail_scroll, key);
             }
-            | KeyEvent {
-                code: KeyCode::Char('k'),
-                ..
-            } => {
-                self.detail_scroll = scroll_by(self.detail_scroll, -1);
-            }
-            KeyEvent {
-                code: KeyCode::Down,
-                ..
-            }
-            | KeyEvent {
-                code: KeyCode::Char('j'),
-                ..
-            } => {
-                self.detail_scroll = scroll_by(self.detail_scroll, 1);
-            }
-            KeyEvent {
-                code: KeyCode::PageUp,
-                ..
-            } => {
-                self.detail_scroll = scroll_by(self.detail_scroll, -PAGE_SCROLL_LINES);
-            }
-            KeyEvent {
-                code: KeyCode::PageDown,
-                ..
-            } => {
-                self.detail_scroll = scroll_by(self.detail_scroll, PAGE_SCROLL_LINES);
-            }
-            KeyEvent {
-                code: KeyCode::Char('u'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            } => {
-                self.detail_scroll = scroll_by(self.detail_scroll, -HALF_PAGE_SCROLL_LINES);
-            }
-            KeyEvent {
-                code: KeyCode::Char('d'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            } => {
-                self.detail_scroll = scroll_by(self.detail_scroll, HALF_PAGE_SCROLL_LINES);
-            }
-            KeyEvent {
-                code: KeyCode::Char('b'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            } => {
-                self.detail_scroll = scroll_by(self.detail_scroll, -FULL_PAGE_SCROLL_LINES);
-            }
-            KeyEvent {
-                code: KeyCode::Char('f'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            } => {
-                self.detail_scroll = scroll_by(self.detail_scroll, FULL_PAGE_SCROLL_LINES);
-            }
-            KeyEvent {
-                code: KeyCode::Char('g'),
-                modifiers: KeyModifiers::NONE,
-                ..
-            } => {
-                self.detail_scroll = 0;
-            }
-            KeyEvent {
-                code: KeyCode::Home,
-                ..
-            } => {
-                self.detail_scroll = 0;
-            }
-            _ => {}
         }
         Ok(false)
     }
@@ -777,81 +600,9 @@ impl TuiApp {
             } => {
                 self.mode = ViewMode::Detail;
             }
-            KeyEvent {
-                code: KeyCode::Up, ..
+            _ => {
+                apply_scroll_key(&mut self.detail_diff_scroll, key);
             }
-            | KeyEvent {
-                code: KeyCode::Char('k'),
-                ..
-            } => {
-                self.detail_diff_scroll = scroll_by(self.detail_diff_scroll, -1);
-            }
-            KeyEvent {
-                code: KeyCode::Down,
-                ..
-            }
-            | KeyEvent {
-                code: KeyCode::Char('j'),
-                ..
-            } => {
-                self.detail_diff_scroll = scroll_by(self.detail_diff_scroll, 1);
-            }
-            KeyEvent {
-                code: KeyCode::PageUp,
-                ..
-            } => {
-                self.detail_diff_scroll = scroll_by(self.detail_diff_scroll, -PAGE_SCROLL_LINES);
-            }
-            KeyEvent {
-                code: KeyCode::PageDown,
-                ..
-            } => {
-                self.detail_diff_scroll = scroll_by(self.detail_diff_scroll, PAGE_SCROLL_LINES);
-            }
-            KeyEvent {
-                code: KeyCode::Char('u'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            } => {
-                self.detail_diff_scroll =
-                    scroll_by(self.detail_diff_scroll, -HALF_PAGE_SCROLL_LINES);
-            }
-            KeyEvent {
-                code: KeyCode::Char('d'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            } => {
-                self.detail_diff_scroll =
-                    scroll_by(self.detail_diff_scroll, HALF_PAGE_SCROLL_LINES);
-            }
-            KeyEvent {
-                code: KeyCode::Char('b'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            } => {
-                self.detail_diff_scroll =
-                    scroll_by(self.detail_diff_scroll, -FULL_PAGE_SCROLL_LINES);
-            }
-            KeyEvent {
-                code: KeyCode::Char('f'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            } => {
-                self.detail_diff_scroll =
-                    scroll_by(self.detail_diff_scroll, FULL_PAGE_SCROLL_LINES);
-            }
-            KeyEvent {
-                code: KeyCode::Char('g'),
-                modifiers: KeyModifiers::NONE,
-                ..
-            }
-            | KeyEvent {
-                code: KeyCode::Home,
-                ..
-            } => {
-                self.detail_diff_scroll = 0;
-            }
-            _ => {}
         }
         Ok(false)
     }
@@ -979,6 +730,21 @@ impl TuiApp {
                     .map(str::to_owned)
             })
     }
+
+    fn scroll_target(&mut self) -> Option<&mut u16> {
+        match self.focus {
+            Focus::Preview => Some(&mut self.preview_scroll),
+            Focus::Revisions => Some(&mut self.revisions_scroll),
+            _ => None,
+        }
+    }
+
+    fn apply_focused_scroll(&mut self, key: KeyEvent) -> bool {
+        let Some(scroll) = self.scroll_target() else {
+            return false;
+        };
+        apply_scroll_key(scroll, key)
+    }
 }
 
 pub fn run(db_path: &Path, resolver: PathResolver) -> Result<()> {
@@ -1094,27 +860,7 @@ fn detail_lines(app: &TuiApp) -> Vec<Line<'static>> {
 }
 
 fn sort_checkouts(checkouts: &mut [JsonRow]) {
-    checkouts.sort_by(|a, b| {
-        let type_a = revision_type_rank(row_str(a, "revision_type"));
-        let type_b = revision_type_rank(row_str(b, "revision_type"));
-        let os_a = row_str(a, "os_flavor");
-        let os_b = row_str(b, "os_flavor");
-        let ts_a = row_str(a, "timestamp");
-        let ts_b = row_str(b, "timestamp");
-        type_a
-            .cmp(&type_b)
-            .then_with(|| os_a.cmp(os_b))
-            .then_with(|| ts_b.cmp(ts_a))
-            .then_with(|| row_str(a, "user").cmp(row_str(b, "user")))
-    });
-}
-
-fn revision_type_rank(revision_type: &str) -> u8 {
-    match revision_type {
-        "DEVELOP" | "" => 0,
-        "ARCHIVE" => 1,
-        _ => 2,
-    }
+    checkouts.sort_by(compare_revision_rows);
 }
 
 fn display_field(row: &JsonRow, key: &str) -> String {
@@ -1196,17 +942,6 @@ fn label_style() -> Style {
         .add_modifier(Modifier::BOLD)
 }
 
-fn relative_age(age_seconds: f64) -> String {
-    let age = age_seconds.max(0.0);
-    if age < 3_600.0 {
-        format!("{:.0}m ago", age / 60.0)
-    } else if age < 86_400.0 {
-        format!("{:.0}h ago", age / 3_600.0)
-    } else {
-        format!("{:.0}d ago", age / 86_400.0)
-    }
-}
-
 fn search_title(has_error: bool, is_searching: bool) -> &'static str {
     if has_error {
         "Search (invalid query)"
@@ -1249,6 +984,79 @@ fn move_selection(selected: usize, len: usize, delta: isize) -> usize {
 
 fn scroll_by(current: u16, delta: i16) -> u16 {
     current.saturating_add_signed(delta)
+}
+
+fn scroll_command(key: KeyEvent) -> Option<ScrollCommand> {
+    match key {
+        KeyEvent {
+            code: KeyCode::Up, ..
+        }
+        | KeyEvent {
+            code: KeyCode::Char('k'),
+            ..
+        } => Some(ScrollCommand::Delta(-1)),
+        KeyEvent {
+            code: KeyCode::Down,
+            ..
+        }
+        | KeyEvent {
+            code: KeyCode::Char('j'),
+            ..
+        } => Some(ScrollCommand::Delta(1)),
+        KeyEvent {
+            code: KeyCode::PageUp,
+            ..
+        } => Some(ScrollCommand::Delta(-PAGE_SCROLL_LINES)),
+        KeyEvent {
+            code: KeyCode::PageDown,
+            ..
+        } => Some(ScrollCommand::Delta(PAGE_SCROLL_LINES)),
+        KeyEvent {
+            code: KeyCode::Char('u'),
+            modifiers: KeyModifiers::CONTROL,
+            ..
+        } => Some(ScrollCommand::Delta(-HALF_PAGE_SCROLL_LINES)),
+        KeyEvent {
+            code: KeyCode::Char('d'),
+            modifiers: KeyModifiers::CONTROL,
+            ..
+        } => Some(ScrollCommand::Delta(HALF_PAGE_SCROLL_LINES)),
+        KeyEvent {
+            code: KeyCode::Char('b'),
+            modifiers: KeyModifiers::CONTROL,
+            ..
+        } => Some(ScrollCommand::Delta(-FULL_PAGE_SCROLL_LINES)),
+        KeyEvent {
+            code: KeyCode::Char('f'),
+            modifiers: KeyModifiers::CONTROL,
+            ..
+        } => Some(ScrollCommand::Delta(FULL_PAGE_SCROLL_LINES)),
+        KeyEvent {
+            code: KeyCode::Char('g'),
+            modifiers: KeyModifiers::NONE,
+            ..
+        }
+        | KeyEvent {
+            code: KeyCode::Home,
+            ..
+        } => Some(ScrollCommand::Top),
+        _ => None,
+    }
+}
+
+fn apply_scroll_command(scroll: &mut u16, command: ScrollCommand) {
+    match command {
+        ScrollCommand::Delta(delta) => *scroll = scroll_by(*scroll, delta),
+        ScrollCommand::Top => *scroll = 0,
+    }
+}
+
+fn apply_scroll_key(scroll: &mut u16, key: KeyEvent) -> bool {
+    let Some(command) = scroll_command(key) else {
+        return false;
+    };
+    apply_scroll_command(scroll, command);
+    true
 }
 
 struct TerminalGuard {

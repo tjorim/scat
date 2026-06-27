@@ -3,8 +3,10 @@ use std::path::{Path, PathBuf};
 use rusqlite::Connection;
 use serde::Deserialize;
 use serde_json::Value;
+use std::cmp::Ordering;
 use tracing::{debug, warn};
 
+use crate::core::db::{JsonRow, row_str};
 use crate::error::Result;
 
 // ---------------------------------------------------------------------------
@@ -168,6 +170,38 @@ pub struct ProcessedScript {
 pub const REVISION_TYPE_DEVELOP: &str = "DEVELOP";
 /// Revision type stored in the catalog.
 pub const REVISION_TYPE_ARCHIVE: &str = "ARCHIVE";
+
+/// Render a revision age in compact human-readable form.
+pub fn relative_age(age_seconds: f64) -> String {
+    let age = age_seconds.max(0.0);
+    if age < 3_600.0 {
+        format!("{:.0}m ago", age / 60.0)
+    } else if age < 86_400.0 {
+        format!("{:.0}h ago", age / 3_600.0)
+    } else {
+        format!("{:.0}d ago", age / 86_400.0)
+    }
+}
+
+/// Compare revision rows by the display order used by CLI and TUI.
+///
+/// DEVELOP rows sort first, then rows are grouped by OS flavor, newest
+/// timestamp first, and finally user name.
+pub fn compare_revision_rows(a: &JsonRow, b: &JsonRow) -> Ordering {
+    revision_type_rank(row_str(a, "revision_type"))
+        .cmp(&revision_type_rank(row_str(b, "revision_type")))
+        .then_with(|| row_str(a, "os_flavor").cmp(row_str(b, "os_flavor")))
+        .then_with(|| row_str(b, "timestamp").cmp(row_str(a, "timestamp")))
+        .then_with(|| row_str(a, "user").cmp(row_str(b, "user")))
+}
+
+fn revision_type_rank(revision_type: &str) -> u8 {
+    match revision_type {
+        REVISION_TYPE_DEVELOP | "" => 0,
+        REVISION_TYPE_ARCHIVE => 1,
+        _ => 2,
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Config loading
@@ -655,5 +689,36 @@ mod tests {
             "/catalog/scripts/foo.py",
             "/archive/bar_20240101_1200.py"
         ));
+    }
+
+    fn revision_row(revision_type: &str, os_flavor: &str, user: &str, timestamp: &str) -> JsonRow {
+        let mut row = JsonRow::new();
+        row.insert("revision_type".to_string(), revision_type.into());
+        row.insert("os_flavor".to_string(), os_flavor.into());
+        row.insert("user".to_string(), user.into());
+        row.insert("timestamp".to_string(), timestamp.into());
+        row
+    }
+
+    #[test]
+    fn relative_age_clamps_negative_values() {
+        assert_eq!(relative_age(-120.0), "0m ago");
+    }
+
+    #[test]
+    fn compare_revision_rows_orders_develop_os_newest_user() {
+        let mut rows = [
+            revision_row(REVISION_TYPE_DEVELOP, "ZOS", "alice", "20240101_1000"),
+            revision_row(REVISION_TYPE_ARCHIVE, "LINUX", "arch", "20240103_1000"),
+            revision_row(REVISION_TYPE_DEVELOP, "LINUX", "bob", "20240101_0900"),
+            revision_row(REVISION_TYPE_DEVELOP, "LINUX", "jdoe", "20240102_0900"),
+        ];
+
+        rows.sort_by(compare_revision_rows);
+
+        assert_eq!(row_str(&rows[0], "user"), "jdoe");
+        assert_eq!(row_str(&rows[1], "user"), "bob");
+        assert_eq!(row_str(&rows[2], "user"), "alice");
+        assert_eq!(row_str(&rows[3], "user"), "arch");
     }
 }
