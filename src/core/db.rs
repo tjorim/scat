@@ -39,6 +39,39 @@ pub fn row_display(row: &JsonRow, key: &str, fallback: &str) -> String {
     }
 }
 
+/// Append optional script metadata filters to a SQL `WHERE` clause.
+///
+/// `column_prefix` qualifies `language`, `owner`, and `tags` when the query
+/// uses a table alias, for example `Some("s.")` for `s.language`.
+pub fn append_script_filters(
+    sql: &mut String,
+    params: &mut Vec<SqlValue>,
+    column_prefix: Option<&str>,
+    language: Option<&str>,
+    owner: Option<&str>,
+    tag: Option<&str>,
+) {
+    let prefix = column_prefix.unwrap_or("");
+    let language_col = format!("{prefix}language");
+    let owner_col = format!("{prefix}owner");
+    let tags_col = format!("{prefix}tags");
+
+    if let Some(lang) = language {
+        sql.push_str(&format!(" AND LOWER({language_col}) = LOWER(?)"));
+        params.push(SqlValue::Text(lang.to_string()));
+    }
+    if let Some(own) = owner {
+        sql.push_str(&format!(" AND INSTR(LOWER({owner_col}), LOWER(?)) > 0"));
+        params.push(SqlValue::Text(own.to_string()));
+    }
+    if let Some(t) = tag {
+        sql.push_str(&format!(
+            " AND EXISTS (SELECT 1 FROM json_each({tags_col}) AS je WHERE LOWER(je.value) = LOWER(?))"
+        ));
+        params.push(SqlValue::Text(t.to_string()));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // DDL (see SCHEMA_VERSION)
 // ---------------------------------------------------------------------------
@@ -286,20 +319,7 @@ pub fn fts_query_filtered(
     let lim = limit as i64;
     let mut params = vec![SqlValue::Text(query.to_string())];
 
-    if let Some(lang) = language {
-        sql.push_str(" AND LOWER(s.language) = LOWER(?)");
-        params.push(SqlValue::Text(lang.to_string()));
-    }
-    if let Some(own) = owner {
-        sql.push_str(" AND INSTR(LOWER(s.owner), LOWER(?)) > 0");
-        params.push(SqlValue::Text(own.to_string()));
-    }
-    if let Some(t) = tag {
-        sql.push_str(
-            " AND EXISTS (SELECT 1 FROM json_each(s.tags) AS je WHERE LOWER(je.value) = LOWER(?))",
-        );
-        params.push(SqlValue::Text(t.to_string()));
-    }
+    append_script_filters(&mut sql, &mut params, Some("s."), language, owner, tag);
     sql.push_str(" ORDER BY bm25(script_fts) LIMIT ?");
     params.push(SqlValue::Integer(lim));
 
@@ -394,5 +414,59 @@ mod tests {
         assert_eq!(row_display(&row, "bool", "-"), "true");
         assert_eq!(row_display(&row, "array", "-"), "-");
         assert_eq!(row_display(&row, "missing", "-"), "-");
+    }
+
+    #[test]
+    fn append_script_filters_uses_unqualified_columns_and_parameter_order() {
+        let mut sql = String::from("SELECT * FROM scripts WHERE 1=1");
+        let mut params = Vec::new();
+
+        append_script_filters(
+            &mut sql,
+            &mut params,
+            None,
+            Some("python"),
+            Some("alice"),
+            Some("deploy"),
+        );
+
+        assert!(sql.contains("LOWER(language) = LOWER(?)"));
+        assert!(sql.contains("INSTR(LOWER(owner), LOWER(?)) > 0"));
+        assert!(sql.contains("json_each(tags)"));
+        assert_eq!(
+            params,
+            vec![
+                SqlValue::Text("python".to_string()),
+                SqlValue::Text("alice".to_string()),
+                SqlValue::Text("deploy".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn append_script_filters_uses_qualified_columns() {
+        let mut sql = String::from("SELECT s.* FROM scripts s WHERE 1=1");
+        let mut params = Vec::new();
+
+        append_script_filters(
+            &mut sql,
+            &mut params,
+            Some("s."),
+            Some("python"),
+            Some("alice"),
+            Some("deploy"),
+        );
+
+        assert!(sql.contains("LOWER(s.language) = LOWER(?)"));
+        assert!(sql.contains("INSTR(LOWER(s.owner), LOWER(?)) > 0"));
+        assert!(sql.contains("json_each(s.tags)"));
+        assert_eq!(
+            params,
+            vec![
+                SqlValue::Text("python".to_string()),
+                SqlValue::Text("alice".to_string()),
+                SqlValue::Text("deploy".to_string()),
+            ]
+        );
     }
 }

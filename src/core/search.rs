@@ -6,7 +6,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use crate::core::db::{
-    JsonRow, SCHEMA_VERSION, fts_query_filtered, query_rows, row_string, row_to_map,
+    JsonRow, SCHEMA_VERSION, append_script_filters, fts_query_filtered, query_rows, row_string,
+    row_to_map,
 };
 use crate::core::vc::{REVISION_TYPE_ARCHIVE, REVISION_TYPE_DEVELOP};
 use crate::error::{Error, Result};
@@ -177,29 +178,6 @@ pub struct SearchApi {
     pub conn: Connection,
 }
 
-fn append_script_filters(
-    sql: &mut String,
-    params: &mut Vec<SqlValue>,
-    language: Option<&str>,
-    owner: Option<&str>,
-    tag: Option<&str>,
-) {
-    if let Some(lang) = language {
-        sql.push_str(" AND LOWER(language) = LOWER(?)");
-        params.push(SqlValue::Text(lang.to_string()));
-    }
-    if let Some(own) = owner {
-        sql.push_str(" AND INSTR(LOWER(owner), LOWER(?)) > 0");
-        params.push(SqlValue::Text(own.to_string()));
-    }
-    if let Some(t) = tag {
-        sql.push_str(
-            " AND EXISTS (SELECT 1 FROM json_each(tags) AS je WHERE LOWER(je.value) = LOWER(?))",
-        );
-        params.push(SqlValue::Text(t.to_string()));
-    }
-}
-
 fn query_script_rows(conn: &Connection, sql: &str, params: Vec<SqlValue>) -> Result<Vec<JsonRow>> {
     let mut stmt = conn.prepare(sql)?;
     let cols: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
@@ -264,7 +242,7 @@ impl SearchApi {
         let mut sql =
             String::from("SELECT * FROM scripts WHERE INSTR(LOWER(logical_path), LOWER(?)) > 0");
         let mut params = vec![SqlValue::Text(query.to_string())];
-        append_script_filters(&mut sql, &mut params, language, owner, tag);
+        append_script_filters(&mut sql, &mut params, None, language, owner, tag);
         sql.push_str(" ORDER BY logical_path LIMIT ?");
         params.push(SqlValue::Integer(lim));
         query_script_rows(&self.conn, &sql, params)
@@ -308,7 +286,7 @@ impl SearchApi {
 
         let mut sql = String::from("SELECT * FROM scripts WHERE 1=1");
         let mut params = Vec::new();
-        append_script_filters(&mut sql, &mut params, language, owner, tag);
+        append_script_filters(&mut sql, &mut params, None, language, owner, tag);
         sql.push_str(" ORDER BY logical_path");
 
         let mut stmt = self.conn.prepare(&sql)?;
@@ -352,48 +330,13 @@ impl SearchApi {
     ) -> Result<Vec<JsonRow>> {
         let lim = limit as i64;
         let off = offset as i64;
-        match (language, owner, tag) {
-            (Some(lang), Some(own), Some(t)) => query_rows(
-                &self.conn,
-                "SELECT * FROM scripts WHERE LOWER(language)=LOWER(?) AND INSTR(LOWER(owner),LOWER(?))>0 AND EXISTS (SELECT 1 FROM json_each(tags) AS je WHERE LOWER(je.value)=LOWER(?)) ORDER BY logical_path LIMIT ? OFFSET ?",
-                &[&lang, &own, &t, &lim, &off],
-            ),
-            (Some(lang), Some(own), None) => query_rows(
-                &self.conn,
-                "SELECT * FROM scripts WHERE LOWER(language)=LOWER(?) AND INSTR(LOWER(owner),LOWER(?))>0 ORDER BY logical_path LIMIT ? OFFSET ?",
-                &[&lang, &own, &lim, &off],
-            ),
-            (Some(lang), None, Some(t)) => query_rows(
-                &self.conn,
-                "SELECT * FROM scripts WHERE LOWER(language)=LOWER(?) AND EXISTS (SELECT 1 FROM json_each(tags) AS je WHERE LOWER(je.value)=LOWER(?)) ORDER BY logical_path LIMIT ? OFFSET ?",
-                &[&lang, &t, &lim, &off],
-            ),
-            (None, Some(own), Some(t)) => query_rows(
-                &self.conn,
-                "SELECT * FROM scripts WHERE INSTR(LOWER(owner),LOWER(?))>0 AND EXISTS (SELECT 1 FROM json_each(tags) AS je WHERE LOWER(je.value)=LOWER(?)) ORDER BY logical_path LIMIT ? OFFSET ?",
-                &[&own, &t, &lim, &off],
-            ),
-            (Some(lang), None, None) => query_rows(
-                &self.conn,
-                "SELECT * FROM scripts WHERE LOWER(language)=LOWER(?) ORDER BY logical_path LIMIT ? OFFSET ?",
-                &[&lang, &lim, &off],
-            ),
-            (None, Some(own), None) => query_rows(
-                &self.conn,
-                "SELECT * FROM scripts WHERE INSTR(LOWER(owner),LOWER(?))>0 ORDER BY logical_path LIMIT ? OFFSET ?",
-                &[&own, &lim, &off],
-            ),
-            (None, None, Some(t)) => query_rows(
-                &self.conn,
-                "SELECT * FROM scripts WHERE EXISTS (SELECT 1 FROM json_each(tags) AS je WHERE LOWER(je.value)=LOWER(?)) ORDER BY logical_path LIMIT ? OFFSET ?",
-                &[&t, &lim, &off],
-            ),
-            (None, None, None) => query_rows(
-                &self.conn,
-                "SELECT * FROM scripts ORDER BY logical_path LIMIT ? OFFSET ?",
-                &[&lim, &off],
-            ),
-        }
+        let mut sql = String::from("SELECT * FROM scripts WHERE 1=1");
+        let mut params = Vec::new();
+        append_script_filters(&mut sql, &mut params, None, language, owner, tag);
+        sql.push_str(" ORDER BY logical_path LIMIT ? OFFSET ?");
+        params.push(SqlValue::Integer(lim));
+        params.push(SqlValue::Integer(off));
+        query_script_rows(&self.conn, &sql, params)
     }
 
     // ------------------------------------------------------------------
@@ -664,7 +607,7 @@ impl SearchApi {
              WHERE LOWER(fd.name) LIKE LOWER(?)",
         );
         let mut params = vec![SqlValue::Text(pattern)];
-        append_script_filters(&mut sql, &mut params, language, owner, tag);
+        append_script_filters(&mut sql, &mut params, Some("s."), language, owner, tag);
         sql.push_str(" ORDER BY s.logical_path LIMIT ?");
         params.push(SqlValue::Integer(lim));
         query_script_rows(&self.conn, &sql, params)

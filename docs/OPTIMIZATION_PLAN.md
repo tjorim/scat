@@ -204,7 +204,7 @@ green.
     `search`, `show`, `status`, and the TUI detail pane is byte-identical to
     pre-change (covered by existing tests).
 
-- [ ] **Step 5: Unify the language/owner/tag filter SQL**
+- [x] **Step 5: Unify the language/owner/tag filter SQL**
   - **Task**: Make `append_script_filters` the single source of the filter
     predicates. Rewrite `list_scripts` to build SQL dynamically via that helper
     (collapsing the 8-arm match into one path) and have `fts_query_filtered`
