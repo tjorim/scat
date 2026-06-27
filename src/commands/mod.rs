@@ -5,6 +5,7 @@ use anyhow::{Context, Result};
 use scat_core::core::diff::{
     ScriptDiffResult, diff_catalog_vs_checkout, diff_catalog_vs_file, diff_files, render_diff_text,
 };
+use scat_core::core::script_view::{ListField, ScriptView};
 use scat_core::core::search::{CatalogDiff, compare_catalogs};
 use scat_core::core::vc::{compare_revision_rows, relative_age};
 use scat_core::indexer::builder::{BuildOptions, build_index};
@@ -13,10 +14,10 @@ use tracing::warn;
 
 use crate::cli::{OutputFormat, SearchOutput};
 use crate::output::{
-    canonicalize_row_keys, checkout_label, contributors_from_script, dep_entry_to_json,
-    json_array_field, json_script_field, mtime_field, print_json, print_script_table,
-    print_script_table_with_fields, render_script_csv, render_table, script_rows_to_json,
-    selected_script_fields, size_field, str_field, used_by_row_to_json, warning_kinds,
+    canonicalize_row_keys, dash_or_empty, dep_entry_to_json, json_script_field, list_field_display,
+    mtime_field, print_json, print_script_table, print_script_table_with_fields, render_script_csv,
+    render_table, script_rows_to_json, selected_script_fields, size_field, str_field,
+    used_by_row_to_json, warning_kinds,
 };
 use crate::runtime::audit_exit_code;
 
@@ -131,8 +132,8 @@ fn sort_by_name_relevance(
 ) -> Vec<scat_core::core::db::JsonRow> {
     let q = query.to_lowercase();
     results.sort_by_cached_key(|row| {
-        let path = str_field(row, "logical_path");
-        let basename = path.rsplit('/').next().unwrap_or(&path);
+        let path = ScriptView::new(row).logical_path();
+        let basename = path.rsplit('/').next().unwrap_or(path);
         let stem = basename
             .rsplit_once('.')
             .map(|(s, _)| s)
@@ -168,22 +169,19 @@ fn group_by_symlinks(
     // Collect target paths covered by symlinks present in these results.
     let covered_targets: HashSet<String> = results
         .iter()
-        .filter_map(|r| {
-            r.get("symlink_target")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_string())
-        })
+        .map(ScriptView::new)
+        .map(|view| view.symlink_target())
+        .filter(|target| !target.is_empty())
+        .map(str::to_string)
         .collect();
 
     let mut output: Vec<scat_core::core::db::JsonRow> = Vec::new();
 
     for row in results {
-        let target = row
-            .get("symlink_target")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string());
+        let target = {
+            let target = ScriptView::new(&row).symlink_target();
+            (!target.is_empty()).then(|| target.to_string())
+        };
 
         if let Some(target_path) = target {
             // Symlink is the primary entry; show its target as a sub-row.
@@ -193,8 +191,7 @@ fn group_by_symlinks(
             output.push(sub);
         } else {
             // Non-symlink: skip if it's already shown as a ↳ sub-row above.
-            let path = str_field(&row, "logical_path");
-            if !covered_targets.contains(&path) {
+            if !covered_targets.contains(ScriptView::new(&row).logical_path()) {
                 output.push(row);
             }
         }
@@ -221,11 +218,10 @@ pub(crate) fn cmd_show(
     };
 
     // If the script is a symlink, resolve to the target and show that instead.
-    let symlink_note = raw
-        .get("symlink_target")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .map(|t| t.to_string());
+    let symlink_note = {
+        let target = ScriptView::new(&raw).symlink_target();
+        (!target.is_empty()).then(|| target.to_string())
+    };
     let resolved = symlink_note
         .as_deref()
         .map(|t| api.get_script(t))
@@ -236,6 +232,7 @@ pub(crate) fn cmd_show(
             (Some(t), Some(target)) => (t, target.as_str()),
             _ => (&raw, path),
         };
+    let view = ScriptView::new(script);
 
     // --functions: list function definitions table and return early.
     if show_functions {
@@ -291,7 +288,7 @@ pub(crate) fn cmd_show(
         let mut out = scat_core::core::db::JsonRow::new();
         // Always include path as the record identifier, mirroring how the table
         // branch always prints the path before the field list.
-        out.insert("path".to_string(), json_script_field(script, "path"));
+        out.insert("path".to_string(), json_script_field(view, "path"));
         for &field in &effective {
             match field {
                 "uses" => {
@@ -309,12 +306,12 @@ pub(crate) fn cmd_show(
                     out.insert("used_by".to_string(), serde_json::json!(used_by));
                 }
                 "contributors" => {
-                    let contribs = contributors_from_script(script);
+                    let contribs = view.contributors();
                     out.insert("contributors".to_string(), serde_json::json!(contribs));
                 }
                 _ => {
                     out.entry(field.to_string())
-                        .or_insert_with(|| json_script_field(script, field));
+                        .or_insert_with(|| json_script_field(view, field));
                 }
             }
         }
@@ -330,7 +327,7 @@ pub(crate) fn cmd_show(
         println!("  symlink → {target}");
         println!();
     }
-    println!("{}", str_field(script, "logical_path"));
+    println!("{}", dash_or_empty(view.logical_path()));
 
     let needs_deps = effective.iter().any(|f| *f == "uses" || *f == "used_by");
     let graph = needs_deps
@@ -339,13 +336,13 @@ pub(crate) fn cmd_show(
 
     for field in &effective {
         match *field {
-            "language" => println!("  Language     : {}", str_field(script, "language")),
-            "owner" => println!("  Owner        : {}", str_field(script, "owner")),
-            "purpose" => println!("  Purpose      : {}", str_field(script, "purpose")),
-            "checkout" => println!("  Checkout     : {}", checkout_label(script)),
-            "size" => println!("  Size         : {}", size_field(script)),
-            "indexed" => println!("  Indexed      : {}", str_field(script, "indexed_at")),
-            "symlink" => println!("  Symlink      : {}", str_field(script, "symlink_target")),
+            "language" => println!("  Language     : {}", dash_or_empty(view.language())),
+            "owner" => println!("  Owner        : {}", dash_or_empty(view.owner())),
+            "purpose" => println!("  Purpose      : {}", dash_or_empty(view.purpose())),
+            "checkout" => println!("  Checkout     : {}", view.checkout_label()),
+            "size" => println!("  Size         : {}", size_field(view)),
+            "indexed" => println!("  Indexed      : {}", dash_or_empty(view.indexed_at())),
+            "symlink" => println!("  Symlink      : {}", dash_or_empty(view.symlink_target())),
             "uses" => {
                 if let Some(g) = &graph {
                     println!("  Uses         : {}", g.uses.len());
@@ -356,17 +353,23 @@ pub(crate) fn cmd_show(
                     println!("  Used by      : {}", g.used_by.len());
                 }
             }
-            "mtime" => println!("  Modified     : {}", mtime_field(script)),
-            "tags" => println!("  Tags         : {}", json_array_field(script, "tags")),
+            "mtime" => println!("  Modified     : {}", mtime_field(view)),
+            "tags" => println!(
+                "  Tags         : {}",
+                list_field_display(view, ListField::Tags)
+            ),
             "entry_points" => {
                 println!(
                     "  Entries      : {}",
-                    json_array_field(script, "entry_points")
+                    list_field_display(view, ListField::EntryPoints)
                 )
             }
-            "related" => println!("  Related      : {}", json_array_field(script, "related")),
+            "related" => println!(
+                "  Related      : {}",
+                list_field_display(view, ListField::Related)
+            ),
             "contributors" => {
-                let contribs = contributors_from_script(script);
+                let contribs = view.contributors();
                 println!("  Contributors : {}", contribs.join(", "));
             }
             unknown => eprintln!("warning: unknown field '{unknown}'"),
@@ -439,11 +442,12 @@ pub(crate) fn cmd_status(
     let table_rows = rows
         .iter()
         .map(|row| {
+            let view = ScriptView::new(row);
             vec![
-                str_field(row, "logical_path"),
-                checkout_label(row),
-                str_field(row, "checkout_os"),
-                warning_kinds(row),
+                dash_or_empty(view.logical_path()),
+                view.checkout_label(),
+                dash_or_empty(view.checkout_os()),
+                warning_kinds(view),
             ]
         })
         .collect::<Vec<_>>();
@@ -587,12 +591,10 @@ pub(crate) fn cmd_symlinks(
     let inbound = api.symlinks_to(path)?;
     let script = api.get_script(path)?;
 
-    let outbound_target: Option<String> = script
-        .as_ref()
-        .and_then(|r| r.get("symlink_target"))
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string());
+    let outbound_target: Option<String> = script.as_ref().and_then(|r| {
+        let target = ScriptView::new(r).symlink_target();
+        (!target.is_empty()).then(|| target.to_string())
+    });
     let outbound_row: Option<scat_core::core::db::JsonRow> = outbound_target
         .as_deref()
         .map(|t| api.get_script(t))

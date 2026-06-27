@@ -15,6 +15,7 @@ use serde_json::Value;
 
 use scat_core::core::db::{JsonRow, row_string as str_field};
 use scat_core::core::resolve::PathResolver;
+use scat_core::core::script_view::ScriptView;
 use scat_core::core::vc::compare_revision_rows;
 
 mod detail;
@@ -247,7 +248,8 @@ impl TuiApp {
         let Some(path) = self
             .results
             .get(self.selected)
-            .and_then(|row| row.get("logical_path"))
+            .map(ScriptView::new)
+            .and_then(|view| view.logical_path_value())
             .and_then(Value::as_str)
         else {
             self.inflight_detail_id = None;
@@ -735,7 +737,8 @@ impl TuiApp {
 
     fn navigate_to_path(&mut self, logical_path: &str) -> Result<()> {
         let target_index = self.results.iter().position(|row| {
-            row.get("logical_path")
+            ScriptView::new(row)
+                .logical_path_value()
                 .and_then(Value::as_str)
                 .is_some_and(|value| value == logical_path)
         });
@@ -758,14 +761,16 @@ impl TuiApp {
     fn selected_logical_path(&self) -> Option<String> {
         self.detail
             .as_ref()
-            .and_then(|row| row.get("logical_path"))
+            .map(ScriptView::new)
+            .and_then(|view| view.logical_path_value())
             .and_then(Value::as_str)
             .filter(|path| !path.is_empty())
             .map(str::to_owned)
             .or_else(|| {
                 self.results
                     .get(self.selected)
-                    .and_then(|row| row.get("logical_path"))
+                    .map(ScriptView::new)
+                    .and_then(|view| view.logical_path_value())
                     .and_then(Value::as_str)
                     .filter(|path| !path.is_empty())
                     .map(str::to_owned)
@@ -801,7 +806,7 @@ impl TuiApp {
         let Some(row) = self.detail.as_ref() else {
             anyhow::bail!("No script selected.");
         };
-        let logical_path = str_field(row, "logical_path");
+        let logical_path = ScriptView::new(row).logical_path().to_string();
         if logical_path.is_empty() {
             anyhow::bail!("Selected script has no logical path.");
         }
@@ -869,13 +874,14 @@ impl TuiApp {
         let Some(row) = self.detail.as_ref() else {
             anyhow::bail!("No script selected.");
         };
-        let logical_path = str_field(row, "logical_path");
+        let view = ScriptView::new(row);
+        let logical_path = view.logical_path().to_string();
         if logical_path.is_empty() {
             anyhow::bail!("Selected script has no logical path.");
         }
         Ok(viewer::CatalogView {
             logical_path,
-            content: str_field(row, "content"),
+            content: view.content().to_string(),
         })
     }
 
