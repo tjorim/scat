@@ -105,13 +105,14 @@ fn draw_header(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-fn draw_detail_view(frame: &mut Frame<'_>, app: &TuiApp) {
+fn draw_detail_view(frame: &mut Frame<'_>, app: &mut TuiApp) {
     let root = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(10), Constraint::Length(1)])
         .split(frame.area());
 
     let lines = super::detail_lines(app);
+    clamp_scroll_offset(&mut app.detail_scroll, lines.len(), root[0]);
     frame.render_widget(
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
@@ -152,13 +153,22 @@ fn draw_detail_view(frame: &mut Frame<'_>, app: &TuiApp) {
     );
 }
 
-fn draw_detail_diff_view(frame: &mut Frame<'_>, app: &TuiApp) {
+fn draw_detail_diff_view(frame: &mut Frame<'_>, app: &mut TuiApp) {
     let root = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(10), Constraint::Length(1)])
         .split(frame.area());
 
     let spinner = spinner_char(app.tick);
+    if app.detail_diff_loading {
+        app.detail_diff_scroll = 0;
+    } else {
+        clamp_scroll_offset(
+            &mut app.detail_diff_scroll,
+            line_count(app.detail_diff_output.as_str()),
+            root[0],
+        );
+    }
     let (content, title) = if app.detail_diff_loading {
         (
             Cow::Owned(format!("{spinner} Loading diff…")),
@@ -392,8 +402,17 @@ fn draw_metadata(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
     );
 }
 
-fn draw_preview(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
+fn draw_preview(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
     let spinner = spinner_char(app.tick);
+    if app.detail_loading {
+        app.preview_scroll = 0;
+    } else {
+        clamp_scroll_offset(
+            &mut app.preview_scroll,
+            line_count(app.cached_preview.as_str()),
+            area,
+        );
+    }
     let (content, title) = if app.detail_loading {
         (
             Cow::Owned(format!("{spinner} Loading…")),
@@ -576,9 +595,10 @@ fn draw_functions(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
     );
 }
 
-fn draw_revisions(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
+fn draw_revisions(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
     let spinner = spinner_char(app.tick);
     if app.detail_loading {
+        app.revisions_scroll = 0;
         frame.render_widget(
             Paragraph::new(format!("{spinner} Loading…")).block(
                 Block::default()
@@ -591,10 +611,6 @@ fn draw_revisions(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
         return;
     }
 
-    let title = format!(
-        "Revisions (line {})",
-        app.revisions_scroll.saturating_add(1)
-    );
     let lines = if app.checkouts.is_empty() {
         vec![Line::from(Span::styled(
             "No revision data.",
@@ -603,6 +619,11 @@ fn draw_revisions(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
     } else {
         revision_lines(&app.checkouts)
     };
+    clamp_scroll_offset(&mut app.revisions_scroll, lines.len(), area);
+    let title = format!(
+        "Revisions (line {})",
+        app.revisions_scroll.saturating_add(1)
+    );
     frame.render_widget(
         Paragraph::new(Text::from(lines))
             .wrap(Wrap { trim: true })
@@ -733,6 +754,16 @@ fn draw_footer(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
+fn line_count(text: &str) -> usize {
+    text.lines().count().max(1)
+}
+
+fn clamp_scroll_offset(scroll: &mut u16, line_count: usize, area: Rect) {
+    let viewport_lines = usize::from(area.height.saturating_sub(2)).max(1);
+    let max_scroll = line_count.saturating_sub(viewport_lines);
+    *scroll = (*scroll).min(u16::try_from(max_scroll).unwrap_or(u16::MAX));
+}
+
 /// Returns a styled span for a key hint label.
 fn hint_key(key: &'static str) -> Span<'static> {
     Span::styled(
@@ -807,7 +838,8 @@ fn left_truncate_path(path: &str, max_chars: usize) -> String {
 mod tests {
     use serde_json::{Map, Value};
 
-    use super::{left_truncate_path, revision_lines};
+    use super::{clamp_scroll_offset, left_truncate_path, line_count, revision_lines};
+    use ratatui::layout::Rect;
 
     fn line_text(line: &ratatui::text::Line) -> String {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
@@ -854,6 +886,23 @@ mod tests {
                 .any(|t| t == "  ZOS     bob          20231231_0900")
         );
         assert!(!texts.iter().any(|t| t == "  (no archive entries.)"));
+    }
+
+    #[test]
+    fn line_count_treats_empty_text_as_one_rendered_line() {
+        assert_eq!(line_count(""), 1);
+        assert_eq!(line_count("a\nb\nc"), 3);
+    }
+
+    #[test]
+    fn clamp_scroll_offset_uses_inner_height() {
+        let mut scroll = 99;
+        clamp_scroll_offset(&mut scroll, 10, Rect::new(0, 0, 20, 5));
+        assert_eq!(scroll, 7);
+
+        let mut scroll = 99;
+        clamp_scroll_offset(&mut scroll, 2, Rect::new(0, 0, 20, 5));
+        assert_eq!(scroll, 0);
     }
 
     #[test]
