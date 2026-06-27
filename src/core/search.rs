@@ -5,7 +5,11 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use crate::core::db::{JsonRow, SCHEMA_VERSION, fts_query_filtered, query_rows, row_to_map};
+use crate::core::db::{
+    JsonRow, SCHEMA_VERSION, append_script_filters, fts_query_filtered, query_rows, row_string,
+    row_to_map,
+};
+use crate::core::script_view::{ListField, ScriptView};
 use crate::core::vc::{REVISION_TYPE_ARCHIVE, REVISION_TYPE_DEVELOP};
 use crate::error::{Error, Result};
 
@@ -175,29 +179,6 @@ pub struct SearchApi {
     pub conn: Connection,
 }
 
-fn append_script_filters(
-    sql: &mut String,
-    params: &mut Vec<SqlValue>,
-    language: Option<&str>,
-    owner: Option<&str>,
-    tag: Option<&str>,
-) {
-    if let Some(lang) = language {
-        sql.push_str(" AND LOWER(language) = LOWER(?)");
-        params.push(SqlValue::Text(lang.to_string()));
-    }
-    if let Some(own) = owner {
-        sql.push_str(" AND INSTR(LOWER(owner), LOWER(?)) > 0");
-        params.push(SqlValue::Text(own.to_string()));
-    }
-    if let Some(t) = tag {
-        sql.push_str(
-            " AND EXISTS (SELECT 1 FROM json_each(tags) AS je WHERE LOWER(je.value) = LOWER(?))",
-        );
-        params.push(SqlValue::Text(t.to_string()));
-    }
-}
-
 fn query_script_rows(conn: &Connection, sql: &str, params: Vec<SqlValue>) -> Result<Vec<JsonRow>> {
     let mut stmt = conn.prepare(sql)?;
     let cols: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
@@ -216,16 +197,6 @@ impl SearchApi {
     // Full-text search
     // ------------------------------------------------------------------
 
-    /// Run full-text search with optional language filter.
-    pub fn search(
-        &self,
-        query: &str,
-        limit: usize,
-        language: Option<&str>,
-    ) -> Result<Vec<JsonRow>> {
-        self.search_with_filters(query, limit, language, None, None)
-    }
-
     /// Run full-text search with optional language, owner, and tag filters.
     pub fn search_with_filters(
         &self,
@@ -236,17 +207,6 @@ impl SearchApi {
         tag: Option<&str>,
     ) -> Result<Vec<JsonRow>> {
         fts_query_filtered(&self.conn, query, limit, language, owner, tag)
-    }
-
-    /// Search by partial logical path using substring match.
-    /// Used when the query contains `/` or `.` which are invalid in FTS5 queries.
-    pub fn search_by_path(
-        &self,
-        query: &str,
-        limit: usize,
-        language: Option<&str>,
-    ) -> Result<Vec<JsonRow>> {
-        self.search_by_path_with_filters(query, limit, language, None, None)
     }
 
     /// Search by partial logical path with optional language, owner, and tag filters.
@@ -262,7 +222,7 @@ impl SearchApi {
         let mut sql =
             String::from("SELECT * FROM scripts WHERE INSTR(LOWER(logical_path), LOWER(?)) > 0");
         let mut params = vec![SqlValue::Text(query.to_string())];
-        append_script_filters(&mut sql, &mut params, language, owner, tag);
+        append_script_filters(&mut sql, &mut params, None, language, owner, tag);
         sql.push_str(" ORDER BY logical_path LIMIT ?");
         params.push(SqlValue::Integer(lim));
         query_script_rows(&self.conn, &sql, params)
@@ -282,16 +242,6 @@ impl SearchApi {
     ///
     /// Returns [`Error`] when the regex pattern is invalid or a database error
     /// occurs.
-    pub fn search_by_regex(
-        &self,
-        pattern: &str,
-        limit: usize,
-        language: Option<&str>,
-    ) -> Result<Vec<JsonRow>> {
-        self.search_by_regex_with_filters(pattern, limit, language, None, None)
-    }
-
-    /// Search scripts by regex with optional SQL pre-filters.
     pub fn search_by_regex_with_filters(
         &self,
         pattern: &str,
@@ -306,7 +256,7 @@ impl SearchApi {
 
         let mut sql = String::from("SELECT * FROM scripts WHERE 1=1");
         let mut params = Vec::new();
-        append_script_filters(&mut sql, &mut params, language, owner, tag);
+        append_script_filters(&mut sql, &mut params, None, language, owner, tag);
         sql.push_str(" ORDER BY logical_path");
 
         let mut stmt = self.conn.prepare(&sql)?;
@@ -350,48 +300,13 @@ impl SearchApi {
     ) -> Result<Vec<JsonRow>> {
         let lim = limit as i64;
         let off = offset as i64;
-        match (language, owner, tag) {
-            (Some(lang), Some(own), Some(t)) => query_rows(
-                &self.conn,
-                "SELECT * FROM scripts WHERE LOWER(language)=LOWER(?) AND INSTR(LOWER(owner),LOWER(?))>0 AND EXISTS (SELECT 1 FROM json_each(tags) AS je WHERE LOWER(je.value)=LOWER(?)) ORDER BY logical_path LIMIT ? OFFSET ?",
-                &[&lang, &own, &t, &lim, &off],
-            ),
-            (Some(lang), Some(own), None) => query_rows(
-                &self.conn,
-                "SELECT * FROM scripts WHERE LOWER(language)=LOWER(?) AND INSTR(LOWER(owner),LOWER(?))>0 ORDER BY logical_path LIMIT ? OFFSET ?",
-                &[&lang, &own, &lim, &off],
-            ),
-            (Some(lang), None, Some(t)) => query_rows(
-                &self.conn,
-                "SELECT * FROM scripts WHERE LOWER(language)=LOWER(?) AND EXISTS (SELECT 1 FROM json_each(tags) AS je WHERE LOWER(je.value)=LOWER(?)) ORDER BY logical_path LIMIT ? OFFSET ?",
-                &[&lang, &t, &lim, &off],
-            ),
-            (None, Some(own), Some(t)) => query_rows(
-                &self.conn,
-                "SELECT * FROM scripts WHERE INSTR(LOWER(owner),LOWER(?))>0 AND EXISTS (SELECT 1 FROM json_each(tags) AS je WHERE LOWER(je.value)=LOWER(?)) ORDER BY logical_path LIMIT ? OFFSET ?",
-                &[&own, &t, &lim, &off],
-            ),
-            (Some(lang), None, None) => query_rows(
-                &self.conn,
-                "SELECT * FROM scripts WHERE LOWER(language)=LOWER(?) ORDER BY logical_path LIMIT ? OFFSET ?",
-                &[&lang, &lim, &off],
-            ),
-            (None, Some(own), None) => query_rows(
-                &self.conn,
-                "SELECT * FROM scripts WHERE INSTR(LOWER(owner),LOWER(?))>0 ORDER BY logical_path LIMIT ? OFFSET ?",
-                &[&own, &lim, &off],
-            ),
-            (None, None, Some(t)) => query_rows(
-                &self.conn,
-                "SELECT * FROM scripts WHERE EXISTS (SELECT 1 FROM json_each(tags) AS je WHERE LOWER(je.value)=LOWER(?)) ORDER BY logical_path LIMIT ? OFFSET ?",
-                &[&t, &lim, &off],
-            ),
-            (None, None, None) => query_rows(
-                &self.conn,
-                "SELECT * FROM scripts ORDER BY logical_path LIMIT ? OFFSET ?",
-                &[&lim, &off],
-            ),
-        }
+        let mut sql = String::from("SELECT * FROM scripts WHERE 1=1");
+        let mut params = Vec::new();
+        append_script_filters(&mut sql, &mut params, None, language, owner, tag);
+        sql.push_str(" ORDER BY logical_path LIMIT ? OFFSET ?");
+        params.push(SqlValue::Integer(lim));
+        params.push(SqlValue::Integer(off));
+        query_script_rows(&self.conn, &sql, params)
     }
 
     // ------------------------------------------------------------------
@@ -525,8 +440,8 @@ impl SearchApi {
         let uses = uses_rows
             .into_iter()
             .map(|row| {
-                let dep = str_val(&row, "depends_on_path");
-                let lp = str_val(&row, "logical_path");
+                let dep = row_string(&row, "depends_on_path");
+                let lp = row_string(&row, "logical_path");
                 let indexed = !lp.is_empty();
                 DependencyEntry {
                     logical_path: if indexed { lp } else { dep.clone() },
@@ -565,30 +480,6 @@ impl SearchApi {
              WHERE script_id = ?
              ORDER BY line, name",
             &[&script_id],
-        )
-    }
-
-    /// Return callers of a function resolved to `logical_path`.
-    pub fn get_callers_of(&self, function_name: &str, logical_path: &str) -> Result<Vec<JsonRow>> {
-        let script = match self.get_script(logical_path)? {
-            Some(s) => s,
-            None => return Ok(vec![]),
-        };
-        let script_id = script.get("id").and_then(Value::as_i64).unwrap_or(0);
-        // Match bare calls (`run`) and attribute-style calls (`helper.run`, `m.run`).
-        // The resolved_target_script_id guard already scopes to the right script, so
-        // callee-based matching is sufficient to identify the specific function.
-        let suffix_like = format!("%.{function_name}");
-        query_rows(
-            &self.conn,
-            "SELECT DISTINCT s.logical_path, s.language, s.owner, s.purpose,
-                            fc.caller, fc.callee, fc.line, fc.resolved_target_name
-             FROM function_calls fc
-             JOIN scripts s ON s.id = fc.script_id
-             WHERE fc.resolved_target_script_id = ?
-               AND (fc.callee = ? OR fc.callee LIKE ?)
-             ORDER BY s.logical_path, fc.line",
-            &[&script_id, &function_name, &suffix_like],
         )
     }
 
@@ -634,16 +525,6 @@ impl SearchApi {
         )
     }
 
-    /// Return scripts that define a function whose name contains `name` (case-insensitive substring).
-    ///
-    /// The `name` parameter is wrapped with `%` wildcards for LIKE matching, enabling
-    /// substring search (e.g. `"deploy"` matches `"deploy_service"`).  SQL wildcards (`%`, `_`)
-    /// present in `name` are intentionally honoured, allowing callers to perform broader
-    /// pattern queries when needed.
-    pub fn search_scripts_by_function(&self, name: &str, limit: usize) -> Result<Vec<JsonRow>> {
-        self.search_scripts_by_function_with_filters(name, limit, None, None, None)
-    }
-
     /// Return scripts that define a matching function and satisfy optional filters.
     pub fn search_scripts_by_function_with_filters(
         &self,
@@ -662,7 +543,7 @@ impl SearchApi {
              WHERE LOWER(fd.name) LIKE LOWER(?)",
         );
         let mut params = vec![SqlValue::Text(pattern)];
-        append_script_filters(&mut sql, &mut params, language, owner, tag);
+        append_script_filters(&mut sql, &mut params, Some("s."), language, owner, tag);
         sql.push_str(" ORDER BY s.logical_path LIMIT ?");
         params.push(SqlValue::Integer(lim));
         query_script_rows(&self.conn, &sql, params)
@@ -964,7 +845,7 @@ impl SearchApi {
             findings.extend(rows.into_iter().map(|row| AuditFinding {
                 check: "unowned".to_string(),
                 severity: "warn".to_string(),
-                logical_path: str_val(&row, "logical_path"),
+                logical_path: row_string(&row, "logical_path"),
                 detail: "no techowner or funcowner".to_string(),
             }));
         }
@@ -981,7 +862,7 @@ impl SearchApi {
             findings.extend(rows.into_iter().map(|row| AuditFinding {
                 check: "no-purpose".to_string(),
                 severity: "warn".to_string(),
-                logical_path: str_val(&row, "logical_path"),
+                logical_path: row_string(&row, "logical_path"),
                 detail: "purpose/brief is missing".to_string(),
             }));
         }
@@ -997,11 +878,11 @@ impl SearchApi {
                 &[],
             )?;
             findings.extend(rows.into_iter().map(|row| {
-                let dep = str_val(&row, "dependency");
+                let dep = row_string(&row, "dependency");
                 AuditFinding {
                     check: "broken-deps".to_string(),
                     severity: "error".to_string(),
-                    logical_path: str_val(&row, "logical_path"),
+                    logical_path: row_string(&row, "logical_path"),
                     detail: format!("depends on {dep} (not indexed)"),
                 }
             }));
@@ -1022,7 +903,7 @@ impl SearchApi {
             findings.extend(rows.into_iter().map(|row| AuditFinding {
                 check: "orphan-checkouts".to_string(),
                 severity: "warn".to_string(),
-                logical_path: str_val(&row, "logical_path"),
+                logical_path: row_string(&row, "logical_path"),
                 detail: "vc checkout exists without catalog entry".to_string(),
             }));
         }
@@ -1048,7 +929,7 @@ impl SearchApi {
                 AuditFinding {
                     check: "stale-checkouts".to_string(),
                     severity: "info".to_string(),
-                    logical_path: str_val(&row, "logical_path"),
+                    logical_path: row_string(&row, "logical_path"),
                     detail: format!("checkout is stale ({age:.0} days old)"),
                 }
             }));
@@ -1073,7 +954,7 @@ impl SearchApi {
             findings.extend(rows.into_iter().map(|row| AuditFinding {
                 check: "dead-scripts".to_string(),
                 severity: "info".to_string(),
-                logical_path: str_val(&row, "logical_path"),
+                logical_path: row_string(&row, "logical_path"),
                 detail: "no dependents, never checked out".to_string(),
             }));
         }
@@ -1091,7 +972,7 @@ impl SearchApi {
             findings.extend(rows.into_iter().map(|row| AuditFinding {
                 check: "no-description".to_string(),
                 severity: "info".to_string(),
-                logical_path: str_val(&row, "logical_path"),
+                logical_path: row_string(&row, "logical_path"),
                 detail: "missing both docstring and @brief metadata".to_string(),
             }));
         }
@@ -1179,13 +1060,6 @@ impl SearchApi {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-fn str_val(row: &JsonRow, key: &str) -> String {
-    row.get(key)
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string()
-}
 
 fn should_run(selected: &Option<std::collections::HashSet<String>>, check: &str) -> bool {
     selected
@@ -1309,16 +1183,15 @@ fn scripts_for_diff(conn: &Connection) -> Result<BTreeMap<String, DiffScript>> {
     )?;
     let mut scripts = BTreeMap::new();
     for row in rows {
-        let logical_path = str_val(&row, "logical_path");
-        let metadata = row
-            .get("metadata_json")
-            .and_then(Value::as_str)
-            .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
-            .and_then(|value| value.as_object().cloned())
-            .unwrap_or_default();
+        let view = ScriptView::new(&row);
+        let logical_path = view.logical_path().to_string();
+        let metadata = view.metadata();
 
         let mut fields = BTreeMap::new();
-        fields.insert("purpose".to_string(), value_or_null(&row, "purpose"));
+        fields.insert(
+            "purpose".to_string(),
+            view.purpose_value().cloned().unwrap_or(Value::Null),
+        );
         fields.insert(
             "techowner".to_string(),
             metadata.get("techowner").cloned().unwrap_or(Value::Null),
@@ -1327,14 +1200,26 @@ fn scripts_for_diff(conn: &Connection) -> Result<BTreeMap<String, DiffScript>> {
             "funcowner".to_string(),
             metadata.get("funcowner").cloned().unwrap_or(Value::Null),
         );
-        fields.insert("owner".to_string(), value_or_null(&row, "owner"));
-        fields.insert("language".to_string(), value_or_null(&row, "language"));
-        fields.insert("tags".to_string(), json_list_value(&row, "tags"));
+        fields.insert(
+            "owner".to_string(),
+            view.owner_value().cloned().unwrap_or(Value::Null),
+        );
+        fields.insert(
+            "language".to_string(),
+            view.language_value().cloned().unwrap_or(Value::Null),
+        );
+        fields.insert(
+            "tags".to_string(),
+            view.list_value_or_empty(ListField::Tags),
+        );
         fields.insert(
             "entry_points".to_string(),
-            json_list_value(&row, "entry_points"),
+            view.list_value_or_empty(ListField::EntryPoints),
         );
-        fields.insert("related".to_string(), json_list_value(&row, "related"));
+        fields.insert(
+            "related".to_string(),
+            view.list_value_or_empty(ListField::Related),
+        );
 
         scripts.insert(
             logical_path.clone(),
@@ -1358,21 +1243,9 @@ fn dependencies_for_diff(conn: &Connection) -> Result<BTreeMap<String, BTreeSet<
     )?;
     let mut deps: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for row in rows {
-        deps.entry(str_val(&row, "logical_path"))
+        deps.entry(row_string(&row, "logical_path"))
             .or_default()
-            .insert(str_val(&row, "depends_on_path"));
+            .insert(row_string(&row, "depends_on_path"));
     }
     Ok(deps)
-}
-
-fn value_or_null(row: &JsonRow, key: &str) -> Value {
-    row.get(key).cloned().unwrap_or(Value::Null)
-}
-
-fn json_list_value(row: &JsonRow, key: &str) -> Value {
-    row.get(key)
-        .and_then(Value::as_str)
-        .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
-        .filter(Value::is_array)
-        .unwrap_or_else(|| Value::Array(Vec::new()))
 }

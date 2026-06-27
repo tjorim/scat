@@ -107,7 +107,9 @@ fn search_returns_ranked_results() {
         "",
     );
 
-    let results = api.search("patch", 10, None).unwrap();
+    let results = api
+        .search_with_filters("patch", 10, None, None, None)
+        .unwrap();
     assert_eq!(results.len(), 2);
     assert_eq!(
         results[0]["logical_path"].as_str().unwrap(),
@@ -135,7 +137,9 @@ fn search_language_filter() {
         "",
     );
 
-    let results = api.search("common", 10, Some("python")).unwrap();
+    let results = api
+        .search_with_filters("common", 10, Some("python"), None, None)
+        .unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(
         results[0]["logical_path"].as_str().unwrap(),
@@ -206,8 +210,14 @@ fn search_index_updates_when_script_content_changes() {
         )
         .unwrap();
 
-    assert!(api.search("old", 10, None).unwrap().is_empty());
-    let results = api.search("new", 10, None).unwrap();
+    assert!(
+        api.search_with_filters("old", 10, None, None, None)
+            .unwrap()
+            .is_empty()
+    );
+    let results = api
+        .search_with_filters("new", 10, None, None, None)
+        .unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(
         results[0]["logical_path"].as_str().unwrap(),
@@ -234,7 +244,11 @@ fn search_index_removes_deleted_scripts() {
         )
         .unwrap();
 
-    assert!(api.search("deletable", 10, None).unwrap().is_empty());
+    assert!(
+        api.search_with_filters("deletable", 10, None, None, None)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -651,9 +665,6 @@ fn function_graph_query_helpers() {
     let defs = api
         .get_functions_defined_in("/catalog/scripts/helper.py")
         .unwrap();
-    let callers = api
-        .get_callers_of("run", "/catalog/scripts/helper.py")
-        .unwrap();
     let all_callers = api
         .get_callers_of_functions_in("/catalog/scripts/helper.py")
         .unwrap();
@@ -662,14 +673,9 @@ fn function_graph_query_helpers() {
         .unwrap();
 
     assert!(!defs.is_empty());
-    assert!(!callers.is_empty());
     assert!(!all_callers.is_empty());
     assert!(!deps.is_empty());
     assert_eq!(defs[0]["name"].as_str().unwrap(), "run");
-    assert_eq!(
-        callers[0]["logical_path"].as_str().unwrap(),
-        "/catalog/scripts/main.py"
-    );
     assert_eq!(all_callers[0]["target_function"].as_str().unwrap(), "run");
     assert_eq!(
         all_callers[0]["logical_path"].as_str().unwrap(),
@@ -1073,7 +1079,9 @@ fn regex_matches_logical_path() {
     );
     insert(&api, "/catalog/scripts/deploy.sh", "", "shell", "bob", "");
 
-    let results = api.search_by_regex(r"check.*\.py", 10, None).unwrap();
+    let results = api
+        .search_by_regex_with_filters(r"check.*\.py", 10, None, None, None)
+        .unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(
         results[0]["logical_path"].as_str().unwrap(),
@@ -1101,7 +1109,9 @@ fn regex_matches_purpose() {
         "deployment helper",
     );
 
-    let results = api.search_by_regex(r"backup", 10, None).unwrap();
+    let results = api
+        .search_by_regex_with_filters(r"backup", 10, None, None, None)
+        .unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(
         results[0]["logical_path"].as_str().unwrap(),
@@ -1114,7 +1124,9 @@ fn regex_no_match_returns_empty() {
     let (api, _f) = make_api();
     insert(&api, "/catalog/scripts/deploy.sh", "", "shell", "", "");
 
-    let results = api.search_by_regex(r"check.*\.py", 10, None).unwrap();
+    let results = api
+        .search_by_regex_with_filters(r"check.*\.py", 10, None, None, None)
+        .unwrap();
     assert!(results.is_empty());
 }
 
@@ -1124,7 +1136,9 @@ fn regex_language_filter_applied() {
     insert(&api, "/catalog/scripts/check.py", "", "python", "", "");
     insert(&api, "/catalog/scripts/check.sh", "", "shell", "", "");
 
-    let results = api.search_by_regex(r"check", 10, Some("python")).unwrap();
+    let results = api
+        .search_by_regex_with_filters(r"check", 10, Some("python"), None, None)
+        .unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(
         results[0]["logical_path"].as_str().unwrap(),
@@ -1139,7 +1153,9 @@ fn regex_limit_respected() {
     insert(&api, "/catalog/scripts/b_check.py", "", "python", "", "");
     insert(&api, "/catalog/scripts/c_check.py", "", "python", "", "");
 
-    let results = api.search_by_regex(r"check", 2, None).unwrap();
+    let results = api
+        .search_by_regex_with_filters(r"check", 2, None, None, None)
+        .unwrap();
     assert_eq!(results.len(), 2);
 }
 
@@ -1185,7 +1201,7 @@ fn regex_anchor_start_of_path() {
     insert(&api, "/other/backup.py", "", "python", "", "");
 
     let results = api
-        .search_by_regex(r"^/catalog/scripts/.*backup", 10, None)
+        .search_by_regex_with_filters(r"^/catalog/scripts/.*backup", 10, None, None, None)
         .unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(
@@ -1197,7 +1213,9 @@ fn regex_anchor_start_of_path() {
 #[test]
 fn regex_invalid_pattern_returns_error() {
     let (api, _f) = make_api();
-    let err = api.search_by_regex(r"[invalid", 10, None).unwrap_err();
+    let err = api
+        .search_by_regex_with_filters(r"[invalid", 10, None, None, None)
+        .unwrap_err();
     assert!(err.to_string().contains("invalid regex pattern"));
 }
 
@@ -1339,18 +1357,22 @@ fn search_scripts_by_function_substring_match() {
         )
         .unwrap();
 
-    let results = api.search_scripts_by_function("deploy", 10).unwrap();
+    let results = api
+        .search_scripts_by_function_with_filters("deploy", 10, None, None, None)
+        .unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(
         results[0]["logical_path"].as_str().unwrap(),
         "/catalog/scripts/helper.py"
     );
 
-    let results = api.search_scripts_by_function("roll", 10).unwrap();
+    let results = api
+        .search_scripts_by_function_with_filters("roll", 10, None, None, None)
+        .unwrap();
     assert_eq!(results.len(), 1);
 
     let results = api
-        .search_scripts_by_function("nonexistent_fn", 10)
+        .search_scripts_by_function_with_filters("nonexistent_fn", 10, None, None, None)
         .unwrap();
     assert!(results.is_empty());
 }
@@ -1369,9 +1391,13 @@ fn search_scripts_by_function_case_insensitive() {
         )
         .unwrap();
 
-    let results = api.search_scripts_by_function("myhelper", 10).unwrap();
+    let results = api
+        .search_scripts_by_function_with_filters("myhelper", 10, None, None, None)
+        .unwrap();
     assert_eq!(results.len(), 1);
-    let results = api.search_scripts_by_function("MYHELPER", 10).unwrap();
+    let results = api
+        .search_scripts_by_function_with_filters("MYHELPER", 10, None, None, None)
+        .unwrap();
     assert_eq!(results.len(), 1);
 }
 

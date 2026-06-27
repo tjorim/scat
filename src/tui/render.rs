@@ -5,8 +5,10 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
+use scat_core::core::script_view::ScriptView;
+use scat_core::core::vc::relative_age;
 
-use super::{Focus, TuiApp, ViewMode};
+use super::{Focus, TuiApp, ViewMode, detail};
 
 const SPINNER_FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
@@ -81,7 +83,8 @@ fn draw_header(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
     let path_text = app
         .detail
         .as_ref()
-        .and_then(|row| row.get("logical_path"))
+        .map(ScriptView::new)
+        .and_then(|view| view.logical_path_value())
         .and_then(serde_json::Value::as_str)
         .filter(|p| !p.is_empty())
         .map(|p| {
@@ -105,13 +108,14 @@ fn draw_header(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-fn draw_detail_view(frame: &mut Frame<'_>, app: &TuiApp) {
+fn draw_detail_view(frame: &mut Frame<'_>, app: &mut TuiApp) {
     let root = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(10), Constraint::Length(1)])
         .split(frame.area());
 
-    let lines = super::detail_lines(app);
+    let lines = detail::detail_lines(app);
+    clamp_scroll_offset(&mut app.detail_scroll, lines.len(), root[0]);
     frame.render_widget(
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
@@ -135,14 +139,16 @@ fn draw_detail_view(frame: &mut Frame<'_>, app: &TuiApp) {
         Paragraph::new(Line::from(vec![
             hint_key("d"),
             Span::raw(" diff  "),
+            hint_key("v"),
+            Span::raw(" view catalog  "),
+            hint_key("V"),
+            Span::raw(" view source  "),
             hint_key("Esc/Backspace"),
             Span::raw(" back  "),
             hint_key("j/k"),
             Span::raw(" scroll  "),
             hint_key("Ctrl+u/d"),
             Span::raw(" half-page  "),
-            hint_key("Ctrl+b/f"),
-            Span::raw(" page  "),
             hint_key("g"),
             Span::raw(" top  "),
             hint_key("q"),
@@ -152,13 +158,22 @@ fn draw_detail_view(frame: &mut Frame<'_>, app: &TuiApp) {
     );
 }
 
-fn draw_detail_diff_view(frame: &mut Frame<'_>, app: &TuiApp) {
+fn draw_detail_diff_view(frame: &mut Frame<'_>, app: &mut TuiApp) {
     let root = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(10), Constraint::Length(1)])
         .split(frame.area());
 
     let spinner = spinner_char(app.tick);
+    if app.detail_diff_loading {
+        app.detail_diff_scroll = 0;
+    } else {
+        clamp_scroll_offset(
+            &mut app.detail_diff_scroll,
+            line_count(app.detail_diff_output.as_str()),
+            root[0],
+        );
+    }
     let (content, title) = if app.detail_diff_loading {
         (
             Cow::Owned(format!("{spinner} Loading diff…")),
@@ -273,9 +288,10 @@ fn draw_results(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
         app.results
             .iter()
             .map(|row| {
-                let path = super::str_field(row, "logical_path");
-                let lang = super::str_field(row, "language");
-                let checkout = if super::str_field(row, "checkout_user").is_empty() {
+                let view = ScriptView::new(row);
+                let path = view.logical_path();
+                let lang = view.language();
+                let checkout = if view.checkout_user().is_empty() {
                     ""
                 } else {
                     " CO"
@@ -286,7 +302,7 @@ fn draw_results(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
                     .saturating_sub(2)
                     .saturating_sub(lang.len())
                     .saturating_sub(checkout.len());
-                let display = left_truncate_path(&path, max_name);
+                let display = left_truncate_path(path, max_name);
                 ListItem::new(format!("{display}  {lang}{checkout}"))
             })
             .collect()
@@ -338,46 +354,47 @@ fn draw_metadata(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
         );
         return;
     };
-    let warnings = super::warning_summary(row);
+    let view = ScriptView::new(row);
+    let warnings = detail::warning_summary(row);
     let mut lines = vec![
         Line::from(vec![
-            Span::styled("Path      ", super::label_style()),
-            Span::raw(super::str_field(row, "logical_path")),
+            Span::styled("Path      ", detail::label_style()),
+            Span::raw(view.logical_path().to_string()),
         ]),
         Line::from(vec![
-            Span::styled("Language  ", super::label_style()),
-            Span::raw(super::str_field(row, "language")),
+            Span::styled("Language  ", detail::label_style()),
+            Span::raw(view.language().to_string()),
         ]),
         Line::from(vec![
-            Span::styled("Owner     ", super::label_style()),
-            Span::raw(super::display_field(row, "owner")),
+            Span::styled("Owner     ", detail::label_style()),
+            Span::raw(detail::display_text(view.owner())),
         ]),
         Line::from(vec![
-            Span::styled("Contribs  ", super::label_style()),
+            Span::styled("Contribs  ", detail::label_style()),
             Span::raw(if app.contributors.is_empty() {
-                "-".to_string()
+                "—".to_string()
             } else {
                 app.contributors.join(", ")
             }),
         ]),
         Line::from(vec![
-            Span::styled("Purpose   ", super::label_style()),
-            Span::raw(super::display_field(row, "purpose")),
+            Span::styled("Purpose   ", detail::label_style()),
+            Span::raw(detail::display_text(view.purpose())),
         ]),
         Line::from(vec![
-            Span::styled("Checkout  ", super::label_style()),
-            Span::raw(super::checkout_label(row)),
+            Span::styled("Checkout  ", detail::label_style()),
+            Span::raw(view.checkout_label()),
         ]),
     ];
     if !warnings.is_empty() {
         lines.push(Line::from(vec![
-            Span::styled("Warnings  ", super::label_style()),
+            Span::styled("Warnings  ", detail::label_style()),
             Span::raw(warnings),
         ]));
     }
-    if let Some(native) = super::native_path_for_row(row, &app.resolver) {
+    if let Some(native) = detail::native_path_for_row(row, &app.resolver) {
         lines.push(Line::from(vec![
-            Span::styled("OS path   ", super::label_style()),
+            Span::styled("OS path   ", detail::label_style()),
             Span::raw(native),
         ]));
     }
@@ -392,8 +409,17 @@ fn draw_metadata(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
     );
 }
 
-fn draw_preview(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
+fn draw_preview(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
     let spinner = spinner_char(app.tick);
+    if app.detail_loading {
+        app.preview_scroll = 0;
+    } else {
+        clamp_scroll_offset(
+            &mut app.preview_scroll,
+            line_count(app.cached_preview.as_str()),
+            area,
+        );
+    }
     let (content, title) = if app.detail_loading {
         (
             Cow::Owned(format!("{spinner} Loading…")),
@@ -402,12 +428,12 @@ fn draw_preview(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
     } else if app.cached_preview.is_empty() && app.detail.is_some() {
         (
             Cow::Borrowed(""),
-            format!("Preview (line {})", app.preview_scroll.saturating_add(1)),
+            preview_title(app.preview_scroll, app.preview_total_lines),
         )
     } else {
         (
             Cow::Borrowed(app.cached_preview.as_str()),
-            format!("Preview (line {})", app.preview_scroll.saturating_add(1)),
+            preview_title(app.preview_scroll, app.preview_total_lines),
         )
     };
     let text: Text = if !app.detail_loading && content.is_empty() {
@@ -533,7 +559,7 @@ fn draw_functions(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
                     "  "
                 };
                 let doc = if function.docstring.is_empty() {
-                    "-".to_string()
+                    "—".to_string()
                 } else {
                     function.docstring.clone()
                 };
@@ -576,9 +602,10 @@ fn draw_functions(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
     );
 }
 
-fn draw_revisions(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
+fn draw_revisions(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
     let spinner = spinner_char(app.tick);
     if app.detail_loading {
+        app.revisions_scroll = 0;
         frame.render_widget(
             Paragraph::new(format!("{spinner} Loading…")).block(
                 Block::default()
@@ -591,10 +618,6 @@ fn draw_revisions(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
         return;
     }
 
-    let title = format!(
-        "Revisions (line {})",
-        app.revisions_scroll.saturating_add(1)
-    );
     let lines = if app.checkouts.is_empty() {
         vec![Line::from(Span::styled(
             "No revision data.",
@@ -603,6 +626,11 @@ fn draw_revisions(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
     } else {
         revision_lines(&app.checkouts)
     };
+    clamp_scroll_offset(&mut app.revisions_scroll, lines.len(), area);
+    let title = format!(
+        "Revisions (line {})",
+        app.revisions_scroll.saturating_add(1)
+    );
     frame.render_widget(
         Paragraph::new(Text::from(lines))
             .wrap(Wrap { trim: true })
@@ -690,7 +718,7 @@ fn format_revision_row(row: &super::JsonRow) -> String {
     let age = row
         .get("age_seconds")
         .and_then(serde_json::Value::as_f64)
-        .map(super::relative_age);
+        .map(relative_age);
     let age_suffix = age.map(|v| format!("   ({v})")).unwrap_or_default();
     format!("  {os:<7} {user:<12} {timestamp}{age_suffix}")
 }
@@ -719,6 +747,12 @@ fn draw_footer(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
         hint_key("Ctrl+u/d"),
         Span::raw(" scroll"),
         sep.clone(),
+        hint_key("v"),
+        Span::raw(" view catalog"),
+        sep.clone(),
+        hint_key("V"),
+        Span::raw(" view source"),
+        sep.clone(),
     ];
     if app.fullscreen {
         spans.push(hint_key("f/Esc"));
@@ -731,6 +765,31 @@ fn draw_footer(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
     spans.push(hint_key("q/Esc"));
     spans.push(Span::raw(" quit"));
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+fn line_count(text: &str) -> usize {
+    text.lines().count().max(1)
+}
+
+/// Title for the catalog preview pane. When the indexed script is longer than
+/// `PREVIEW_LINES`, the preview is capped, so flag that and point at the
+/// full-script viewer keys.
+fn preview_title(scroll: u16, total_lines: usize) -> String {
+    let line = scroll.saturating_add(1);
+    if total_lines > super::PREVIEW_LINES {
+        format!(
+            "Catalog preview (line {line} — first {} of {total_lines} lines, v/V for full)",
+            super::PREVIEW_LINES
+        )
+    } else {
+        format!("Catalog preview (line {line})")
+    }
+}
+
+fn clamp_scroll_offset(scroll: &mut u16, line_count: usize, area: Rect) {
+    let viewport_lines = usize::from(area.height.saturating_sub(2)).max(1);
+    let max_scroll = line_count.saturating_sub(viewport_lines);
+    *scroll = (*scroll).min(u16::try_from(max_scroll).unwrap_or(u16::MAX));
 }
 
 /// Returns a styled span for a key hint label.
@@ -807,10 +866,38 @@ fn left_truncate_path(path: &str, max_chars: usize) -> String {
 mod tests {
     use serde_json::{Map, Value};
 
-    use super::{left_truncate_path, revision_lines};
+    use super::{
+        clamp_scroll_offset, left_truncate_path, line_count, preview_title, revision_lines,
+    };
+    use ratatui::layout::Rect;
 
     fn line_text(line: &ratatui::text::Line) -> String {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn preview_title_plain_when_not_truncated() {
+        // Total lines within the cap: no truncation hint.
+        assert_eq!(
+            preview_title(0, super::super::PREVIEW_LINES),
+            "Catalog preview (line 1)"
+        );
+        assert_eq!(preview_title(11, 0), "Catalog preview (line 12)");
+    }
+
+    #[test]
+    fn preview_title_flags_truncation_and_points_at_viewer() {
+        let total = super::super::PREVIEW_LINES + 1;
+        let title = preview_title(4, total);
+        assert!(title.contains("line 5"), "title: {title}");
+        assert!(
+            title.contains(&format!(
+                "first {} of {total} lines",
+                super::super::PREVIEW_LINES
+            )),
+            "title: {title}"
+        );
+        assert!(title.contains("v/V for full"), "title: {title}");
     }
 
     fn revision_row(
@@ -854,6 +941,23 @@ mod tests {
                 .any(|t| t == "  ZOS     bob          20231231_0900")
         );
         assert!(!texts.iter().any(|t| t == "  (no archive entries.)"));
+    }
+
+    #[test]
+    fn line_count_treats_empty_text_as_one_rendered_line() {
+        assert_eq!(line_count(""), 1);
+        assert_eq!(line_count("a\nb\nc"), 3);
+    }
+
+    #[test]
+    fn clamp_scroll_offset_uses_inner_height() {
+        let mut scroll = 99;
+        clamp_scroll_offset(&mut scroll, 10, Rect::new(0, 0, 20, 5));
+        assert_eq!(scroll, 7);
+
+        let mut scroll = 99;
+        clamp_scroll_offset(&mut scroll, 2, Rect::new(0, 0, 20, 5));
+        assert_eq!(scroll, 0);
     }
 
     #[test]

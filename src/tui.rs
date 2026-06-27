@@ -1,5 +1,5 @@
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -9,25 +9,29 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use ratatui::backend::CrosstermBackend;
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
 use ratatui::widgets::ListState;
 use ratatui::{Frame, Terminal};
 use serde_json::Value;
 
-use scat_core::core::db::JsonRow;
+use scat_core::core::db::{JsonRow, row_string as str_field};
 use scat_core::core::resolve::PathResolver;
+use scat_core::core::script_view::ScriptView;
+use scat_core::core::vc::compare_revision_rows;
 
+mod detail;
 mod detail_worker;
 mod diff_worker;
+mod file_check_worker;
 mod render;
 mod search_worker;
+mod viewer;
 
 use self::detail_worker::{
     DependencyItem, DetailPayload, DetailRequest, DetailResponse, DetailWorker, FunctionCallSite,
     FunctionItem,
 };
 use self::diff_worker::{DiffRequest, DiffResponse, DiffWorker};
+use self::file_check_worker::{FileCheckRequest, FileCheckResponse, FileCheckWorker};
 use self::render::draw;
 use self::search_worker::{SearchRequest, SearchWorker};
 
@@ -54,6 +58,12 @@ enum ViewMode {
     Browse,
     Detail,
     DetailDiff,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScrollCommand {
+    Delta(i16),
+    Top,
 }
 
 struct TuiApp {
@@ -87,6 +97,7 @@ struct TuiApp {
     detail_diff_scroll: u16,
     results_state: ListState,
     cached_preview: String,
+    preview_total_lines: usize,
     detail_loading: bool,
     inflight_detail_id: Option<u64>,
     next_detail_id: u64,
@@ -97,6 +108,10 @@ struct TuiApp {
     next_query_id: u64,
     fullscreen: bool,
     tick: u64,
+    pending_view: Option<viewer::ViewTarget>,
+    file_check_worker: FileCheckWorker,
+    inflight_filecheck_id: Option<u64>,
+    next_filecheck_id: u64,
 }
 
 impl TuiApp {
@@ -137,6 +152,7 @@ impl TuiApp {
             detail_diff_scroll: 0,
             results_state: ListState::default(),
             cached_preview: String::new(),
+            preview_total_lines: 0,
             detail_loading: false,
             inflight_detail_id: None,
             next_detail_id: 0,
@@ -147,6 +163,10 @@ impl TuiApp {
             next_query_id: 0,
             fullscreen: false,
             tick: 0,
+            pending_view: None,
+            file_check_worker: FileCheckWorker::new()?,
+            inflight_filecheck_id: None,
+            next_filecheck_id: 0,
         };
         app.dispatch_query()?;
         Ok(app)
@@ -228,7 +248,8 @@ impl TuiApp {
         let Some(path) = self
             .results
             .get(self.selected)
-            .and_then(|row| row.get("logical_path"))
+            .map(ScriptView::new)
+            .and_then(|view| view.logical_path_value())
             .and_then(Value::as_str)
         else {
             self.inflight_detail_id = None;
@@ -243,6 +264,7 @@ impl TuiApp {
             self.function_xref = None;
             self.checkouts.clear();
             self.cached_preview.clear();
+            self.preview_total_lines = 0;
             return Ok(());
         };
 
@@ -296,6 +318,7 @@ impl TuiApp {
             function_call_sites,
             checkouts,
             cached_preview,
+            preview_total_lines,
             error,
         } = payload;
         self.detail = detail;
@@ -308,6 +331,7 @@ impl TuiApp {
         self.function_xref = None;
         self.checkouts = checkouts;
         self.cached_preview = cached_preview;
+        self.preview_total_lines = preview_total_lines;
         if error.is_some() {
             self.error = error;
         }
@@ -512,127 +536,24 @@ impl TuiApp {
                     move_selection(self.functions_selected, self.functions.len(), 1);
             }
             KeyEvent {
-                code: KeyCode::Up, ..
-            }
-            | KeyEvent {
-                code: KeyCode::Char('k'),
-                ..
-            } if matches!(self.focus, Focus::Preview | Focus::Revisions) => {
-                let scroll = match self.focus {
-                    Focus::Preview => &mut self.preview_scroll,
-                    Focus::Revisions => &mut self.revisions_scroll,
-                    _ => unreachable!(),
-                };
-                *scroll = scroll_by(*scroll, -1);
-            }
-            KeyEvent {
-                code: KeyCode::Down,
-                ..
-            }
-            | KeyEvent {
-                code: KeyCode::Char('j'),
-                ..
-            } if matches!(self.focus, Focus::Preview | Focus::Revisions) => {
-                let scroll = match self.focus {
-                    Focus::Preview => &mut self.preview_scroll,
-                    Focus::Revisions => &mut self.revisions_scroll,
-                    _ => unreachable!(),
-                };
-                *scroll = scroll_by(*scroll, 1);
-            }
-            KeyEvent {
-                code: KeyCode::PageUp,
-                ..
-            } if matches!(self.focus, Focus::Preview | Focus::Revisions) => {
-                let scroll = match self.focus {
-                    Focus::Preview => &mut self.preview_scroll,
-                    Focus::Revisions => &mut self.revisions_scroll,
-                    _ => unreachable!(),
-                };
-                *scroll = scroll_by(*scroll, -PAGE_SCROLL_LINES);
-            }
-            KeyEvent {
-                code: KeyCode::PageDown,
-                ..
-            } if matches!(self.focus, Focus::Preview | Focus::Revisions) => {
-                let scroll = match self.focus {
-                    Focus::Preview => &mut self.preview_scroll,
-                    Focus::Revisions => &mut self.revisions_scroll,
-                    _ => unreachable!(),
-                };
-                *scroll = scroll_by(*scroll, PAGE_SCROLL_LINES);
-            }
-            KeyEvent {
-                code: KeyCode::Char('u'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            } if matches!(self.focus, Focus::Preview | Focus::Revisions) => {
-                let scroll = match self.focus {
-                    Focus::Preview => &mut self.preview_scroll,
-                    Focus::Revisions => &mut self.revisions_scroll,
-                    _ => unreachable!(),
-                };
-                *scroll = scroll_by(*scroll, -HALF_PAGE_SCROLL_LINES);
-            }
-            KeyEvent {
-                code: KeyCode::Char('d'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            } if matches!(self.focus, Focus::Preview | Focus::Revisions) => {
-                let scroll = match self.focus {
-                    Focus::Preview => &mut self.preview_scroll,
-                    Focus::Revisions => &mut self.revisions_scroll,
-                    _ => unreachable!(),
-                };
-                *scroll = scroll_by(*scroll, HALF_PAGE_SCROLL_LINES);
-            }
-            KeyEvent {
-                code: KeyCode::Char('b'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            } if matches!(self.focus, Focus::Preview | Focus::Revisions) => {
-                let scroll = match self.focus {
-                    Focus::Preview => &mut self.preview_scroll,
-                    Focus::Revisions => &mut self.revisions_scroll,
-                    _ => unreachable!(),
-                };
-                *scroll = scroll_by(*scroll, -FULL_PAGE_SCROLL_LINES);
-            }
-            KeyEvent {
-                code: KeyCode::Char('f'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            } if matches!(self.focus, Focus::Preview | Focus::Revisions) => {
-                let scroll = match self.focus {
-                    Focus::Preview => &mut self.preview_scroll,
-                    Focus::Revisions => &mut self.revisions_scroll,
-                    _ => unreachable!(),
-                };
-                *scroll = scroll_by(*scroll, FULL_PAGE_SCROLL_LINES);
-            }
-            KeyEvent {
-                code: KeyCode::Char('g'),
-                modifiers: KeyModifiers::NONE,
-                ..
-            } if matches!(self.focus, Focus::Preview | Focus::Revisions) => match self.focus {
-                Focus::Preview => self.preview_scroll = 0,
-                Focus::Revisions => self.revisions_scroll = 0,
-                _ => unreachable!(),
-            },
-            KeyEvent {
-                code: KeyCode::Home,
-                ..
-            } if matches!(self.focus, Focus::Preview | Focus::Revisions) => match self.focus {
-                Focus::Preview => self.preview_scroll = 0,
-                Focus::Revisions => self.revisions_scroll = 0,
-                _ => unreachable!(),
-            },
-            KeyEvent {
                 code: KeyCode::Char('f'),
                 modifiers: KeyModifiers::NONE,
                 ..
             } if self.focus != Focus::Search => {
                 self.fullscreen = !self.fullscreen;
+            }
+            KeyEvent {
+                code: KeyCode::Char('v'),
+                modifiers: KeyModifiers::NONE,
+                ..
+            } if self.focus != Focus::Search => {
+                self.queue_catalog_view();
+            }
+            KeyEvent {
+                code: KeyCode::Char('V'),
+                ..
+            } if self.focus != Focus::Search => {
+                self.queue_live_source_view();
             }
             KeyEvent {
                 code: KeyCode::Char(ch),
@@ -644,7 +565,9 @@ impl TuiApp {
                 self.query.push(ch);
                 self.schedule_query();
             }
-            _ => {}
+            _ => {
+                self.apply_focused_scroll(key);
+            }
         }
         Ok(false)
     }
@@ -680,78 +603,21 @@ impl TuiApp {
                 self.mode = ViewMode::DetailDiff;
             }
             KeyEvent {
-                code: KeyCode::Up, ..
-            }
-            | KeyEvent {
-                code: KeyCode::Char('k'),
-                ..
-            } => {
-                self.detail_scroll = scroll_by(self.detail_scroll, -1);
-            }
-            KeyEvent {
-                code: KeyCode::Down,
-                ..
-            }
-            | KeyEvent {
-                code: KeyCode::Char('j'),
-                ..
-            } => {
-                self.detail_scroll = scroll_by(self.detail_scroll, 1);
-            }
-            KeyEvent {
-                code: KeyCode::PageUp,
-                ..
-            } => {
-                self.detail_scroll = scroll_by(self.detail_scroll, -PAGE_SCROLL_LINES);
-            }
-            KeyEvent {
-                code: KeyCode::PageDown,
-                ..
-            } => {
-                self.detail_scroll = scroll_by(self.detail_scroll, PAGE_SCROLL_LINES);
-            }
-            KeyEvent {
-                code: KeyCode::Char('u'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            } => {
-                self.detail_scroll = scroll_by(self.detail_scroll, -HALF_PAGE_SCROLL_LINES);
-            }
-            KeyEvent {
-                code: KeyCode::Char('d'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            } => {
-                self.detail_scroll = scroll_by(self.detail_scroll, HALF_PAGE_SCROLL_LINES);
-            }
-            KeyEvent {
-                code: KeyCode::Char('b'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            } => {
-                self.detail_scroll = scroll_by(self.detail_scroll, -FULL_PAGE_SCROLL_LINES);
-            }
-            KeyEvent {
-                code: KeyCode::Char('f'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            } => {
-                self.detail_scroll = scroll_by(self.detail_scroll, FULL_PAGE_SCROLL_LINES);
-            }
-            KeyEvent {
-                code: KeyCode::Char('g'),
+                code: KeyCode::Char('v'),
                 modifiers: KeyModifiers::NONE,
                 ..
             } => {
-                self.detail_scroll = 0;
+                self.queue_catalog_view();
             }
             KeyEvent {
-                code: KeyCode::Home,
+                code: KeyCode::Char('V'),
                 ..
             } => {
-                self.detail_scroll = 0;
+                self.queue_live_source_view();
             }
-            _ => {}
+            _ => {
+                apply_scroll_key(&mut self.detail_scroll, key);
+            }
         }
         Ok(false)
     }
@@ -777,81 +643,9 @@ impl TuiApp {
             } => {
                 self.mode = ViewMode::Detail;
             }
-            KeyEvent {
-                code: KeyCode::Up, ..
+            _ => {
+                apply_scroll_key(&mut self.detail_diff_scroll, key);
             }
-            | KeyEvent {
-                code: KeyCode::Char('k'),
-                ..
-            } => {
-                self.detail_diff_scroll = scroll_by(self.detail_diff_scroll, -1);
-            }
-            KeyEvent {
-                code: KeyCode::Down,
-                ..
-            }
-            | KeyEvent {
-                code: KeyCode::Char('j'),
-                ..
-            } => {
-                self.detail_diff_scroll = scroll_by(self.detail_diff_scroll, 1);
-            }
-            KeyEvent {
-                code: KeyCode::PageUp,
-                ..
-            } => {
-                self.detail_diff_scroll = scroll_by(self.detail_diff_scroll, -PAGE_SCROLL_LINES);
-            }
-            KeyEvent {
-                code: KeyCode::PageDown,
-                ..
-            } => {
-                self.detail_diff_scroll = scroll_by(self.detail_diff_scroll, PAGE_SCROLL_LINES);
-            }
-            KeyEvent {
-                code: KeyCode::Char('u'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            } => {
-                self.detail_diff_scroll =
-                    scroll_by(self.detail_diff_scroll, -HALF_PAGE_SCROLL_LINES);
-            }
-            KeyEvent {
-                code: KeyCode::Char('d'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            } => {
-                self.detail_diff_scroll =
-                    scroll_by(self.detail_diff_scroll, HALF_PAGE_SCROLL_LINES);
-            }
-            KeyEvent {
-                code: KeyCode::Char('b'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            } => {
-                self.detail_diff_scroll =
-                    scroll_by(self.detail_diff_scroll, -FULL_PAGE_SCROLL_LINES);
-            }
-            KeyEvent {
-                code: KeyCode::Char('f'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            } => {
-                self.detail_diff_scroll =
-                    scroll_by(self.detail_diff_scroll, FULL_PAGE_SCROLL_LINES);
-            }
-            KeyEvent {
-                code: KeyCode::Char('g'),
-                modifiers: KeyModifiers::NONE,
-                ..
-            }
-            | KeyEvent {
-                code: KeyCode::Home,
-                ..
-            } => {
-                self.detail_diff_scroll = 0;
-            }
-            _ => {}
         }
         Ok(false)
     }
@@ -943,7 +737,8 @@ impl TuiApp {
 
     fn navigate_to_path(&mut self, logical_path: &str) -> Result<()> {
         let target_index = self.results.iter().position(|row| {
-            row.get("logical_path")
+            ScriptView::new(row)
+                .logical_path_value()
                 .and_then(Value::as_str)
                 .is_some_and(|value| value == logical_path)
         });
@@ -966,18 +761,143 @@ impl TuiApp {
     fn selected_logical_path(&self) -> Option<String> {
         self.detail
             .as_ref()
-            .and_then(|row| row.get("logical_path"))
+            .map(ScriptView::new)
+            .and_then(|view| view.logical_path_value())
             .and_then(Value::as_str)
             .filter(|path| !path.is_empty())
             .map(str::to_owned)
             .or_else(|| {
                 self.results
                     .get(self.selected)
-                    .and_then(|row| row.get("logical_path"))
+                    .map(ScriptView::new)
+                    .and_then(|view| view.logical_path_value())
                     .and_then(Value::as_str)
                     .filter(|path| !path.is_empty())
                     .map(str::to_owned)
             })
+    }
+
+    fn queue_catalog_view(&mut self) {
+        match self.catalog_view_target() {
+            Ok(target) => {
+                self.error = None;
+                self.pending_view = Some(viewer::ViewTarget::Catalog(target));
+            }
+            Err(err) => {
+                self.error = Some(err.to_string());
+            }
+        }
+    }
+
+    fn queue_live_source_view(&mut self) {
+        if let Err(err) = self.dispatch_live_source_check() {
+            self.error = Some(err.to_string());
+        }
+    }
+
+    /// Validate the selection and resolve the native path, then hand the
+    /// (potentially blocking) file-existence check to the background worker.
+    /// The view target or a clear error is produced from the worker response in
+    /// [`Self::apply_file_check_response`].
+    fn dispatch_live_source_check(&mut self) -> Result<()> {
+        if self.detail_loading {
+            anyhow::bail!("Script is still loading.");
+        }
+        let Some(row) = self.detail.as_ref() else {
+            anyhow::bail!("No script selected.");
+        };
+        let logical_path = ScriptView::new(row).logical_path().to_string();
+        if logical_path.is_empty() {
+            anyhow::bail!("Selected script has no logical path.");
+        }
+        let native = self.resolver.to_native(&logical_path);
+        let mapped = native != logical_path;
+        let native_path = PathBuf::from(native);
+
+        let id = self.next_filecheck_id;
+        self.next_filecheck_id = self.next_filecheck_id.saturating_add(1);
+        self.inflight_filecheck_id = Some(id);
+        self.error = None;
+        self.file_check_worker.send(FileCheckRequest {
+            id,
+            logical_path,
+            native_path,
+            mapped,
+        })
+    }
+
+    fn drain_file_check_channel(&mut self) {
+        loop {
+            match self.file_check_worker.try_recv() {
+                Ok(Some(response)) => self.apply_file_check_response(response),
+                Ok(None) => break,
+                Err(_) => {
+                    self.inflight_filecheck_id = None;
+                    self.error = Some("File-check worker disconnected unexpectedly.".to_string());
+                    break;
+                }
+            }
+        }
+    }
+
+    fn apply_file_check_response(&mut self, response: FileCheckResponse) {
+        if Some(response.id) != self.inflight_filecheck_id {
+            return;
+        }
+        self.inflight_filecheck_id = None;
+        if response.exists {
+            // The file may exist at the logical path itself (e.g. running scat
+            // on the host where the catalog was built, where logical paths are
+            // real filesystem paths), so a missing mapping is not an error here.
+            self.error = None;
+            self.pending_view = Some(viewer::ViewTarget::LiveSource {
+                logical_path: response.logical_path,
+                native_path: response.native_path,
+            });
+        } else if response.mapped {
+            self.error = Some(format!(
+                "Live source not found at {}",
+                response.native_path.display()
+            ));
+        } else {
+            self.error = Some(format!(
+                "No filesystem mapping for {}, and no file exists at that path; configure a path mapping to open the live source.",
+                response.logical_path
+            ));
+        }
+    }
+
+    fn catalog_view_target(&self) -> Result<viewer::CatalogView> {
+        if self.detail_loading {
+            anyhow::bail!("Script is still loading.");
+        }
+        let Some(row) = self.detail.as_ref() else {
+            anyhow::bail!("No script selected.");
+        };
+        let view = ScriptView::new(row);
+        let logical_path = view.logical_path().to_string();
+        if logical_path.is_empty() {
+            anyhow::bail!("Selected script has no logical path.");
+        }
+        Ok(viewer::CatalogView {
+            logical_path,
+            content: view.content().to_string(),
+        })
+    }
+
+    fn scroll_target(&mut self) -> Option<&mut u16> {
+        match self.focus {
+            Focus::Preview => Some(&mut self.preview_scroll),
+            Focus::Revisions => Some(&mut self.revisions_scroll),
+            _ => None,
+        }
+    }
+
+    fn apply_focused_scroll(&mut self, key: KeyEvent) -> bool {
+        let Some(scroll) = self.scroll_target() else {
+            return false;
+        };
+        apply_scroll_key(scroll, key)
     }
 }
 
@@ -994,6 +914,7 @@ pub fn run(db_path: &Path, resolver: PathResolver) -> Result<()> {
         app.apply_results()?;
         app.drain_detail_channel();
         app.drain_diff_channel();
+        app.drain_file_check_channel();
         if app
             .last_keystroke_at
             .is_some_and(|keystroke| keystroke.elapsed() >= debounce)
@@ -1001,6 +922,14 @@ pub fn run(db_path: &Path, resolver: PathResolver) -> Result<()> {
         {
             app.last_keystroke_at = None;
             app.dispatch_query()?;
+        }
+        // A view target may be queued synchronously (catalog content) or
+        // asynchronously once the file-check worker confirms the live source,
+        // so open it from the loop body rather than only after a keystroke.
+        if let Some(target) = app.pending_view.take()
+            && let Err(err) = terminal.open_view(&target)
+        {
+            app.error = Some(format!("Failed to open viewer: {err}"));
         }
         terminal.draw(|frame| draw(frame, &mut app))?;
         app.tick = app.tick.wrapping_add(1);
@@ -1018,209 +947,8 @@ pub fn run(db_path: &Path, resolver: PathResolver) -> Result<()> {
     Ok(())
 }
 
-fn detail_lines(app: &TuiApp) -> Vec<Line<'static>> {
-    if app.detail_loading {
-        return vec![Line::from("Loading…")];
-    }
-    let Some(row) = app.detail.as_ref() else {
-        return vec![Line::from("No script selected.")];
-    };
-
-    let mut lines = vec![
-        section("Script"),
-        field_line("Path", str_field(row, "logical_path")),
-        field_line("Language", display_field(row, "language")),
-        field_line("Owner", display_field(row, "owner")),
-        field_line("Purpose", display_field(row, "purpose")),
-        field_line("Size", format!("{} bytes", display_field(row, "size"))),
-        field_line("Indexed", display_field(row, "indexed_at")),
-        field_line("Checkout", checkout_label(row)),
-    ];
-    if let Some(native) = native_path_for_row(row, &app.resolver) {
-        lines.push(field_line("OS path", native));
-    }
-
-    for (label, key) in [
-        ("Tags", "tags"),
-        ("Entry points", "entry_points"),
-        ("Related metadata", "related"),
-    ] {
-        let values = json_string_array(row, key);
-        if !values.is_empty() {
-            lines.push(field_line(label, values.join(", ")));
-        }
-    }
-
-    let warnings = warning_messages(row);
-    if !warnings.is_empty() {
-        lines.push(Line::from(""));
-        lines.push(section("Warnings"));
-        for warning in warnings {
-            lines.push(bullet_line(warning));
-        }
-    }
-
-    if !app.deps.is_empty() {
-        lines.push(Line::from(""));
-        lines.push(section("Dependencies"));
-        for item in &app.deps {
-            lines.push(bullet_line(format!("{} {}", item.kind, item.logical_path)));
-        }
-    }
-
-    if !app.checkouts.is_empty() {
-        lines.push(Line::from(""));
-        lines.push(section("Checkouts"));
-        for checkout in &app.checkouts {
-            let user = display_field(checkout, "user");
-            let os = display_field(checkout, "os_flavor");
-            let timestamp = display_field(checkout, "timestamp");
-            let path = display_field(checkout, "physical_path");
-            lines.push(bullet_line(format!("{user} on {os} since {timestamp}")));
-            lines.push(Line::from(format!("    {path}")));
-        }
-    }
-
-    let content = str_field(row, "content");
-    if !content.is_empty() {
-        lines.push(Line::from(""));
-        lines.push(section("Preview"));
-        for line in content.lines().take(PREVIEW_LINES) {
-            lines.push(Line::from(line.to_string()));
-        }
-    }
-
-    lines
-}
-
-fn str_field(row: &JsonRow, key: &str) -> String {
-    row.get(key)
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string()
-}
-
 fn sort_checkouts(checkouts: &mut [JsonRow]) {
-    checkouts.sort_by(|a, b| {
-        let type_a = revision_type_rank(json_str_field(a, "revision_type"));
-        let type_b = revision_type_rank(json_str_field(b, "revision_type"));
-        let os_a = json_str_field(a, "os_flavor");
-        let os_b = json_str_field(b, "os_flavor");
-        let ts_a = json_str_field(a, "timestamp");
-        let ts_b = json_str_field(b, "timestamp");
-        type_a
-            .cmp(&type_b)
-            .then_with(|| os_a.cmp(os_b))
-            .then_with(|| ts_b.cmp(ts_a))
-            .then_with(|| json_str_field(a, "user").cmp(json_str_field(b, "user")))
-    });
-}
-
-fn revision_type_rank(revision_type: &str) -> u8 {
-    match revision_type {
-        "DEVELOP" | "" => 0,
-        "ARCHIVE" => 1,
-        _ => 2,
-    }
-}
-
-fn json_str_field<'a>(row: &'a JsonRow, key: &str) -> &'a str {
-    row.get(key).and_then(Value::as_str).unwrap_or("")
-}
-
-fn display_field(row: &JsonRow, key: &str) -> String {
-    match row.get(key) {
-        Some(Value::String(s)) if !s.is_empty() => s.clone(),
-        Some(Value::Number(n)) => n.to_string(),
-        Some(Value::Bool(b)) => b.to_string(),
-        _ => "-".to_string(),
-    }
-}
-
-fn checkout_label(row: &JsonRow) -> String {
-    let user = str_field(row, "checkout_user");
-    if user.is_empty() {
-        return "clean".to_string();
-    }
-    let timestamp = str_field(row, "checkout_timestamp");
-    if timestamp.is_empty() {
-        format!("checked out by {user}")
-    } else {
-        format!("checked out by {user} since {timestamp}")
-    }
-}
-
-fn native_path_for_row(row: &JsonRow, resolver: &PathResolver) -> Option<String> {
-    let path = row.get("logical_path")?.as_str()?;
-    if path.is_empty() {
-        return None;
-    }
-    let native = resolver.to_native(path);
-    if native == path { None } else { Some(native) }
-}
-
-fn warning_summary(row: &JsonRow) -> String {
-    warning_messages(row).join("; ")
-}
-
-fn warning_messages(row: &JsonRow) -> Vec<String> {
-    let raw = str_field(row, "vc_warnings");
-    let Ok(Value::Array(warnings)) = serde_json::from_str::<Value>(&raw) else {
-        return Vec::new();
-    };
-    warnings
-        .iter()
-        .filter_map(|warning| warning.get("message").and_then(Value::as_str))
-        .map(str::to_string)
-        .collect()
-}
-
-fn json_string_array(row: &JsonRow, key: &str) -> Vec<String> {
-    let raw = str_field(row, key);
-    let Ok(Value::Array(values)) = serde_json::from_str::<Value>(&raw) else {
-        return Vec::new();
-    };
-    values
-        .into_iter()
-        .filter_map(|value| value.as_str().map(str::to_string))
-        .collect()
-}
-
-fn section(title: &'static str) -> Line<'static> {
-    Line::from(Span::styled(
-        title,
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    ))
-}
-
-fn field_line(label: &'static str, value: String) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(format!("{label:<16}"), label_style()),
-        Span::raw(value),
-    ])
-}
-
-fn bullet_line(value: String) -> Line<'static> {
-    Line::from(format!("  - {value}"))
-}
-
-fn label_style() -> Style {
-    Style::default()
-        .fg(Color::Cyan)
-        .add_modifier(Modifier::BOLD)
-}
-
-fn relative_age(age_seconds: f64) -> String {
-    let age = age_seconds.max(0.0);
-    if age < 3_600.0 {
-        format!("{:.0}m ago", age / 60.0)
-    } else if age < 86_400.0 {
-        format!("{:.0}h ago", age / 3_600.0)
-    } else {
-        format!("{:.0}d ago", age / 86_400.0)
-    }
+    checkouts.sort_by(compare_revision_rows);
 }
 
 fn search_title(has_error: bool, is_searching: bool) -> &'static str {
@@ -1267,6 +995,79 @@ fn scroll_by(current: u16, delta: i16) -> u16 {
     current.saturating_add_signed(delta)
 }
 
+fn scroll_command(key: KeyEvent) -> Option<ScrollCommand> {
+    match key {
+        KeyEvent {
+            code: KeyCode::Up, ..
+        }
+        | KeyEvent {
+            code: KeyCode::Char('k'),
+            ..
+        } => Some(ScrollCommand::Delta(-1)),
+        KeyEvent {
+            code: KeyCode::Down,
+            ..
+        }
+        | KeyEvent {
+            code: KeyCode::Char('j'),
+            ..
+        } => Some(ScrollCommand::Delta(1)),
+        KeyEvent {
+            code: KeyCode::PageUp,
+            ..
+        } => Some(ScrollCommand::Delta(-PAGE_SCROLL_LINES)),
+        KeyEvent {
+            code: KeyCode::PageDown,
+            ..
+        } => Some(ScrollCommand::Delta(PAGE_SCROLL_LINES)),
+        KeyEvent {
+            code: KeyCode::Char('u'),
+            modifiers: KeyModifiers::CONTROL,
+            ..
+        } => Some(ScrollCommand::Delta(-HALF_PAGE_SCROLL_LINES)),
+        KeyEvent {
+            code: KeyCode::Char('d'),
+            modifiers: KeyModifiers::CONTROL,
+            ..
+        } => Some(ScrollCommand::Delta(HALF_PAGE_SCROLL_LINES)),
+        KeyEvent {
+            code: KeyCode::Char('b'),
+            modifiers: KeyModifiers::CONTROL,
+            ..
+        } => Some(ScrollCommand::Delta(-FULL_PAGE_SCROLL_LINES)),
+        KeyEvent {
+            code: KeyCode::Char('f'),
+            modifiers: KeyModifiers::CONTROL,
+            ..
+        } => Some(ScrollCommand::Delta(FULL_PAGE_SCROLL_LINES)),
+        KeyEvent {
+            code: KeyCode::Char('g'),
+            modifiers: KeyModifiers::NONE,
+            ..
+        }
+        | KeyEvent {
+            code: KeyCode::Home,
+            ..
+        } => Some(ScrollCommand::Top),
+        _ => None,
+    }
+}
+
+fn apply_scroll_command(scroll: &mut u16, command: ScrollCommand) {
+    match command {
+        ScrollCommand::Delta(delta) => *scroll = scroll_by(*scroll, delta),
+        ScrollCommand::Top => *scroll = 0,
+    }
+}
+
+fn apply_scroll_key(scroll: &mut u16, key: KeyEvent) -> bool {
+    let Some(command) = scroll_command(key) else {
+        return false;
+    };
+    apply_scroll_command(scroll, command);
+    true
+}
+
 struct TerminalGuard {
     terminal: Terminal<CrosstermBackend<io::Stdout>>,
 }
@@ -1286,6 +1087,39 @@ impl TerminalGuard {
         F: FnOnce(&mut Frame<'_>),
     {
         self.terminal.draw(f)
+    }
+
+    fn open_view(&mut self, target: &viewer::ViewTarget) -> Result<()> {
+        self.suspend_for(|| viewer::open_target(target))
+    }
+
+    fn suspend_for<F>(&mut self, action: F) -> Result<()>
+    where
+        F: FnOnce() -> Result<()>,
+    {
+        self.suspend()?;
+        let action_result = action();
+        let resume_result = self.resume();
+
+        match (action_result, resume_result) {
+            (Err(err), _) => Err(err),
+            (Ok(()), Err(err)) => Err(err.into()),
+            (Ok(()), Ok(())) => Ok(()),
+        }
+    }
+
+    fn suspend(&mut self) -> io::Result<()> {
+        disable_raw_mode()?;
+        execute!(self.terminal.backend_mut(), LeaveAlternateScreen)?;
+        self.terminal.show_cursor()?;
+        Ok(())
+    }
+
+    fn resume(&mut self) -> io::Result<()> {
+        enable_raw_mode()?;
+        execute!(self.terminal.backend_mut(), EnterAlternateScreen)?;
+        self.terminal.clear()?;
+        Ok(())
     }
 }
 
@@ -1320,14 +1154,14 @@ fn make_test_db() -> tempfile::NamedTempFile {
 mod tests {
     use std::io::Write;
 
+    use super::detail::native_path_for_row;
     use super::{
         DetailPayload, DetailResponse, DetailWorker, DiffWorker, Focus, SearchWorker, TuiApp,
-        ViewMode, json_string_array, move_selection, native_path_for_row, next_focus,
-        previous_focus, scroll_by, search_title, warning_messages,
+        ViewMode, move_selection, next_focus, previous_focus, scroll_by, search_title, viewer,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use scat_core::core::resolve::PathResolver;
-    use serde_json::{Map, Value, json};
+    use serde_json::{Map, Value};
 
     #[test]
     fn focus_cycles_forward_and_backward() {
@@ -1363,26 +1197,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_string_arrays_for_detail_view() {
-        let mut row = Map::new();
-        row.insert(
-            "tags".to_string(),
-            Value::String(json!(["one", "two"]).to_string()),
-        );
-        assert_eq!(json_string_array(&row, "tags"), vec!["one", "two"]);
-    }
-
-    #[test]
-    fn parses_warning_messages_for_detail_view() {
-        let mut row = Map::new();
-        row.insert(
-            "vc_warnings".to_string(),
-            Value::String(json!([{"message": "stale checkout"}]).to_string()),
-        );
-        assert_eq!(warning_messages(&row), vec!["stale checkout"]);
-    }
-
-    #[test]
     fn native_path_uses_mapping_when_available() {
         let mut row = Map::new();
         row.insert(
@@ -1409,6 +1223,152 @@ mod tests {
         );
         let resolver = PathResolver::new();
         assert_eq!(native_path_for_row(&row, &resolver), None);
+    }
+
+    fn detail_row(logical_path: &str) -> Map<String, Value> {
+        let mut row = Map::new();
+        row.insert(
+            "logical_path".to_string(),
+            Value::String(logical_path.to_string()),
+        );
+        row
+    }
+
+    /// Build a `PathResolver` mapping `/catalog/scripts` onto `root` for the
+    /// current platform (the other platform's field is a dummy value).
+    fn mapping_resolver(root: &std::path::Path) -> PathResolver {
+        let root = root.display().to_string();
+        let mut file = tempfile::Builder::new().suffix(".yml").tempfile().unwrap();
+        if cfg!(windows) {
+            let root_escaped = root.replace('\\', "\\\\");
+            writeln!(
+                file,
+                "mappings:\n  - logical_prefix: /catalog/scripts\n    windows: \"{root_escaped}\"\n    linux: /unused"
+            )
+            .unwrap();
+        } else {
+            writeln!(
+                file,
+                "mappings:\n  - logical_prefix: /catalog/scripts\n    linux: \"{root}\"\n    windows: \"Z:\\\\unused\""
+            )
+            .unwrap();
+        }
+        PathResolver::from_file(file.path()).unwrap()
+    }
+
+    /// Pump the file-check worker until the in-flight request resolves.
+    fn drain_until_file_check(app: &mut TuiApp) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while app.inflight_filecheck_id.is_some() {
+            app.drain_file_check_channel();
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for file-check worker response"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn live_source_view_resolves_mapped_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("foo.py");
+        std::fs::write(&script, "print(1)\n").unwrap();
+
+        let db = super::make_test_db();
+        let mut app = make_app(db.path());
+        app.resolver = mapping_resolver(dir.path());
+        app.detail = Some(detail_row("/catalog/scripts/foo.py"));
+        app.detail_loading = false;
+
+        app.queue_live_source_view();
+        drain_until_file_check(&mut app);
+
+        let target = app.pending_view.take().expect("live source queued");
+        match target {
+            viewer::ViewTarget::LiveSource {
+                logical_path,
+                native_path,
+            } => {
+                assert_eq!(logical_path, "/catalog/scripts/foo.py");
+                assert_eq!(native_path, script);
+            }
+            other => panic!("expected live source target, got {other:?}"),
+        }
+        assert!(app.error.is_none());
+    }
+
+    #[test]
+    fn live_source_view_opens_logical_path_without_mapping_when_file_exists() {
+        // No mapping configured, but the logical path is itself a real file on
+        // disk (the catalog-build-host scenario): it should open directly.
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("foo.py");
+        std::fs::write(&script, "print(1)\n").unwrap();
+        let logical = script.display().to_string();
+
+        let db = super::make_test_db();
+        let mut app = make_app(db.path()); // identity resolver
+        app.detail = Some(detail_row(&logical));
+        app.detail_loading = false;
+
+        app.queue_live_source_view();
+        drain_until_file_check(&mut app);
+
+        let target = app
+            .pending_view
+            .take()
+            .expect("existing file opens without mapping");
+        match target {
+            viewer::ViewTarget::LiveSource {
+                logical_path,
+                native_path,
+            } => {
+                assert_eq!(logical_path, logical);
+                assert_eq!(native_path, script);
+            }
+            other => panic!("expected live source target, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn live_source_view_errors_without_mapping() {
+        let db = super::make_test_db();
+        let mut app = make_app(db.path());
+        // Identity resolver: no mapping resolves the logical path to disk.
+        app.detail = Some(detail_row("/catalog/scripts/foo.py"));
+        app.detail_loading = false;
+
+        app.queue_live_source_view();
+        drain_until_file_check(&mut app);
+
+        assert!(app.pending_view.is_none());
+        let err = app.error.as_deref().expect("error set");
+        assert!(
+            err.contains("No filesystem mapping"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn live_source_view_errors_when_file_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        // Note: no file is created at the resolved path.
+        let db = super::make_test_db();
+        let mut app = make_app(db.path());
+        app.resolver = mapping_resolver(dir.path());
+        app.detail = Some(detail_row("/catalog/scripts/missing.py"));
+        app.detail_loading = false;
+
+        app.queue_live_source_view();
+        drain_until_file_check(&mut app);
+
+        assert!(app.pending_view.is_none());
+        let err = app.error.as_deref().expect("error set");
+        assert!(
+            err.contains("Live source not found"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -1464,6 +1424,7 @@ mod tests {
                 function_call_sites: std::collections::BTreeMap::new(),
                 checkouts: vec![],
                 cached_preview: "x".to_string(),
+                preview_total_lines: 0,
                 error: None,
             },
         });
@@ -1508,6 +1469,7 @@ mod tests {
                     checkout_row("LINUX", "jdoe", "20240102_0900"),
                 ],
                 cached_preview: String::new(),
+                preview_total_lines: 0,
                 error: None,
             },
         });
@@ -1797,6 +1759,73 @@ mod tests {
         assert_eq!(app.preview_scroll, 2);
         assert_eq!(app.function_xref.as_deref(), Some("run"));
         assert_eq!(app.focus, Focus::Preview);
+    }
+
+    #[test]
+    fn v_key_queues_full_catalog_content_for_viewer() {
+        let db = super::make_test_db();
+        let full_content = (0..=super::PREVIEW_LINES)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let conn = rusqlite::Connection::open(db.path()).unwrap();
+        conn.execute(
+            "UPDATE scripts SET content = ?1 WHERE logical_path = '/catalog/scripts/a.py'",
+            [&full_content],
+        )
+        .unwrap();
+        drop(conn);
+
+        let mut app = make_app(db.path());
+        app.results = vec![
+            serde_json::json!({ "logical_path": "/catalog/scripts/a.py" })
+                .as_object()
+                .unwrap()
+                .clone(),
+        ];
+        app.selected = 0;
+        app.load_selected().unwrap();
+        let detail_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            app.drain_detail_channel();
+            if !app.detail_loading {
+                break;
+            }
+            assert!(std::time::Instant::now() < detail_deadline);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+
+        app.focus = Focus::Preview;
+        app.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE))
+            .unwrap();
+
+        let target = app.pending_view.take().expect("viewer request queued");
+        let viewer::ViewTarget::Catalog(view) = target else {
+            panic!("expected catalog view target");
+        };
+        assert_eq!(view.logical_path, "/catalog/scripts/a.py");
+        assert_eq!(view.content, full_content);
+        assert!(
+            view.content
+                .contains(&format!("line {}", super::PREVIEW_LINES))
+        );
+        assert!(
+            !app.cached_preview
+                .contains(&format!("line {}", super::PREVIEW_LINES))
+        );
+    }
+
+    #[test]
+    fn v_key_in_search_updates_query_instead_of_opening_viewer() {
+        let db = super::make_test_db();
+        let mut app = make_app(db.path());
+        app.focus = Focus::Search;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE))
+            .unwrap();
+
+        assert_eq!(app.query, "v");
+        assert!(app.pending_view.is_none());
     }
 
     #[test]

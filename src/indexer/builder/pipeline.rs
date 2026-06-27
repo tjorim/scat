@@ -237,19 +237,6 @@ pub(super) fn populate(
                 c.age_seconds
             ],
         )?;
-        tx.execute(
-            "INSERT OR REPLACE INTO vc_checkouts
-              (logical_path, physical_path, os_flavor, user, timestamp, age_seconds)
-             VALUES (?1,?2,?3,?4,?5,?6)",
-            rusqlite::params![
-                c.logical_path,
-                c.physical_path,
-                c.os_flavor,
-                c.user,
-                c.timestamp,
-                c.age_seconds
-            ],
-        )?;
     }
 
     apply_checkout_summaries(&tx)?;
@@ -417,7 +404,8 @@ fn apply_checkout_summaries(conn: &Connection) -> Result<()> {
                     MAX(timestamp)                   AS newest_timestamp,
                     GROUP_CONCAT(DISTINCT os_flavor) AS os_flavors,
                     MAX(age_seconds)                 AS max_age
-             FROM vc_checkouts
+             FROM revisions
+             WHERE revision_type = 'DEVELOP'
              GROUP BY logical_path
          ) AS s
          WHERE scripts.logical_path = s.logical_path",

@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::path::PathBuf;
 
 use clap::{ArgAction, Parser, Subcommand};
@@ -27,6 +28,10 @@ pub(crate) struct Cli {
 
     #[command(subcommand)]
     pub(crate) command: Commands,
+}
+
+pub(crate) fn resolve_no_color(flag: bool, no_color_env: Option<&OsStr>) -> bool {
+    flag || no_color_env.is_some_and(|value| !value.is_empty())
 }
 
 #[derive(Subcommand)]
@@ -426,6 +431,20 @@ mod tests {
                 command: CatalogCommands::Stats { .. }
             }
         ));
+    }
+
+    #[test]
+    fn no_color_resolution_uses_flag_or_non_empty_env() {
+        assert!(!resolve_no_color(false, None));
+        assert!(resolve_no_color(true, None));
+        assert!(resolve_no_color(false, Some(OsStr::new("1"))));
+        assert!(resolve_no_color(true, Some(OsStr::new("1"))));
+    }
+
+    #[test]
+    fn no_color_resolution_ignores_empty_env_without_flag() {
+        assert!(!resolve_no_color(false, Some(OsStr::new(""))));
+        assert!(resolve_no_color(true, Some(OsStr::new(""))));
     }
 
     #[test]

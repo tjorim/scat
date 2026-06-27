@@ -79,6 +79,16 @@ This tool provides a **single searchable index** without:
 - Results list with script preview
 - Metadata, checkout state, and related scripts panes
 - Keyboard-first navigation
+- Open the full selected script in a read-only external viewer:
+  - `v` — view the **indexed catalog content** (`scripts.content`, exactly what
+    the preview/search show), written to a temp file with the original filename
+  - `V` — view the **live filesystem source** resolved through the configured
+    path mapping (or the logical path directly when it is already a real file),
+    failing clearly when the source file cannot be found
+  - The viewer command is taken from `$SCAT_EDITOR`, then `$VISUAL`, then
+    `$EDITOR`, falling back to `view`/`vim -R`/`vi -R`/`less` (or `notepad` on
+    Windows). Vim-compatible editors are opened read-only so you can search with
+    `/` without accidentally editing.
 
 Example commands:
 ```bash
@@ -218,7 +228,7 @@ constraints, vendored wheels, and the `scat.sh` bootstrap script.
 
 ### Features
 
-- **CLI**: 11 commands (search, show, status, explain, depends, stats, symlinks, info, vc, index, tui)
+- **CLI**: Commands for search, inspection, dependencies, symlinks, diffs, vc pass-through, TUI browsing, and catalog management (`catalog build/stats/info/audit/diff`)
 - **Indexer**: Metadata extraction, dependency detection (AST + tree-sitter), atomic operations
 - **TUI**: Multi-pane navigation with search, results, metadata, preview, and related scripts
 - **Cross-compilation**: CI builds for Linux (musl) and Windows (MSVC)

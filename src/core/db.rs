@@ -6,13 +6,74 @@ use tracing::{debug, trace};
 use crate::error::{Error, Result};
 
 /// Current SQLite schema version expected by this binary.
-pub const SCHEMA_VERSION: i64 = 9;
+pub const SCHEMA_VERSION: i64 = 10;
 
 /// A database row serialised as a JSON object — every column becomes a key.
 pub type JsonRow = serde_json::Map<String, serde_json::Value>;
 
+/// Return a string column value from a [`JsonRow`], or `""` when the field is
+/// missing, null, or not stored as a JSON string.
+pub fn row_str<'a>(row: &'a JsonRow, key: &str) -> &'a str {
+    row.get(key)
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+}
+
+/// Return a string column value from a [`JsonRow`] as an owned [`String`].
+///
+/// Missing, null, and non-string fields become an empty string.
+pub fn row_string(row: &JsonRow, key: &str) -> String {
+    row_str(row, key).to_string()
+}
+
+/// Return a display-oriented field value from a [`JsonRow`].
+///
+/// Non-empty strings are returned as-is. Numbers and booleans are stringified.
+/// Missing, null, empty string, and other value types use `fallback`.
+pub fn row_display(row: &JsonRow, key: &str, fallback: &str) -> String {
+    match row.get(key) {
+        Some(serde_json::Value::String(value)) if !value.is_empty() => value.clone(),
+        Some(serde_json::Value::Number(value)) => value.to_string(),
+        Some(serde_json::Value::Bool(value)) => value.to_string(),
+        _ => fallback.to_string(),
+    }
+}
+
+/// Append optional script metadata filters to a SQL `WHERE` clause.
+///
+/// `column_prefix` qualifies `language`, `owner`, and `tags` when the query
+/// uses a table alias, for example `Some("s.")` for `s.language`.
+pub fn append_script_filters(
+    sql: &mut String,
+    params: &mut Vec<SqlValue>,
+    column_prefix: Option<&str>,
+    language: Option<&str>,
+    owner: Option<&str>,
+    tag: Option<&str>,
+) {
+    let prefix = column_prefix.unwrap_or("");
+    let language_col = format!("{prefix}language");
+    let owner_col = format!("{prefix}owner");
+    let tags_col = format!("{prefix}tags");
+
+    if let Some(lang) = language {
+        sql.push_str(&format!(" AND LOWER({language_col}) = LOWER(?)"));
+        params.push(SqlValue::Text(lang.to_string()));
+    }
+    if let Some(own) = owner {
+        sql.push_str(&format!(" AND INSTR(LOWER({owner_col}), LOWER(?)) > 0"));
+        params.push(SqlValue::Text(own.to_string()));
+    }
+    if let Some(t) = tag {
+        sql.push_str(&format!(
+            " AND EXISTS (SELECT 1 FROM json_each({tags_col}) AS je WHERE LOWER(je.value) = LOWER(?))"
+        ));
+        params.push(SqlValue::Text(t.to_string()));
+    }
+}
+
 // ---------------------------------------------------------------------------
-// DDL (schema version 8)
+// DDL (see SCHEMA_VERSION)
 // ---------------------------------------------------------------------------
 
 const DDL: &str = r#"
@@ -81,22 +142,6 @@ CREATE TABLE IF NOT EXISTS dependencies (
 
 CREATE INDEX IF NOT EXISTS idx_dependencies_resolved_script_id
 ON dependencies(resolved_script_id);
-
--- Derived compatibility summary maintained by the indexer. User-facing
--- revision reads should prefer the first-class revisions table below.
-CREATE TABLE IF NOT EXISTS vc_checkouts (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    logical_path  TEXT NOT NULL,
-    physical_path TEXT NOT NULL,
-    os_flavor     TEXT NOT NULL,
-    user          TEXT NOT NULL,
-    timestamp     TEXT NOT NULL,
-    age_seconds   REAL,
-    UNIQUE (physical_path)
-);
-
-CREATE INDEX IF NOT EXISTS idx_vc_checkouts_logical_path
-ON vc_checkouts(logical_path);
 
 CREATE TABLE IF NOT EXISTS revisions (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -214,18 +259,6 @@ pub fn create_db(path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
-/// Run a full-text search against `script_fts` and return BM25-ranked rows.
-///
-/// Mirrors `core/db.py::fts_query` exactly.
-pub fn fts_query(
-    conn: &Connection,
-    query: &str,
-    limit: usize,
-    language: Option<&str>,
-) -> Result<Vec<JsonRow>> {
-    fts_query_filtered(conn, query, limit, language, None, None)
-}
-
 /// Run a full-text search with optional language, owner, and tag filters.
 ///
 /// Filters are applied in SQLite before `LIMIT` so callers receive up to
@@ -258,20 +291,7 @@ pub fn fts_query_filtered(
     let lim = limit as i64;
     let mut params = vec![SqlValue::Text(query.to_string())];
 
-    if let Some(lang) = language {
-        sql.push_str(" AND LOWER(s.language) = LOWER(?)");
-        params.push(SqlValue::Text(lang.to_string()));
-    }
-    if let Some(own) = owner {
-        sql.push_str(" AND INSTR(LOWER(s.owner), LOWER(?)) > 0");
-        params.push(SqlValue::Text(own.to_string()));
-    }
-    if let Some(t) = tag {
-        sql.push_str(
-            " AND EXISTS (SELECT 1 FROM json_each(s.tags) AS je WHERE LOWER(je.value) = LOWER(?))",
-        );
-        params.push(SqlValue::Text(t.to_string()));
-    }
+    append_script_filters(&mut sql, &mut params, Some("s."), language, owner, tag);
     sql.push_str(" ORDER BY bm25(script_fts) LIMIT ?");
     params.push(SqlValue::Integer(lim));
 
@@ -321,4 +341,104 @@ pub fn query_rows(
         .map(|r| r.map_err(Error::from))
         .collect();
     rows
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn row_str_returns_empty_for_missing_null_and_non_string_values() {
+        let mut row = JsonRow::new();
+        row.insert("null".into(), serde_json::Value::Null);
+        row.insert("number".into(), json!(42));
+        row.insert("string".into(), json!("value"));
+
+        assert_eq!(row_str(&row, "missing"), "");
+        assert_eq!(row_str(&row, "null"), "");
+        assert_eq!(row_str(&row, "number"), "");
+        assert_eq!(row_str(&row, "string"), "value");
+    }
+
+    #[test]
+    fn row_string_owns_raw_string_value() {
+        let mut row = JsonRow::new();
+        row.insert("string".into(), json!("value"));
+
+        assert_eq!(row_string(&row, "string"), "value");
+        assert_eq!(row_string(&row, "missing"), "");
+    }
+
+    #[test]
+    fn row_display_stringifies_scalars_and_uses_fallback() {
+        let mut row = JsonRow::new();
+        row.insert("string".into(), json!("value"));
+        row.insert("empty".into(), json!(""));
+        row.insert("number".into(), json!(42));
+        row.insert("bool".into(), json!(true));
+        row.insert("array".into(), json!(["x"]));
+
+        assert_eq!(row_display(&row, "string", "-"), "value");
+        assert_eq!(row_display(&row, "empty", "-"), "-");
+        assert_eq!(row_display(&row, "number", "-"), "42");
+        assert_eq!(row_display(&row, "bool", "-"), "true");
+        assert_eq!(row_display(&row, "array", "-"), "-");
+        assert_eq!(row_display(&row, "missing", "-"), "-");
+    }
+
+    #[test]
+    fn append_script_filters_uses_unqualified_columns_and_parameter_order() {
+        let mut sql = String::from("SELECT * FROM scripts WHERE 1=1");
+        let mut params = Vec::new();
+
+        append_script_filters(
+            &mut sql,
+            &mut params,
+            None,
+            Some("python"),
+            Some("alice"),
+            Some("deploy"),
+        );
+
+        assert!(sql.contains("LOWER(language) = LOWER(?)"));
+        assert!(sql.contains("INSTR(LOWER(owner), LOWER(?)) > 0"));
+        assert!(sql.contains("json_each(tags)"));
+        assert_eq!(
+            params,
+            vec![
+                SqlValue::Text("python".to_string()),
+                SqlValue::Text("alice".to_string()),
+                SqlValue::Text("deploy".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn append_script_filters_uses_qualified_columns() {
+        let mut sql = String::from("SELECT s.* FROM scripts s WHERE 1=1");
+        let mut params = Vec::new();
+
+        append_script_filters(
+            &mut sql,
+            &mut params,
+            Some("s."),
+            Some("python"),
+            Some("alice"),
+            Some("deploy"),
+        );
+
+        assert!(sql.contains("LOWER(s.language) = LOWER(?)"));
+        assert!(sql.contains("INSTR(LOWER(s.owner), LOWER(?)) > 0"));
+        assert!(sql.contains("json_each(s.tags)"));
+        assert_eq!(
+            params,
+            vec![
+                SqlValue::Text("python".to_string()),
+                SqlValue::Text("alice".to_string()),
+                SqlValue::Text("deploy".to_string()),
+            ]
+        );
+    }
 }

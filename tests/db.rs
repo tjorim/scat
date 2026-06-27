@@ -35,8 +35,16 @@ fn create_db_creates_revisions_table() {
             |row| row.get(0),
         )
         .unwrap();
+    let vc_checkouts_table_exists: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'vc_checkouts'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
 
     assert_eq!(revisions_table_exists, 1);
+    assert_eq!(vc_checkouts_table_exists, 0);
 }
 
 #[test]

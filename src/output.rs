@@ -1,6 +1,8 @@
 use comfy_table::{
     Attribute, Cell, Color, ContentArrangement, Table, presets::UTF8_FULL_CONDENSED,
 };
+use scat_core::core::db::row_str;
+use scat_core::core::script_view::{ListField, ScriptView};
 use tracing::warn;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -46,9 +48,10 @@ fn script_table_rows(
     let rows = scripts
         .iter()
         .map(|row| {
+            let view = ScriptView::new(row);
             fields
                 .iter()
-                .map(|field| display_script_field(row, field))
+                .map(|field| display_script_field(view, field))
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
@@ -68,9 +71,10 @@ pub(crate) fn render_script_csv(
     output.push_str(&render_csv_row(&selected_fields));
     output.push('\n');
     for row in scripts {
+        let view = ScriptView::new(row);
         let values = selected_fields
             .iter()
-            .map(|field| display_script_field(row, field))
+            .map(|field| display_script_field(view, field))
             .collect::<Vec<_>>();
         output.push_str(&render_csv_row(&values));
         output.push('\n');
@@ -102,9 +106,10 @@ pub(crate) fn script_rows_to_json(
     scripts
         .iter()
         .map(|row| {
+            let view = ScriptView::new(row);
             let mut out = scat_core::core::db::JsonRow::new();
             for field in &selected_fields {
-                out.insert((*field).to_string(), json_script_field(row, field));
+                out.insert((*field).to_string(), json_script_field(view, field));
             }
             out
         })
@@ -168,99 +173,42 @@ fn script_field_header(field: &str) -> &'static str {
     }
 }
 
-fn display_script_field(row: &scat_core::core::db::JsonRow, field: &str) -> String {
+fn display_script_field(view: ScriptView, field: &str) -> String {
     match field {
-        "path" => str_field(row, "logical_path"),
-        "language" => str_field(row, "language"),
-        "owner" => str_field(row, "owner"),
-        "purpose" => str_field(row, "purpose"),
-        "checkout" => checkout_label(row),
-        "size" => size_field(row),
-        "indexed" => str_field(row, "indexed_at"),
-        "symlink" => str_field(row, "symlink_target"),
-        "mtime" => mtime_field(row),
-        "tags" => json_array_field(row, "tags"),
-        "entry_points" => json_array_field(row, "entry_points"),
-        "related" => json_array_field(row, "related"),
+        "path" => dash_or_empty(view.logical_path()),
+        "language" => dash_or_empty(view.language()),
+        "owner" => dash_or_empty(view.owner()),
+        "purpose" => dash_or_empty(view.purpose()),
+        "checkout" => view.checkout_label(),
+        "size" => size_field(view),
+        "indexed" => dash_or_empty(view.indexed_at()),
+        "symlink" => dash_or_empty(view.symlink_target()),
+        "mtime" => mtime_field(view),
+        "tags" => list_field_display(view, ListField::Tags),
+        "entry_points" => list_field_display(view, ListField::EntryPoints),
+        "related" => list_field_display(view, ListField::Related),
         _ => "—".to_string(),
     }
 }
 
-pub(crate) fn json_script_field(
-    row: &scat_core::core::db::JsonRow,
-    field: &str,
-) -> serde_json::Value {
+pub(crate) fn json_script_field(view: ScriptView, field: &str) -> serde_json::Value {
+    let cloned =
+        |value: Option<&serde_json::Value>| value.cloned().unwrap_or(serde_json::Value::Null);
     match field {
-        "path" => row
-            .get("logical_path")
-            .cloned()
-            .unwrap_or(serde_json::Value::Null),
-        "language" => row
-            .get("language")
-            .cloned()
-            .unwrap_or(serde_json::Value::Null),
-        "owner" => row.get("owner").cloned().unwrap_or(serde_json::Value::Null),
-        "purpose" => row
-            .get("purpose")
-            .cloned()
-            .unwrap_or(serde_json::Value::Null),
-        "checkout" => serde_json::Value::String(checkout_label(row)),
-        "size" => row.get("size").cloned().unwrap_or(serde_json::Value::Null),
-        "indexed" => row
-            .get("indexed_at")
-            .cloned()
-            .unwrap_or(serde_json::Value::Null),
-        "symlink" => row
-            .get("symlink_target")
-            .cloned()
-            .unwrap_or(serde_json::Value::Null),
-        "mtime" => row.get("mtime").cloned().unwrap_or(serde_json::Value::Null),
-        "tags" => json_value_field(row, "tags"),
-        "entry_points" => json_value_field(row, "entry_points"),
-        "related" => json_value_field(row, "related"),
+        "path" => cloned(view.logical_path_value()),
+        "language" => cloned(view.language_value()),
+        "owner" => cloned(view.owner_value()),
+        "purpose" => cloned(view.purpose_value()),
+        "checkout" => serde_json::Value::String(view.checkout_label()),
+        "size" => cloned(view.size_value()),
+        "indexed" => cloned(view.indexed_at_value()),
+        "symlink" => cloned(view.symlink_target_value()),
+        "mtime" => cloned(view.mtime_value()),
+        "tags" => view.list_value_or_empty(ListField::Tags),
+        "entry_points" => view.list_value_or_empty(ListField::EntryPoints),
+        "related" => view.list_value_or_empty(ListField::Related),
         _ => serde_json::Value::Null,
     }
-}
-
-fn json_value_field(row: &scat_core::core::db::JsonRow, key: &str) -> serde_json::Value {
-    row.get(key)
-        .and_then(|value| value.as_str())
-        .and_then(|value| serde_json::from_str(value).ok())
-        .unwrap_or(serde_json::Value::Null)
-}
-
-/// Return the unique, sorted list of contributors for a script row.
-///
-/// Contributors are the union of the `owner` field and all `author` values
-/// found in `history_entries` inside `metadata_json`.
-pub(crate) fn contributors_from_script(row: &scat_core::core::db::JsonRow) -> Vec<String> {
-    use std::collections::BTreeSet;
-    let mut set: BTreeSet<String> = BTreeSet::new();
-
-    // Include the primary owner.
-    if let Some(serde_json::Value::String(owner)) = row.get("owner") {
-        let trimmed = owner.trim();
-        if !trimmed.is_empty() {
-            set.insert(trimmed.to_string());
-        }
-    }
-
-    // Include authors from history_entries inside metadata_json.
-    if let Some(serde_json::Value::String(meta)) = row.get("metadata_json")
-        && let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(meta)
-        && let Some(serde_json::Value::Array(entries)) = map.get("history_entries")
-    {
-        for entry in entries {
-            if let Some(serde_json::Value::String(author)) = entry.get("author") {
-                let trimmed = author.trim();
-                if !trimmed.is_empty() {
-                    set.insert(trimmed.to_string());
-                }
-            }
-        }
-    }
-
-    set.into_iter().collect()
 }
 
 pub(crate) fn render_table(headers: &[&str], rows: &[Vec<String>], no_color: bool) -> String {
@@ -420,17 +368,8 @@ fn terminal_width() -> usize {
         .unwrap_or(DEFAULT_TERMINAL_WIDTH)
 }
 
-pub(crate) fn warning_kinds(row: &scat_core::core::db::JsonRow) -> String {
-    let raw = str_field(row, "vc_warnings");
-    let Ok(serde_json::Value::Array(warnings)) = serde_json::from_str::<serde_json::Value>(&raw)
-    else {
-        return "—".to_string();
-    };
-
-    let kinds = warnings
-        .iter()
-        .filter_map(|warning| warning.get("kind").and_then(serde_json::Value::as_str))
-        .collect::<Vec<_>>();
+pub(crate) fn warning_kinds(view: ScriptView) -> String {
+    let kinds = view.vc_warning_kinds();
     if kinds.is_empty() {
         "—".to_string()
     } else {
@@ -438,12 +377,18 @@ pub(crate) fn warning_kinds(row: &scat_core::core::db::JsonRow) -> String {
     }
 }
 
+/// Format a string field, substituting an em dash for empty values.
 pub(crate) fn str_field(row: &scat_core::core::db::JsonRow, key: &str) -> String {
-    row.get(key)
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .unwrap_or("—")
-        .to_string()
+    dash_or_empty(row_str(row, key))
+}
+
+/// Substitute an em dash for an empty string, otherwise return the value owned.
+pub(crate) fn dash_or_empty(value: &str) -> String {
+    if value.is_empty() {
+        "—".to_string()
+    } else {
+        value.to_string()
+    }
 }
 
 /// Rename raw DB column names to the canonical keys used in JSON output:
@@ -479,16 +424,17 @@ pub(crate) fn dep_entry_to_json(e: &scat_core::core::search::DependencyEntry) ->
 
 /// Serialize a reverse-dependency row as a compact JSON object using canonical field names.
 pub(crate) fn used_by_row_to_json(row: &scat_core::core::db::JsonRow) -> serde_json::Value {
+    let view = ScriptView::new(row);
     serde_json::json!({
-        "path": row.get("logical_path"),
-        "language": row.get("language"),
-        "owner": row.get("owner"),
-        "purpose": row.get("purpose"),
+        "path": view.logical_path_value(),
+        "language": view.language_value(),
+        "owner": view.owner_value(),
+        "purpose": view.purpose_value(),
     })
 }
 
-pub(crate) fn size_field(row: &scat_core::core::db::JsonRow) -> String {
-    match row.get("size").and_then(|v| v.as_i64()) {
+pub(crate) fn size_field(view: ScriptView) -> String {
+    match view.size() {
         Some(n) if n >= 0 => format_size(n as u64),
         _ => "—".to_string(),
     }
@@ -509,46 +455,25 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
-pub(crate) fn json_array_field(row: &scat_core::core::db::JsonRow, key: &str) -> String {
-    let s = match row.get(key).and_then(|v| v.as_str()) {
-        Some(s) => s,
-        None => return "—".to_string(),
-    };
-    let arr: Vec<String> = serde_json::from_str(s).unwrap_or_default();
-    if arr.is_empty() {
+/// Format a JSON-encoded list column for table/CSV display, joining its string
+/// elements with `, ` and substituting an em dash when empty.
+pub(crate) fn list_field_display(view: ScriptView, field: ListField) -> String {
+    let values = view.string_list(field);
+    if values.is_empty() {
         "—".to_string()
     } else {
-        arr.join(", ")
+        values.join(", ")
     }
 }
 
-pub(crate) fn mtime_field(row: &scat_core::core::db::JsonRow) -> String {
-    let secs = match row.get("mtime").and_then(|v| v.as_f64()) {
+pub(crate) fn mtime_field(view: ScriptView) -> String {
+    let secs = match view.mtime() {
         Some(s) => s,
         None => return "—".to_string(),
     };
     chrono::DateTime::<chrono::Utc>::from_timestamp(secs as i64, 0)
         .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
         .unwrap_or_else(|| "—".to_string())
-}
-
-pub(crate) fn checkout_label(row: &scat_core::core::db::JsonRow) -> String {
-    let user = row
-        .get("checkout_user")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    if user.is_empty() {
-        return "clean".to_string();
-    }
-    let ts = row
-        .get("checkout_timestamp")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    if ts.is_empty() {
-        format!("checked out by {user}")
-    } else {
-        format!("checked out by {user} since {ts}")
-    }
 }
 
 #[cfg(test)]
@@ -691,5 +616,21 @@ mod tests {
         assert_eq!(canonical.get("path"), Some(&json!("/foo/bar.py")));
         assert_eq!(canonical.get("checkout_user"), Some(&json!("alice")));
         assert_eq!(canonical.get("checkout_os"), Some(&json!("linux")));
+    }
+
+    #[test]
+    fn json_export_uses_empty_array_for_absent_list_fields() {
+        // A row with no tags/entry_points/related columns must still serialize
+        // those list fields as `[]`, matching the catalog-diff output rather
+        // than emitting `null`.
+        let mut row = scat_core::core::db::JsonRow::new();
+        row.insert("logical_path".into(), json!("/catalog/scripts/bare.py"));
+        let rows = script_rows_to_json(
+            &[row],
+            &["tags".into(), "entry_points".into(), "related".into()],
+        );
+        assert_eq!(rows[0].get("tags"), Some(&json!([])));
+        assert_eq!(rows[0].get("entry_points"), Some(&json!([])));
+        assert_eq!(rows[0].get("related"), Some(&json!([])));
     }
 }
