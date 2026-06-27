@@ -1,5 +1,5 @@
 use std::env;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -126,12 +126,12 @@ fn run_viewer_command(command: &ViewerCommand, path: &Path) -> std::io::Result<(
     }
 }
 
-fn args_with_readonly(command: &ViewerCommand, path: &Path) -> Vec<String> {
-    let mut args = command.args.clone();
-    if is_vim_like(&command.program) && !has_vim_readonly_arg(&args) {
-        args.push("-R".to_string());
+fn args_with_readonly(command: &ViewerCommand, path: &Path) -> Vec<OsString> {
+    let mut args: Vec<OsString> = command.args.iter().map(OsString::from).collect();
+    if is_vim_like(&command.program) && !has_vim_readonly_arg(&command.args) {
+        args.push(OsString::from("-R"));
     }
-    args.push(path.display().to_string());
+    args.push(path.as_os_str().to_os_string());
     args
 }
 
@@ -173,6 +173,8 @@ fn safe_view_filename(logical_path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
+
     use super::{
         CatalogView, ViewerCommand, args_with_readonly, parse_viewer_command, safe_view_filename,
         write_catalog_view_file,
@@ -195,7 +197,10 @@ mod tests {
 
         let args = args_with_readonly(&command, std::path::Path::new("foo.py"));
 
-        assert_eq!(args, vec!["-R", "foo.py"]);
+        assert_eq!(
+            args,
+            vec![OsString::from("-R"), OsString::from("foo.py")]
+        );
     }
 
     #[test]
@@ -208,7 +213,10 @@ mod tests {
 
         let args = args_with_readonly(&command, std::path::Path::new("foo.py"));
 
-        assert_eq!(args, vec!["-R", "foo.py"]);
+        assert_eq!(
+            args,
+            vec![OsString::from("-R"), OsString::from("foo.py")]
+        );
     }
 
     #[test]
