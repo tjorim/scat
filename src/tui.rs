@@ -23,6 +23,7 @@ mod detail_worker;
 mod diff_worker;
 mod render;
 mod search_worker;
+mod viewer;
 
 use self::detail_worker::{
     DependencyItem, DetailPayload, DetailRequest, DetailResponse, DetailWorker, FunctionCallSite,
@@ -104,6 +105,7 @@ struct TuiApp {
     next_query_id: u64,
     fullscreen: bool,
     tick: u64,
+    pending_view: Option<viewer::CatalogView>,
 }
 
 impl TuiApp {
@@ -154,6 +156,7 @@ impl TuiApp {
             next_query_id: 0,
             fullscreen: false,
             tick: 0,
+            pending_view: None,
         };
         app.dispatch_query()?;
         Ok(app)
@@ -526,6 +529,13 @@ impl TuiApp {
                 self.fullscreen = !self.fullscreen;
             }
             KeyEvent {
+                code: KeyCode::Char('v'),
+                modifiers: KeyModifiers::NONE,
+                ..
+            } if self.focus != Focus::Search => {
+                self.queue_catalog_view();
+            }
+            KeyEvent {
                 code: KeyCode::Char(ch),
                 modifiers,
                 ..
@@ -571,6 +581,13 @@ impl TuiApp {
             } => {
                 self.dispatch_diff()?;
                 self.mode = ViewMode::DetailDiff;
+            }
+            KeyEvent {
+                code: KeyCode::Char('v'),
+                modifiers: KeyModifiers::NONE,
+                ..
+            } => {
+                self.queue_catalog_view();
             }
             _ => {
                 apply_scroll_key(&mut self.detail_scroll, key);
@@ -731,6 +748,35 @@ impl TuiApp {
             })
     }
 
+    fn queue_catalog_view(&mut self) {
+        match self.catalog_view_target() {
+            Ok(target) => {
+                self.error = None;
+                self.pending_view = Some(target);
+            }
+            Err(err) => {
+                self.error = Some(err.to_string());
+            }
+        }
+    }
+
+    fn catalog_view_target(&self) -> Result<viewer::CatalogView> {
+        if self.detail_loading {
+            anyhow::bail!("Script is still loading.");
+        }
+        let Some(row) = self.detail.as_ref() else {
+            anyhow::bail!("No script selected.");
+        };
+        let logical_path = str_field(row, "logical_path");
+        if logical_path.is_empty() {
+            anyhow::bail!("Selected script has no logical path.");
+        }
+        Ok(viewer::CatalogView {
+            logical_path,
+            content: str_field(row, "content"),
+        })
+    }
+
     fn scroll_target(&mut self) -> Option<&mut u16> {
         match self.focus {
             Focus::Preview => Some(&mut self.preview_scroll),
@@ -778,6 +824,11 @@ pub fn run(db_path: &Path, resolver: PathResolver) -> Result<()> {
             }
             if app.handle_key(key)? {
                 break;
+            }
+            if let Some(target) = app.pending_view.take()
+                && let Err(err) = terminal.open_catalog_view(&target)
+            {
+                app.error = Some(format!("Failed to open viewer: {err}"));
             }
         }
     }
@@ -1078,6 +1129,40 @@ impl TerminalGuard {
         F: FnOnce(&mut Frame<'_>),
     {
         self.terminal.draw(f)
+    }
+
+    fn open_catalog_view(&mut self, target: &viewer::CatalogView) -> Result<()> {
+        let (_dir, path) = viewer::write_catalog_view_file(target)?;
+        self.suspend_for(|| viewer::open_readonly(&path))
+    }
+
+    fn suspend_for<F>(&mut self, action: F) -> Result<()>
+    where
+        F: FnOnce() -> Result<()>,
+    {
+        self.suspend()?;
+        let action_result = action();
+        let resume_result = self.resume();
+
+        match (action_result, resume_result) {
+            (Err(err), _) => Err(err),
+            (Ok(()), Err(err)) => Err(err.into()),
+            (Ok(()), Ok(())) => Ok(()),
+        }
+    }
+
+    fn suspend(&mut self) -> io::Result<()> {
+        disable_raw_mode()?;
+        execute!(self.terminal.backend_mut(), LeaveAlternateScreen)?;
+        self.terminal.show_cursor()?;
+        Ok(())
+    }
+
+    fn resume(&mut self) -> io::Result<()> {
+        enable_raw_mode()?;
+        execute!(self.terminal.backend_mut(), EnterAlternateScreen)?;
+        self.terminal.clear()?;
+        Ok(())
     }
 }
 
@@ -1589,6 +1674,71 @@ mod tests {
         assert_eq!(app.preview_scroll, 2);
         assert_eq!(app.function_xref.as_deref(), Some("run"));
         assert_eq!(app.focus, Focus::Preview);
+    }
+
+    #[test]
+    fn v_key_queues_full_catalog_content_for_viewer() {
+        let db = super::make_test_db();
+        let full_content = (0..=super::PREVIEW_LINES)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let conn = rusqlite::Connection::open(db.path()).unwrap();
+        conn.execute(
+            "UPDATE scripts SET content = ?1 WHERE logical_path = '/catalog/scripts/a.py'",
+            [&full_content],
+        )
+        .unwrap();
+        drop(conn);
+
+        let mut app = make_app(db.path());
+        app.results = vec![
+            serde_json::json!({ "logical_path": "/catalog/scripts/a.py" })
+                .as_object()
+                .unwrap()
+                .clone(),
+        ];
+        app.selected = 0;
+        app.load_selected().unwrap();
+        let detail_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            app.drain_detail_channel();
+            if !app.detail_loading {
+                break;
+            }
+            assert!(std::time::Instant::now() < detail_deadline);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+
+        app.focus = Focus::Preview;
+        app.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE))
+            .unwrap();
+
+        let target = app.pending_view.take().expect("viewer request queued");
+        assert_eq!(target.logical_path, "/catalog/scripts/a.py");
+        assert_eq!(target.content, full_content);
+        assert!(
+            target
+                .content
+                .contains(&format!("line {}", super::PREVIEW_LINES))
+        );
+        assert!(
+            !app.cached_preview
+                .contains(&format!("line {}", super::PREVIEW_LINES))
+        );
+    }
+
+    #[test]
+    fn v_key_in_search_updates_query_instead_of_opening_viewer() {
+        let db = super::make_test_db();
+        let mut app = make_app(db.path());
+        app.focus = Focus::Search;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE))
+            .unwrap();
+
+        assert_eq!(app.query, "v");
+        assert!(app.pending_view.is_none());
     }
 
     #[test]

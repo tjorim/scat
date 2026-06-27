@@ -39,6 +39,7 @@ comfy-table = "7"
 unicode-width = "0.2"
 ignore = "0.4.26"
 similar = "3"
+shell-words = "1"
 
 [dev-dependencies]
 rusqlite = { version = "0.40", features = ["bundled-full"] }
