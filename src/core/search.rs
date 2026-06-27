@@ -196,16 +196,6 @@ impl SearchApi {
     // Full-text search
     // ------------------------------------------------------------------
 
-    /// Run full-text search with optional language filter.
-    pub fn search(
-        &self,
-        query: &str,
-        limit: usize,
-        language: Option<&str>,
-    ) -> Result<Vec<JsonRow>> {
-        self.search_with_filters(query, limit, language, None, None)
-    }
-
     /// Run full-text search with optional language, owner, and tag filters.
     pub fn search_with_filters(
         &self,
@@ -216,17 +206,6 @@ impl SearchApi {
         tag: Option<&str>,
     ) -> Result<Vec<JsonRow>> {
         fts_query_filtered(&self.conn, query, limit, language, owner, tag)
-    }
-
-    /// Search by partial logical path using substring match.
-    /// Used when the query contains `/` or `.` which are invalid in FTS5 queries.
-    pub fn search_by_path(
-        &self,
-        query: &str,
-        limit: usize,
-        language: Option<&str>,
-    ) -> Result<Vec<JsonRow>> {
-        self.search_by_path_with_filters(query, limit, language, None, None)
     }
 
     /// Search by partial logical path with optional language, owner, and tag filters.
@@ -262,16 +241,6 @@ impl SearchApi {
     ///
     /// Returns [`Error`] when the regex pattern is invalid or a database error
     /// occurs.
-    pub fn search_by_regex(
-        &self,
-        pattern: &str,
-        limit: usize,
-        language: Option<&str>,
-    ) -> Result<Vec<JsonRow>> {
-        self.search_by_regex_with_filters(pattern, limit, language, None, None)
-    }
-
-    /// Search scripts by regex with optional SQL pre-filters.
     pub fn search_by_regex_with_filters(
         &self,
         pattern: &str,
@@ -513,30 +482,6 @@ impl SearchApi {
         )
     }
 
-    /// Return callers of a function resolved to `logical_path`.
-    pub fn get_callers_of(&self, function_name: &str, logical_path: &str) -> Result<Vec<JsonRow>> {
-        let script = match self.get_script(logical_path)? {
-            Some(s) => s,
-            None => return Ok(vec![]),
-        };
-        let script_id = script.get("id").and_then(Value::as_i64).unwrap_or(0);
-        // Match bare calls (`run`) and attribute-style calls (`helper.run`, `m.run`).
-        // The resolved_target_script_id guard already scopes to the right script, so
-        // callee-based matching is sufficient to identify the specific function.
-        let suffix_like = format!("%.{function_name}");
-        query_rows(
-            &self.conn,
-            "SELECT DISTINCT s.logical_path, s.language, s.owner, s.purpose,
-                            fc.caller, fc.callee, fc.line, fc.resolved_target_name
-             FROM function_calls fc
-             JOIN scripts s ON s.id = fc.script_id
-             WHERE fc.resolved_target_script_id = ?
-               AND (fc.callee = ? OR fc.callee LIKE ?)
-             ORDER BY s.logical_path, fc.line",
-            &[&script_id, &function_name, &suffix_like],
-        )
-    }
-
     /// Return all call sites targeting functions defined in `logical_path`.
     pub fn get_callers_of_functions_in(&self, logical_path: &str) -> Result<Vec<JsonRow>> {
         let script = match self.get_script(logical_path)? {
@@ -577,16 +522,6 @@ impl SearchApi {
              ORDER BY fc.line, fc.callee",
             &[&script_id],
         )
-    }
-
-    /// Return scripts that define a function whose name contains `name` (case-insensitive substring).
-    ///
-    /// The `name` parameter is wrapped with `%` wildcards for LIKE matching, enabling
-    /// substring search (e.g. `"deploy"` matches `"deploy_service"`).  SQL wildcards (`%`, `_`)
-    /// present in `name` are intentionally honoured, allowing callers to perform broader
-    /// pattern queries when needed.
-    pub fn search_scripts_by_function(&self, name: &str, limit: usize) -> Result<Vec<JsonRow>> {
-        self.search_scripts_by_function_with_filters(name, limit, None, None, None)
     }
 
     /// Return scripts that define a matching function and satisfy optional filters.

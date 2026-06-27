@@ -1,22 +1,17 @@
 use std::borrow::Cow;
 use std::ffi::OsStr;
-use std::process;
+use std::path::{Path, PathBuf};
+use std::{env, process};
 
 use anyhow::Result;
 use tracing_subscriber::EnvFilter;
 
 use crate::output::print_json;
 
-pub(crate) fn cmd_vc(
-    args: &[String],
-    json: bool,
-    vc_executable: Option<std::path::PathBuf>,
-) -> Result<()> {
-    let vc_exe = vc_executable
-        .map(|p| p.to_string_lossy().into_owned())
-        .or_else(which_vc);
+pub(crate) fn cmd_vc(args: &[String], json: bool, vc_executable: Option<PathBuf>) -> Result<()> {
+    let vc_exe = vc_executable.or_else(which_vc);
 
-    if vc_exe.is_none() {
+    let Some(vc_exe) = vc_exe else {
         if json {
             print_json(&serde_json::json!({
                 "available": false,
@@ -28,9 +23,9 @@ pub(crate) fn cmd_vc(
             println!("vc is unavailable; scat remains in read-only catalog mode.");
         }
         return Ok(());
-    }
+    };
 
-    let mut cmd = process::Command::new(vc_exe.unwrap());
+    let mut cmd = process::Command::new(vc_exe);
     cmd.args(args);
     let output = cmd.output()?;
     let returncode = output.status.code().unwrap_or(1);
@@ -89,17 +84,71 @@ pub(crate) fn verbosity_directive(verbose: u8) -> &'static str {
     }
 }
 
-fn which_vc() -> Option<String> {
-    ["vc", "vc.py"]
-        .iter()
-        .find(|name| {
-            std::process::Command::new(if cfg!(windows) { "where" } else { "which" })
-                .arg(name)
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false)
-        })
-        .map(|s| (*s).to_string())
+fn which_vc() -> Option<PathBuf> {
+    find_vc_on_path(
+        env::var_os("PATH").as_deref(),
+        env::var_os("PATHEXT").as_deref(),
+    )
+}
+
+fn find_vc_on_path(path_env: Option<&OsStr>, pathext_env: Option<&OsStr>) -> Option<PathBuf> {
+    let path_env = path_env?;
+    for dir in env::split_paths(path_env) {
+        for name in ["vc", "vc.py"] {
+            for candidate in vc_candidate_names(name, pathext_env) {
+                let path = dir.join(candidate);
+                if is_executable_file(&path) {
+                    return Some(path);
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
+fn vc_candidate_names(name: &str, pathext_env: Option<&OsStr>) -> Vec<std::ffi::OsString> {
+    use std::ffi::OsString;
+
+    let mut names = vec![OsString::from(name)];
+    if Path::new(name).extension().is_some() {
+        return names;
+    }
+
+    let pathext = pathext_env
+        .and_then(OsStr::to_str)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(".COM;.EXE;.BAT;.CMD");
+    for ext in pathext.split(';').filter(|ext| !ext.is_empty()) {
+        names.push(OsString::from(format!("{name}{ext}")));
+    }
+    names
+}
+
+#[cfg(not(windows))]
+fn vc_candidate_names(name: &str, _pathext_env: Option<&OsStr>) -> Vec<std::ffi::OsString> {
+    vec![std::ffi::OsString::from(name)]
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(metadata) = path.metadata() else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    is_executable_metadata(&metadata)
+}
+
+#[cfg(windows)]
+fn is_executable_metadata(_metadata: &std::fs::Metadata) -> bool {
+    true
+}
+
+#[cfg(unix)]
+fn is_executable_metadata(metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    metadata.permissions().mode() & 0o111 != 0
 }
 
 pub(crate) fn audit_exit_code(
@@ -118,6 +167,17 @@ pub(crate) fn audit_exit_code(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn make_executable(path: &Path) {
+        std::fs::write(path, "").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(path, perms).unwrap();
+        }
+    }
 
     #[test]
     fn verbosity_directive_maps_expected_levels() {
@@ -155,5 +215,30 @@ mod tests {
         };
         assert_eq!(audit_exit_code(&summary, false), 0);
         assert_eq!(audit_exit_code(&summary, true), 1);
+    }
+
+    #[test]
+    fn find_vc_on_path_finds_vc_py_candidate() {
+        let dir = tempfile::tempdir().unwrap();
+        let executable = dir.path().join("vc.py");
+        make_executable(&executable);
+
+        assert_eq!(
+            find_vc_on_path(Some(dir.path().as_os_str()), None),
+            Some(executable)
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn find_vc_on_path_honors_pathext_for_extensionless_candidate() {
+        let dir = tempfile::tempdir().unwrap();
+        let executable = dir.path().join("vc.CMD");
+        make_executable(&executable);
+
+        assert_eq!(
+            find_vc_on_path(Some(dir.path().as_os_str()), Some(OsStr::new(".CMD"))),
+            Some(executable)
+        );
     }
 }

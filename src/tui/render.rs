@@ -5,8 +5,9 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
+use scat_core::core::vc::relative_age;
 
-use super::{Focus, TuiApp, ViewMode};
+use super::{Focus, TuiApp, ViewMode, detail};
 
 const SPINNER_FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
@@ -111,7 +112,7 @@ fn draw_detail_view(frame: &mut Frame<'_>, app: &mut TuiApp) {
         .constraints([Constraint::Min(10), Constraint::Length(1)])
         .split(frame.area());
 
-    let lines = super::detail_lines(app);
+    let lines = detail::detail_lines(app);
     clamp_scroll_offset(&mut app.detail_scroll, lines.len(), root[0]);
     frame.render_widget(
         Paragraph::new(lines)
@@ -350,22 +351,22 @@ fn draw_metadata(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
         );
         return;
     };
-    let warnings = super::warning_summary(row);
+    let warnings = detail::warning_summary(row);
     let mut lines = vec![
         Line::from(vec![
-            Span::styled("Path      ", super::label_style()),
+            Span::styled("Path      ", detail::label_style()),
             Span::raw(super::str_field(row, "logical_path")),
         ]),
         Line::from(vec![
-            Span::styled("Language  ", super::label_style()),
+            Span::styled("Language  ", detail::label_style()),
             Span::raw(super::str_field(row, "language")),
         ]),
         Line::from(vec![
-            Span::styled("Owner     ", super::label_style()),
-            Span::raw(super::display_field(row, "owner")),
+            Span::styled("Owner     ", detail::label_style()),
+            Span::raw(detail::display_field(row, "owner")),
         ]),
         Line::from(vec![
-            Span::styled("Contribs  ", super::label_style()),
+            Span::styled("Contribs  ", detail::label_style()),
             Span::raw(if app.contributors.is_empty() {
                 "-".to_string()
             } else {
@@ -373,23 +374,23 @@ fn draw_metadata(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
             }),
         ]),
         Line::from(vec![
-            Span::styled("Purpose   ", super::label_style()),
-            Span::raw(super::display_field(row, "purpose")),
+            Span::styled("Purpose   ", detail::label_style()),
+            Span::raw(detail::display_field(row, "purpose")),
         ]),
         Line::from(vec![
-            Span::styled("Checkout  ", super::label_style()),
-            Span::raw(super::checkout_label(row)),
+            Span::styled("Checkout  ", detail::label_style()),
+            Span::raw(detail::checkout_label(row)),
         ]),
     ];
     if !warnings.is_empty() {
         lines.push(Line::from(vec![
-            Span::styled("Warnings  ", super::label_style()),
+            Span::styled("Warnings  ", detail::label_style()),
             Span::raw(warnings),
         ]));
     }
-    if let Some(native) = super::native_path_for_row(row, &app.resolver) {
+    if let Some(native) = detail::native_path_for_row(row, &app.resolver) {
         lines.push(Line::from(vec![
-            Span::styled("OS path   ", super::label_style()),
+            Span::styled("OS path   ", detail::label_style()),
             Span::raw(native),
         ]));
     }
@@ -719,7 +720,7 @@ fn format_revision_row(row: &super::JsonRow) -> String {
     let age = row
         .get("age_seconds")
         .and_then(serde_json::Value::as_f64)
-        .map(super::relative_age);
+        .map(relative_age);
     let age_suffix = age.map(|v| format!("   ({v})")).unwrap_or_default();
     format!("  {os:<7} {user:<12} {timestamp}{age_suffix}")
 }

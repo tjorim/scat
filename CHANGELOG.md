@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Catalog Schema and Indexer
+
+- **Schema v10 cleanup** — retired the redundant `vc_checkouts` table and now derives script checkout summaries from `revisions` rows with `revision_type = 'DEVELOP'`. Deployments must run `scat catalog build --force` once so old schema-9 catalogs are rebuilt.
+
 ### TUI
 
 - **Read-only full-script viewer** ([#15](https://github.com/tjorim/scat/issues/15)) — added a TUI action to open the full selected script in an external read-only viewer/editor, bypassing the `PREVIEW_LINES` preview cap.

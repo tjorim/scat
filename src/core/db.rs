@@ -6,7 +6,7 @@ use tracing::{debug, trace};
 use crate::error::{Error, Result};
 
 /// Current SQLite schema version expected by this binary.
-pub const SCHEMA_VERSION: i64 = 9;
+pub const SCHEMA_VERSION: i64 = 10;
 
 /// A database row serialised as a JSON object — every column becomes a key.
 pub type JsonRow = serde_json::Map<String, serde_json::Value>;
@@ -143,22 +143,6 @@ CREATE TABLE IF NOT EXISTS dependencies (
 CREATE INDEX IF NOT EXISTS idx_dependencies_resolved_script_id
 ON dependencies(resolved_script_id);
 
--- Derived compatibility summary maintained by the indexer. User-facing
--- revision reads should prefer the first-class revisions table below.
-CREATE TABLE IF NOT EXISTS vc_checkouts (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    logical_path  TEXT NOT NULL,
-    physical_path TEXT NOT NULL,
-    os_flavor     TEXT NOT NULL,
-    user          TEXT NOT NULL,
-    timestamp     TEXT NOT NULL,
-    age_seconds   REAL,
-    UNIQUE (physical_path)
-);
-
-CREATE INDEX IF NOT EXISTS idx_vc_checkouts_logical_path
-ON vc_checkouts(logical_path);
-
 CREATE TABLE IF NOT EXISTS revisions (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     logical_path  TEXT NOT NULL,
@@ -273,18 +257,6 @@ pub fn create_db(path: &Path) -> Result<Connection> {
         "initialized database"
     );
     Ok(conn)
-}
-
-/// Run a full-text search against `script_fts` and return BM25-ranked rows.
-///
-/// Mirrors `core/db.py::fts_query` exactly.
-pub fn fts_query(
-    conn: &Connection,
-    query: &str,
-    limit: usize,
-    language: Option<&str>,
-) -> Result<Vec<JsonRow>> {
-    fts_query_filtered(conn, query, limit, language, None, None)
 }
 
 /// Run a full-text search with optional language, owner, and tag filters.
