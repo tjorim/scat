@@ -17,6 +17,13 @@ const SCRIPT_EXTENSIONS: &[&str] = &[
     ".py", ".sh", ".bash", ".ksh", ".yml", ".yaml", ".csv", ".json",
 ];
 
+/// Files larger than this are skipped during scanning rather than read into
+/// memory and parsed — a multi-gigabyte data file sharing a script extension
+/// (a huge `.csv`/`.json` export, for instance) would otherwise be read whole,
+/// regex-scanned, and tree-sitter-parsed, which can stall a run for a long
+/// time on what is almost certainly not really a script.
+const MAX_INDEXABLE_FILE_SIZE_BYTES: u64 = 8 * 1024 * 1024;
+
 // ---------------------------------------------------------------------------
 // Data model
 // ---------------------------------------------------------------------------
@@ -148,6 +155,30 @@ fn get_external_ignore_paths(ignore_files: &[PathBuf]) -> Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
+/// Canonicalize each root, dropping any that fail to resolve (e.g. a
+/// misconfigured or momentarily-missing root) rather than failing the whole
+/// scan over it.
+fn canonicalize_roots(roots: &[PathBuf]) -> Vec<PathBuf> {
+    roots
+        .iter()
+        .filter_map(|r| std::fs::canonicalize(r).ok())
+        .collect()
+}
+
+/// Whether `path` canonicalizes to somewhere inside one of `canonical_roots`.
+/// Used to bound symlinked-directory traversal: a symlink pointing at another
+/// location inside the scan roots (e.g. the documented `alt/pse → linux/pse`
+/// OS-variant aliasing) is followed as before, but a symlink pointing outside
+/// all configured roots — into an unrelated, potentially huge tree such as a
+/// home directory or another mount — is not, since following it could turn a
+/// bounded scan into an effectively unbounded one.
+fn is_within_roots(path: &Path, canonical_roots: &[PathBuf]) -> bool {
+    match std::fs::canonicalize(path) {
+        Ok(canon) => canonical_roots.iter().any(|r| canon.starts_with(r)),
+        Err(_) => false,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Scanner
 // ---------------------------------------------------------------------------
@@ -189,11 +220,16 @@ pub fn scan_paths_with_revisions(
             .map(|s| s.to_string())
             .collect(),
     );
+    // Symlinked directories are only followed if they resolve inside one of
+    // these — see `is_within_roots`.
+    let canonical_roots: std::sync::Arc<Vec<PathBuf>> =
+        std::sync::Arc::new(canonicalize_roots(roots));
 
     for root in roots {
         let mut found_in_root = 0usize;
         let mut skipped_in_root = 0usize;
         let cds = checkout_dirs_set.clone();
+        let croots = canonical_roots.clone();
         let mut walk = WalkBuilder::new(root);
         walk.follow_links(true)
             .sort_by_file_path(|a, b| a.cmp(b))
@@ -209,7 +245,16 @@ pub fn scan_paths_with_revisions(
                 // traversing large DEVELOP/ARCHIVE trees file by file.
                 if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
                     let name = e.file_name().to_str().unwrap_or("");
-                    return !cds.contains(name);
+                    if cds.contains(name) {
+                        return false;
+                    }
+                    if e.path_is_symlink() && !is_within_roots(e.path(), &croots) {
+                        warn!(
+                            path = %e.path().display(),
+                            "symlinked directory resolves outside configured scan roots, skipping to avoid unbounded traversal"
+                        );
+                        return false;
+                    }
                 }
                 true
             });
@@ -298,6 +343,17 @@ pub fn scan_paths_with_revisions(
                 }
             };
             let size = meta.len();
+            if size > MAX_INDEXABLE_FILE_SIZE_BYTES {
+                debug!(
+                    path = %filepath.display(),
+                    size,
+                    limit = MAX_INDEXABLE_FILE_SIZE_BYTES,
+                    "skipping oversized file"
+                );
+                skipped_in_root += 1;
+                total_skipped += 1;
+                continue;
+            }
             let mtime = meta
                 .modified()
                 .ok()
@@ -392,8 +448,10 @@ pub fn max_mtime_in_roots_with_shutdown(
 ) -> Result<Option<f64>> {
     let external_ignore_paths = get_external_ignore_paths(ignore_files)?;
     let mut max_mtime: Option<f64> = None;
+    let canonical_roots = canonicalize_roots(roots);
 
     for root in roots {
+        let croots = canonical_roots.clone();
         let mut walk = WalkBuilder::new(root);
         walk.follow_links(true)
             .hidden(false)
@@ -402,7 +460,16 @@ pub fn max_mtime_in_roots_with_shutdown(
             .git_global(false)
             .git_exclude(false)
             .parents(false)
-            .add_custom_ignore_filename(".catignore");
+            .add_custom_ignore_filename(".catignore")
+            .filter_entry(move |e| {
+                if e.file_type().map(|t| t.is_dir()).unwrap_or(false)
+                    && e.path_is_symlink()
+                    && !is_within_roots(e.path(), &croots)
+                {
+                    return false;
+                }
+                true
+            });
         for path in &external_ignore_paths {
             if let Some(err) = walk.add_ignore(path) {
                 warn!(path = %path.display(), error = %err, "failed to load ignore file");
@@ -705,5 +772,78 @@ mod tests {
             result > 1_000_000_000.0,
             "mtime should be a plausible epoch"
         );
+    }
+
+    #[test]
+    fn scan_skips_oversized_files() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("small.py"), "# python").unwrap();
+        let huge = vec![0u8; (MAX_INDEXABLE_FILE_SIZE_BYTES + 1) as usize];
+        std::fs::write(dir.path().join("huge.py"), &huge).unwrap();
+
+        let shutdown = AtomicBool::new(false);
+        let records = scan_paths(
+            &[dir.path().to_path_buf()],
+            "/catalog/scripts",
+            5,
+            &[],
+            &[],
+            None,
+            &shutdown,
+        )
+        .unwrap();
+
+        assert_eq!(records.len(), 1);
+        assert!(records[0].physical_path.ends_with("small.py"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_does_not_follow_symlinks_outside_scan_roots() {
+        let root = tempfile::TempDir::new().unwrap();
+        let outside = tempfile::TempDir::new().unwrap();
+        std::fs::write(outside.path().join("secret.py"), "# python").unwrap();
+        std::fs::write(root.path().join("keep.py"), "# python").unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.path().join("escape")).unwrap();
+
+        let shutdown = AtomicBool::new(false);
+        let records = scan_paths(
+            &[root.path().to_path_buf()],
+            "/catalog/scripts",
+            5,
+            &[],
+            &[],
+            None,
+            &shutdown,
+        )
+        .unwrap();
+
+        assert_eq!(records.len(), 1);
+        assert!(records[0].physical_path.ends_with("keep.py"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_follows_symlinks_within_scan_roots() {
+        let root = tempfile::TempDir::new().unwrap();
+        let real = root.path().join("linux");
+        std::fs::create_dir(&real).unwrap();
+        std::fs::write(real.join("tool.py"), "# python").unwrap();
+        std::os::unix::fs::symlink(&real, root.path().join("alt")).unwrap();
+
+        let shutdown = AtomicBool::new(false);
+        let records = scan_paths(
+            &[root.path().to_path_buf()],
+            "/catalog/scripts",
+            5,
+            &[],
+            &[],
+            None,
+            &shutdown,
+        )
+        .unwrap();
+
+        // Both the real path and the in-root symlink alias are indexed.
+        assert_eq!(records.len(), 2);
     }
 }

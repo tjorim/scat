@@ -66,7 +66,7 @@ pub fn extract_python_deps_with_module(
     let mut result = AstDependencies::default();
     let source_bytes = source.as_bytes();
 
-    let tree = match parser.parse(source_bytes, None) {
+    let tree = match crate::indexer::treesitter_deps::parse_with_timeout(parser, source_bytes) {
         Some(t) => t,
         None => return result,
     };

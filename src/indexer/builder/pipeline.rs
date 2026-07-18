@@ -147,24 +147,7 @@ pub(super) fn populate(
     for record in &to_process {
         // Check for Ctrl-C interrupt.
         if shutdown.load(Ordering::SeqCst) {
-            // Flush what we have so far.
-            tx.commit()?;
-            // Write checkpoint.
-            if !dry_run {
-                let ckpt = Checkpoint {
-                    indexed: newly_indexed.clone(),
-                };
-                if let Err(e) = write_checkpoint(db_path, &ckpt) {
-                    warn!(error = %e, "failed to write resume checkpoint — progress cannot be resumed");
-                }
-                // Rename tmp_path → wip_path so the resume logic can find it.
-                let wip = crate::indexer::checkpoint::wip_path(db_path);
-                if result.db_path != wip
-                    && let Err(e) = std::fs::rename(&result.db_path, &wip)
-                {
-                    warn!(error = %e, "failed to rename WIP database — resume may not work");
-                }
-            }
+            checkpoint_for_resume(tx, db_path, result, newly_indexed, dry_run)?;
             return Err(Error::Interrupted);
         }
 
@@ -213,9 +196,43 @@ pub(super) fn populate(
         "completed build phase"
     );
 
+    // Ctrl-C between phase 2 and phase 3 checkpoints the same way an in-loop
+    // interrupt does, so a resumed run can skip straight back into phase 3
+    // instead of waiting for phase 3 (which has no per-record progress of
+    // its own) to run to completion first.
+    if shutdown.load(Ordering::SeqCst) {
+        checkpoint_for_resume(tx, db_path, result, newly_indexed, dry_run)?;
+        return Err(Error::Interrupted);
+    }
+
     // -----------------------------------------------------------------------
-    // Phase 3: Checkouts / warnings
+    // Phase 3: Checkouts / warnings / dependency resolution
     // -----------------------------------------------------------------------
+    // Unlike phases 1-2, this phase has no per-record progress to report —
+    // scan_checkouts, infer_warnings, and the resolve_* passes each run as a
+    // single pass over the whole catalog. On a large catalog this can take
+    // real time; without a spinner and staged messages a run in progress is
+    // indistinguishable from a hung one, especially since the phase 2 bar
+    // was just cleared.
+    let finalize_pb = if use_progress {
+        let pb = ProgressBar::new_spinner();
+        pb.set_style(
+            ProgressStyle::with_template("{spinner:.cyan} {msg}  [{elapsed_precise}]")
+                .unwrap_or_else(|_| ProgressStyle::default_spinner()),
+        );
+        pb.enable_steady_tick(std::time::Duration::from_millis(80));
+        Some(pb)
+    } else {
+        None
+    };
+    let set_finalize_msg = |msg: &str| {
+        if let Some(pb) = &finalize_pb {
+            pb.set_message(msg.to_string());
+        }
+    };
+
+    set_finalize_msg("Recording checkouts…");
+    debug!(phase = "scan_checkouts", "starting scan_checkouts phase");
     let checkouts = scan_checkouts(vc_config, logical_prefix);
     debug!(
         phase = "scan_checkouts",
@@ -241,6 +258,8 @@ pub(super) fn populate(
 
     apply_checkout_summaries(&tx)?;
 
+    set_finalize_msg("Inferring warnings…");
+    debug!(phase = "infer_warnings", "starting infer_warnings phase");
     let warnings = infer_warnings(&tx)?;
     debug!(
         phase = "infer_warnings",
@@ -265,10 +284,19 @@ pub(super) fn populate(
         )?;
     }
 
+    set_finalize_msg("Resolving dependencies…");
+    debug!(
+        phase = "resolve_dependencies",
+        "starting dependency resolution phase"
+    );
     let module_map = super::resolve::build_module_map(&tx)?;
     super::resolve::resolve_dependency_targets(&tx, &module_map)?;
     super::resolve::resolve_reference_targets(&tx)?;
     super::resolve::resolve_function_targets(&tx, &module_map)?;
+    debug!(
+        phase = "resolve_dependencies",
+        "completed dependency resolution phase"
+    );
 
     tx.execute(
         "INSERT OR REPLACE INTO index_metadata (id, build_timestamp, schema_version)
@@ -276,8 +304,41 @@ pub(super) fn populate(
         rusqlite::params![build_ts, SCHEMA_VERSION],
     )?;
 
+    if let Some(pb) = &finalize_pb {
+        pb.finish_and_clear();
+    }
+
     tx.commit()?;
 
+    Ok(())
+}
+
+/// Commit the in-progress transaction and write a resume checkpoint so a
+/// subsequent run can skip already-indexed scripts. Used both when Ctrl-C
+/// fires mid-loop in phase 2 and when it fires between phase 2 and phase 3.
+fn checkpoint_for_resume(
+    tx: rusqlite::Transaction<'_>,
+    db_path: &Path,
+    result: &IndexResult,
+    newly_indexed: HashSet<String>,
+    dry_run: bool,
+) -> Result<()> {
+    tx.commit()?;
+    if !dry_run {
+        let ckpt = Checkpoint {
+            indexed: newly_indexed,
+        };
+        if let Err(e) = write_checkpoint(db_path, &ckpt) {
+            warn!(error = %e, "failed to write resume checkpoint — progress cannot be resumed");
+        }
+        // Rename tmp_path → wip_path so the resume logic can find it.
+        let wip = crate::indexer::checkpoint::wip_path(db_path);
+        if result.db_path != wip
+            && let Err(e) = std::fs::rename(&result.db_path, &wip)
+        {
+            warn!(error = %e, "failed to rename WIP database — resume may not work");
+        }
+    }
     Ok(())
 }
 
