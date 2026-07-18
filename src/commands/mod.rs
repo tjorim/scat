@@ -78,8 +78,11 @@ pub(crate) fn cmd_search(
         let rows = if use_fts {
             api.search_with_filters(q, limit, lang.as_deref(), owner.as_deref(), tag.as_deref())?
         } else {
+            // The INSTR path search matches `/`-separated logical paths, so
+            // normalise Windows separators from the query first.
+            let path_query = q.replace('\\', "/");
             api.search_by_path_with_filters(
-                q,
+                &path_query,
                 limit,
                 lang.as_deref(),
                 owner.as_deref(),
@@ -120,12 +123,16 @@ pub(crate) fn cmd_search(
     Ok(())
 }
 
-/// Re-sort results so exact and prefix filename matches appear first.
-/// Preserves the original (BM25) order within each tier.
-fn query_uses_fts(query: &str) -> bool {
-    !query.contains('/') && !query.contains('.')
+/// Route a text query: FTS for plain words, INSTR-based path search when the
+/// query looks like a (partial) path, since `/` and `.` are FTS5 syntax.
+/// Backslashes count as path separators so Windows-style path fragments
+/// (`scripts\foo`) route to path search too.
+pub(crate) fn query_uses_fts(query: &str) -> bool {
+    !query.contains('/') && !query.contains('\\') && !query.contains('.')
 }
 
+/// Re-sort results so exact and prefix filename matches appear first.
+/// Preserves the original (BM25) order within each tier.
 fn sort_by_name_relevance(
     mut results: Vec<scat_core::core::db::JsonRow>,
     query: &str,
@@ -464,9 +471,14 @@ pub(crate) fn cmd_status(
     Ok(())
 }
 
+/// Default traversal depth for `scat deps --tree` without an explicit --depth.
+const DEFAULT_TREE_DEPTH: usize = 5;
+
 pub(crate) fn cmd_deps(
     api: &scat_core::core::search::SearchApi,
     path: &str,
+    tree: bool,
+    depth: Option<usize>,
     output: OutputFormat,
     no_color: bool,
 ) -> Result<()> {
@@ -474,6 +486,10 @@ pub(crate) fn cmd_deps(
         Some(s) => s,
         None => anyhow::bail!("script '{path}' not found in catalog"),
     };
+
+    if tree || depth.is_some() {
+        return cmd_deps_tree(api, path, depth.unwrap_or(DEFAULT_TREE_DEPTH), output);
+    }
 
     if output == OutputFormat::Json {
         let graph = api.dependency_graph(path)?;
@@ -499,6 +515,7 @@ pub(crate) fn cmd_deps(
             .map(|u| {
                 vec![
                     u.logical_path.clone(),
+                    kind_label(&u.kind).to_string(),
                     u.language.as_str().unwrap_or("—").to_string(),
                     if u.indexed { "yes" } else { "no" }.to_string(),
                 ]
@@ -506,7 +523,7 @@ pub(crate) fn cmd_deps(
             .collect::<Vec<_>>();
         println!(
             "{}",
-            render_table(&["Path", "Language", "Indexed"], &rows, no_color)
+            render_table(&["Path", "Kind", "Language", "Indexed"], &rows, no_color)
         );
     }
     if !graph.used_by.is_empty() {
@@ -514,6 +531,128 @@ pub(crate) fn cmd_deps(
         print_script_table(&graph.used_by, no_color);
     }
     Ok(())
+}
+
+/// Short display label for a dependency edge kind. `referenced` edges (a script
+/// invoked by path rather than imported) show as `ref`.
+fn kind_label(kind: &str) -> &str {
+    match kind {
+        "referenced" => "ref",
+        "import" => "import",
+        other => other,
+    }
+}
+
+fn cmd_deps_tree(
+    api: &scat_core::core::search::SearchApi,
+    path: &str,
+    depth: usize,
+    output: OutputFormat,
+) -> Result<()> {
+    use scat_core::core::search::TreeDirection;
+
+    let uses = api
+        .dependency_tree(path, TreeDirection::Uses, depth)?
+        .with_context(|| format!("script '{path}' not found in catalog"))?;
+    let used_by = api
+        .dependency_tree(path, TreeDirection::UsedBy, depth)?
+        .with_context(|| format!("script '{path}' not found in catalog"))?;
+
+    if output == OutputFormat::Json {
+        print_json(&serde_json::json!({
+            "depth": depth,
+            "uses": uses,
+            "used_by": used_by,
+        }));
+        return Ok(());
+    }
+
+    if uses.children.is_empty() && used_by.children.is_empty() {
+        println!("No dependencies found for {path}.");
+        return Ok(());
+    }
+
+    let mut legend_repeat = false;
+    let mut legend_cycle = false;
+    let mut legend_truncated = false;
+    let mut legend_ref = false;
+    for (heading, tree) in [("Uses", &uses), ("Used by", &used_by)] {
+        if tree.children.is_empty() {
+            continue;
+        }
+        println!("{heading} (depth ≤ {depth}):");
+        for line in render_tree_lines(tree) {
+            println!("{line}");
+        }
+        println!();
+        legend_repeat |= tree_has(tree, &|n| n.repeated);
+        legend_cycle |= tree_has(tree, &|n| n.cycle);
+        legend_truncated |= tree_has(tree, &|n| n.truncated);
+        legend_ref |= tree_has(tree, &|n| n.via_kind.as_deref() == Some("referenced"));
+    }
+    if legend_ref {
+        println!("(ref) referenced by path (copied/executed/manifested), not imported");
+    }
+    if legend_repeat {
+        println!("(*) subtree already shown above");
+    }
+    if legend_cycle {
+        println!("(cycle) path depends on itself through this chain");
+    }
+    if legend_truncated {
+        println!("(…) children beyond the depth limit; raise with --depth");
+    }
+    Ok(())
+}
+
+fn tree_has(
+    node: &scat_core::core::search::DepsTreeNode,
+    predicate: &impl Fn(&scat_core::core::search::DepsTreeNode) -> bool,
+) -> bool {
+    predicate(node) || node.children.iter().any(|child| tree_has(child, predicate))
+}
+
+fn render_tree_lines(root: &scat_core::core::search::DepsTreeNode) -> Vec<String> {
+    fn node_label(node: &scat_core::core::search::DepsTreeNode) -> String {
+        let mut label = node.logical_path.clone();
+        if node.via_kind.as_deref() == Some("referenced") {
+            label.push_str(" (ref)");
+        }
+        if !node.indexed {
+            label.push_str(" (not indexed)");
+        }
+        if node.cycle {
+            label.push_str(" (cycle)");
+        }
+        if node.repeated {
+            label.push_str(" (*)");
+        }
+        if node.truncated {
+            label.push_str(" (…)");
+        }
+        label
+    }
+
+    fn push_children(
+        node: &scat_core::core::search::DepsTreeNode,
+        prefix: &str,
+        out: &mut Vec<String>,
+    ) {
+        let last_index = node.children.len().saturating_sub(1);
+        for (index, child) in node.children.iter().enumerate() {
+            let (branch, continuation) = if index == last_index {
+                ("└── ", "    ")
+            } else {
+                ("├── ", "│   ")
+            };
+            out.push(format!("{prefix}{branch}{}", node_label(child)));
+            push_children(child, &format!("{prefix}{continuation}"), out);
+        }
+    }
+
+    let mut out = vec![node_label(root)];
+    push_children(root, "", &mut out);
+    out
 }
 
 pub(crate) fn cmd_stats(
@@ -979,8 +1118,8 @@ fn read_indexed_at(db_path: &Path) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        cmd_deps, cmd_show, relative_age, render_revision_lines, render_revision_stats_lines,
-        revisions_to_json,
+        cmd_deps, cmd_show, query_uses_fts, relative_age, render_revision_lines,
+        render_revision_stats_lines, revisions_to_json,
     };
     use scat_core::core::db::{JsonRow, SCHEMA_VERSION, create_db};
     use scat_core::core::search::{RevisionStats, SearchApi};
@@ -1098,6 +1237,8 @@ mod tests {
         let err = cmd_deps(
             &api,
             "/catalog/scripts/missing.py",
+            false,
+            None,
             super::OutputFormat::Table,
             true,
         )
@@ -1106,6 +1247,69 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "script '/catalog/scripts/missing.py' not found in catalog"
+        );
+    }
+
+    #[test]
+    fn render_tree_lines_draws_branches_and_markers() {
+        use scat_core::core::search::DepsTreeNode;
+
+        let node = |path: &str, children: Vec<DepsTreeNode>| DepsTreeNode {
+            logical_path: path.to_string(),
+            indexed: true,
+            cycle: false,
+            repeated: false,
+            truncated: false,
+            via_kind: Some("import".to_string()),
+            children,
+        };
+
+        let mut external = node("/external/lib.py", vec![]);
+        external.indexed = false;
+        let mut shared_again = node("/catalog/shared.py", vec![]);
+        shared_again.repeated = true;
+        let mut referenced = node("/catalog/runner.sh", vec![]);
+        referenced.via_kind = Some("referenced".to_string());
+        let root = node(
+            "/catalog/a.py",
+            vec![
+                node(
+                    "/catalog/b.py",
+                    vec![node(
+                        "/catalog/shared.py",
+                        vec![node("/catalog/leaf.py", vec![])],
+                    )],
+                ),
+                node("/catalog/c.py", vec![shared_again, external, referenced]),
+            ],
+        );
+
+        assert_eq!(
+            super::render_tree_lines(&root),
+            vec![
+                "/catalog/a.py",
+                "├── /catalog/b.py",
+                "│   └── /catalog/shared.py",
+                "│       └── /catalog/leaf.py",
+                "└── /catalog/c.py",
+                "    ├── /catalog/shared.py (*)",
+                "    ├── /external/lib.py (not indexed)",
+                "    └── /catalog/runner.sh (ref)",
+            ]
+        );
+    }
+
+    #[test]
+    fn query_uses_fts_routes_paths_including_backslashes() {
+        assert!(query_uses_fts("patch"), "plain word → FTS");
+        assert!(
+            !query_uses_fts("jobs/nightly"),
+            "forward-slash path → path search"
+        );
+        assert!(!query_uses_fts("foo.py"), "dotted name → path search");
+        assert!(
+            !query_uses_fts("scripts\\foo"),
+            "Windows backslash path → path search"
         );
     }
 

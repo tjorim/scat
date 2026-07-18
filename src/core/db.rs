@@ -6,7 +6,7 @@ use tracing::{debug, trace};
 use crate::error::{Error, Result};
 
 /// Current SQLite schema version expected by this binary.
-pub const SCHEMA_VERSION: i64 = 10;
+pub const SCHEMA_VERSION: i64 = 11;
 
 /// A database row serialised as a JSON object — every column becomes a key.
 pub type JsonRow = serde_json::Map<String, serde_json::Value>;
@@ -137,7 +137,12 @@ CREATE TABLE IF NOT EXISTS dependencies (
     script_id          INTEGER NOT NULL REFERENCES scripts(id) ON DELETE CASCADE,
     depends_on_path    TEXT    NOT NULL,
     resolved_script_id INTEGER REFERENCES scripts(id) ON DELETE SET NULL,
-    UNIQUE (script_id, depends_on_path)
+    -- 'import': a language-level import/source edge (module name in
+    -- depends_on_path). 'referenced': a path-literal edge (a full logical
+    -- path found in the script body, e.g. a manifest entry or an
+    -- `ssh host python3 <path>` invocation), resolved by exact path match.
+    kind               TEXT    NOT NULL DEFAULT 'import',
+    UNIQUE (script_id, depends_on_path, kind)
 );
 
 CREATE INDEX IF NOT EXISTS idx_dependencies_resolved_script_id

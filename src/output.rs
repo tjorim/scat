@@ -419,6 +419,7 @@ pub(crate) fn dep_entry_to_json(e: &scat_core::core::search::DependencyEntry) ->
         "owner": e.owner,
         "purpose": e.purpose,
         "indexed": e.indexed,
+        "kind": e.kind,
     })
 }
 
@@ -430,6 +431,7 @@ pub(crate) fn used_by_row_to_json(row: &scat_core::core::db::JsonRow) -> serde_j
         "language": view.language_value(),
         "owner": view.owner_value(),
         "purpose": view.purpose_value(),
+        "kind": row.get("kind").cloned().unwrap_or(serde_json::Value::Null),
     })
 }
 

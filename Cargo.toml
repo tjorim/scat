@@ -40,6 +40,7 @@ unicode-width = "0.2"
 ignore = "0.4.26"
 similar = "3"
 shell-words = "1"
+clap_complete = "4.6.7"
 
 [dev-dependencies]
 rusqlite = { version = "0.40", features = ["bundled-full"] }

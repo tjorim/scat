@@ -231,10 +231,13 @@ fn draw_detail_diff_view(frame: &mut Frame<'_>, app: &mut TuiApp) {
 }
 
 fn draw_search(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
-    let title = super::search_title(app.error.is_some(), app.search_in_flight);
+    let mut title = super::search_title(app.error.is_some(), app.search_in_flight).to_string();
+    if !app.filter_labels.is_empty() {
+        title = format!("{title} [{}]", app.filter_labels.join(" "));
+    }
     let text = if app.query.is_empty() {
         Text::from(Line::from(Span::styled(
-            "type to search, Enter for results",
+            "type to search — lang:/owner:/tag: to filter, Enter for results",
             Style::default().fg(Color::DarkGray),
         )))
     } else {

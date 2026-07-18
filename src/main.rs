@@ -60,6 +60,14 @@ fn run(cli: Cli) -> Result<()> {
         return cmd_vc(args, json, scat_config.vc_executable);
     }
 
+    // Shell completions need no catalog.
+    if let Commands::Completions { shell } = cli.command {
+        use clap::CommandFactory;
+        let mut command = Cli::command();
+        clap_complete::generate(shell, &mut command, "scat", &mut std::io::stdout());
+        return Ok(());
+    }
+
     // Resolve database path: CLI flag / env var takes precedence over config file.
     let db_path_buf: PathBuf;
     let no_db_hint =
@@ -146,7 +154,19 @@ fn run(cli: Cli) -> Result<()> {
             functions,
         ),
         Commands::Status { path, all, output } => cmd_status(&api, path, all, output, no_color),
-        Commands::Deps { path, output } => cmd_deps(&api, &path, output, no_color),
+        Commands::Deps {
+            path,
+            tree,
+            depth,
+            output,
+        } => cmd_deps(
+            &api,
+            &path,
+            tree,
+            depth.map(|d| usize::try_from(d).unwrap_or(usize::MAX)),
+            output,
+            no_color,
+        ),
         Commands::Symlinks { path, output } => cmd_symlinks(&api, &path, output, no_color),
         Commands::Diff {
             path: Some(logical_path),
@@ -158,6 +178,7 @@ fn run(cli: Cli) -> Result<()> {
         Commands::Vc { .. }
         | Commands::Tui { .. }
         | Commands::Catalog { .. }
+        | Commands::Completions { .. }
         | Commands::Diff { .. } => unreachable!(),
     }
 }

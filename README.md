@@ -73,9 +73,14 @@ This tool provides a **single searchable index** without:
 - Scriptable and automation‑friendly
 - JSON output where applicable
 - Suitable for power users and CI jobs
+- Transitive dependency trees: `scat deps <path> --tree [--depth N]`
+- Shell completions: `scat completions bash|zsh|fish|powershell|elvish`
 
 ### TUI
 - Interactive search and filtering
+  - `lang:`, `owner:`, and `tag:` tokens in the search box filter results the
+    same way the CLI's `--lang`/`--owner`/`--tag` flags do
+    (e.g. `backup lang:python owner:alice`)
 - Results list with script preview
 - Metadata, checkout state, and related scripts panes
 - Keyboard-first navigation
@@ -95,8 +100,10 @@ Example commands:
 scat search "patch freeze"
 scat show /catalog/scripts/foo/bar.py
 scat deps /catalog/scripts/foo/bar.py
+scat deps /catalog/scripts/foo/bar.py --tree --depth 3
 scat catalog stats
 scat tui
+scat completions bash
 ````
 
 ***
@@ -107,6 +114,27 @@ scat tui
 *   Shell (bash / ksh / sh)
 
 Dependency extraction uses **Tree‑sitter** for accurate parsing.
+
+### Dependency edge kinds
+
+Two kinds of dependency edges are recorded:
+
+*   **`import`** — language-level edges: Python `import`/`from` statements and
+    bare-name shell `source`/`.` directives (`source common.sh`), resolved
+    through module/basename mapping. A `source`/`.` of a *path*
+    (`source ../lib/common.sh`) is treated as a `referenced` edge instead, so it
+    resolves by path.
+*   **`referenced`** — a script invoked *by path* rather than imported: a shell
+    script that `scp`/`ssh`-runs another script, a Python file executing one via
+    `subprocess`/`paramiko`, or a JSON/YAML manifest listing scripts to run.
+    These are found by scanning the file body for path literals and are kept
+    only when the path resolves to an indexed script — either an **absolute**
+    logical path matched exactly, or a **relative** path (`./x.py`,
+    `../lib/x.py`) resolved against the referencing script's own directory.
+    Unrelated strings (logs, temp files, copy destinations) are discarded.
+    Resolution is language-agnostic, so cross-language edges (a shell script
+    invoking a Python one, or vice versa) are captured. In `scat deps` they show
+    as `ref` (flat table) or `(ref)` (tree).
 
 ***
 

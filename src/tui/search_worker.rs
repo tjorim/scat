@@ -97,15 +97,79 @@ fn worker_loop(
     }
 }
 
+/// A TUI query split into free text and `lang:`/`owner:`/`tag:` filters.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ParsedQuery {
+    pub text: String,
+    pub lang: Option<String>,
+    pub owner: Option<String>,
+    pub tag: Option<String>,
+}
+
+impl ParsedQuery {
+    /// Active filters as `key=value` pairs, for display.
+    pub fn filter_labels(&self) -> Vec<String> {
+        [
+            ("lang", &self.lang),
+            ("owner", &self.owner),
+            ("tag", &self.tag),
+        ]
+        .iter()
+        .filter_map(|(key, value)| value.as_deref().map(|value| format!("{key}={value}")))
+        .collect()
+    }
+}
+
+/// Split a search query into free text and filter tokens.
+///
+/// A whitespace-separated token of the form `lang:python` (also `language:`),
+/// `owner:alice`, or `tag:deploy` becomes a filter matching the CLI's
+/// `--lang`/`--owner`/`--tag` flags; the last occurrence of a key wins. A
+/// filter key with an empty value (`lang:` mid-typing) is ignored. Everything
+/// else stays part of the text query.
+pub fn parse_query_filters(query: &str) -> ParsedQuery {
+    let mut parsed = ParsedQuery::default();
+    let mut text_tokens: Vec<&str> = Vec::new();
+    for token in query.split_whitespace() {
+        let target = match token.split_once(':') {
+            Some(("lang" | "language", value)) => Some((&mut parsed.lang, value)),
+            Some(("owner", value)) => Some((&mut parsed.owner, value)),
+            Some(("tag", value)) => Some((&mut parsed.tag, value)),
+            _ => None,
+        };
+        match target {
+            Some((slot, value)) if !value.is_empty() => *slot = Some(value.to_string()),
+            Some(_) => {}
+            None => text_tokens.push(token),
+        }
+    }
+    parsed.text = text_tokens.join(" ");
+    parsed
+}
+
 fn run_search(api: &SearchApi, query: &str, limit: usize) -> Result<Vec<JsonRow>> {
-    let query = query.trim();
-    if query.is_empty() {
+    let parsed = parse_query_filters(query);
+    let (lang, owner, tag) = (
+        parsed.lang.as_deref(),
+        parsed.owner.as_deref(),
+        parsed.tag.as_deref(),
+    );
+    let text = parsed.text.trim();
+    if text.is_empty() {
         return api
-            .list_scripts(None, None, None, limit, 0)
+            .list_scripts(lang, owner, tag, limit, 0)
             .context("failed to list scripts");
     }
-    api.search_with_filters(query, limit, None, None, None)
-        .context("failed to run search query")
+    if crate::commands::query_uses_fts(text) {
+        api.search_with_filters(text, limit, lang, owner, tag)
+            .context("failed to run search query")
+    } else {
+        // The INSTR path search matches `/`-separated logical paths, so
+        // normalise Windows separators from the query first.
+        let path_query = text.replace('\\', "/");
+        api.search_by_path_with_filters(&path_query, limit, lang, owner, tag)
+            .context("failed to run path search query")
+    }
 }
 
 #[cfg(test)]
@@ -167,6 +231,93 @@ mod tests {
         assert_eq!(response.id, 1);
         let rows = response.result.unwrap();
         assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn parse_query_filters_splits_filters_and_text() {
+        let parsed = super::parse_query_filters("backup lang:python owner:alice tag:deploy job");
+        assert_eq!(parsed.text, "backup job");
+        assert_eq!(parsed.lang.as_deref(), Some("python"));
+        assert_eq!(parsed.owner.as_deref(), Some("alice"));
+        assert_eq!(parsed.tag.as_deref(), Some("deploy"));
+        assert_eq!(
+            parsed.filter_labels(),
+            vec!["lang=python", "owner=alice", "tag=deploy"]
+        );
+    }
+
+    #[test]
+    fn parse_query_filters_last_key_wins_and_empty_value_ignored() {
+        let parsed = super::parse_query_filters("lang:shell language:python owner:");
+        assert_eq!(parsed.lang.as_deref(), Some("python"));
+        assert_eq!(parsed.owner, None);
+        assert_eq!(parsed.text, "");
+    }
+
+    #[test]
+    fn parse_query_filters_keeps_unknown_and_path_tokens_as_text() {
+        let parsed = super::parse_query_filters("size:big /catalog/scripts/foo.py");
+        assert_eq!(parsed.text, "size:big /catalog/scripts/foo.py");
+        assert_eq!(
+            parsed,
+            super::ParsedQuery {
+                text: parsed.text.clone(),
+                ..Default::default()
+            }
+        );
+    }
+
+    #[test]
+    fn filter_only_query_lists_matching_scripts() {
+        let db = make_db();
+        let worker = SearchWorker::new(db.path()).unwrap();
+        worker
+            .send(SearchRequest {
+                id: 2,
+                query: "owner:alice".to_string(),
+                limit: 200,
+            })
+            .unwrap();
+        let rows = recv_response(&worker).result.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].get("logical_path").unwrap().as_str().unwrap(),
+            "/catalog/scripts/a.py"
+        );
+    }
+
+    #[test]
+    fn text_query_with_filter_applies_both() {
+        let db = make_db();
+        let worker = SearchWorker::new(db.path()).unwrap();
+        worker
+            .send(SearchRequest {
+                id: 3,
+                query: "owner:alice beta".to_string(),
+                limit: 200,
+            })
+            .unwrap();
+        let rows = recv_response(&worker).result.unwrap();
+        assert!(rows.is_empty(), "beta matches b.py, but bob owns it");
+    }
+
+    #[test]
+    fn path_query_routes_to_path_search_instead_of_fts() {
+        let db = make_db();
+        let worker = SearchWorker::new(db.path()).unwrap();
+        worker
+            .send(SearchRequest {
+                id: 4,
+                query: "scripts/a".to_string(),
+                limit: 200,
+            })
+            .unwrap();
+        let rows = recv_response(&worker).result.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].get("logical_path").unwrap().as_str().unwrap(),
+            "/catalog/scripts/a.py"
+        );
     }
 
     #[test]

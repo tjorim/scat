@@ -41,6 +41,41 @@ pub struct DependencyEntry {
     pub purpose: Value,
     /// Whether the dependency resolved to an indexed script.
     pub indexed: bool,
+    /// Edge kind: `import` (language-level) or `referenced` (path literal).
+    pub kind: String,
+}
+
+/// Direction of a transitive dependency traversal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TreeDirection {
+    /// Follow outbound `uses` edges.
+    Uses,
+    /// Follow inbound `used by` edges.
+    UsedBy,
+}
+
+#[derive(Debug, Serialize)]
+/// One node in a transitive dependency tree.
+pub struct DepsTreeNode {
+    /// Resolved logical path, or the raw dependency path when unresolved.
+    pub logical_path: String,
+    /// Whether the node resolved to an indexed script.
+    pub indexed: bool,
+    /// The path appears among its own ancestors; children are not expanded.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub cycle: bool,
+    /// The subtree was already expanded earlier in the same tree.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub repeated: bool,
+    /// Children exist but were cut off by the depth limit.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
+    /// Edge kind by which the parent reaches this node: `import` or
+    /// `referenced`. `None` on the root, which has no incoming edge.
+    #[serde(rename = "via", skip_serializing_if = "Option::is_none")]
+    pub via_kind: Option<String>,
+    /// Expanded child nodes.
+    pub children: Vec<DepsTreeNode>,
 }
 
 #[derive(Debug, Serialize)]
@@ -429,11 +464,11 @@ impl SearchApi {
 
         let uses_rows = query_rows(
             &self.conn,
-            "SELECT d.depends_on_path, s.logical_path, s.language, s.owner, s.purpose
+            "SELECT d.depends_on_path, d.kind, s.logical_path, s.language, s.owner, s.purpose
              FROM dependencies d
              LEFT JOIN scripts s ON s.id = d.resolved_script_id
              WHERE d.script_id = ?
-             ORDER BY d.depends_on_path",
+             ORDER BY d.kind, d.depends_on_path",
             &[&script_id],
         )?;
 
@@ -450,13 +485,14 @@ impl SearchApi {
                     owner: row.get("owner").cloned().unwrap_or(Value::Null),
                     purpose: row.get("purpose").cloned().unwrap_or(Value::Null),
                     indexed,
+                    kind: row_string(&row, "kind"),
                 }
             })
             .collect();
 
         let used_by = query_rows(
             &self.conn,
-            "SELECT s.logical_path, s.language, s.owner, s.purpose
+            "SELECT s.logical_path, s.language, s.owner, s.purpose, d.kind
              FROM scripts s JOIN dependencies d ON d.script_id = s.id
              WHERE d.resolved_script_id = ?
              ORDER BY s.logical_path",
@@ -464,6 +500,138 @@ impl SearchApi {
         )?;
 
         Ok(DependencyGraph { uses, used_by })
+    }
+
+    /// Return the transitive dependency tree for a script in one direction,
+    /// or `None` when the script is not indexed.
+    ///
+    /// Traversal is cycle-safe: a path that appears among its own ancestors is
+    /// emitted as a `cycle` leaf, a subtree that was already expanded earlier
+    /// in the same tree is emitted as a `repeated` leaf, and nodes at
+    /// `max_depth` are emitted as `truncated` leaves.
+    pub fn dependency_tree(
+        &self,
+        logical_path: &str,
+        direction: TreeDirection,
+        max_depth: usize,
+    ) -> Result<Option<DepsTreeNode>> {
+        let script = match self.get_script(logical_path)? {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+        let script_id = script.get("id").and_then(Value::as_i64);
+        let root_path = row_string(&script, "logical_path");
+
+        let mut ancestors = BTreeSet::new();
+        let mut expanded = BTreeSet::new();
+        self.tree_node(
+            root_path,
+            script_id,
+            None,
+            direction,
+            max_depth,
+            &mut ancestors,
+            &mut expanded,
+        )
+        .map(Some)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn tree_node(
+        &self,
+        logical_path: String,
+        script_id: Option<i64>,
+        via_kind: Option<String>,
+        direction: TreeDirection,
+        depth_left: usize,
+        ancestors: &mut BTreeSet<String>,
+        expanded: &mut BTreeSet<String>,
+    ) -> Result<DepsTreeNode> {
+        let mut node = DepsTreeNode {
+            indexed: script_id.is_some(),
+            cycle: false,
+            repeated: false,
+            truncated: false,
+            via_kind,
+            children: vec![],
+            logical_path,
+        };
+        let Some(script_id) = script_id else {
+            return Ok(node);
+        };
+        if ancestors.contains(&node.logical_path) {
+            node.cycle = true;
+            return Ok(node);
+        }
+        if expanded.contains(&node.logical_path) {
+            node.repeated = true;
+            return Ok(node);
+        }
+
+        if depth_left == 0 {
+            // At the depth limit we only need to know whether *any* edge
+            // exists, so skip the join/order used to materialize full rows.
+            let edge_sql = match direction {
+                TreeDirection::Uses => "SELECT 1 FROM dependencies WHERE script_id = ? LIMIT 1",
+                TreeDirection::UsedBy => {
+                    "SELECT 1 FROM dependencies WHERE resolved_script_id = ? LIMIT 1"
+                }
+            };
+            node.truncated = self
+                .conn
+                .query_row(edge_sql, [script_id], |_| Ok(()))
+                .optional()?
+                .is_some();
+            return Ok(node);
+        }
+
+        let edges = match direction {
+            TreeDirection::Uses => query_rows(
+                &self.conn,
+                "SELECT d.depends_on_path, d.kind, s.logical_path, s.id
+                 FROM dependencies d
+                 LEFT JOIN scripts s ON s.id = d.resolved_script_id
+                 WHERE d.script_id = ?
+                 ORDER BY d.kind, COALESCE(s.logical_path, d.depends_on_path)",
+                &[&script_id],
+            )?,
+            TreeDirection::UsedBy => query_rows(
+                &self.conn,
+                "SELECT s.logical_path, s.id, d.kind
+                 FROM scripts s JOIN dependencies d ON d.script_id = s.id
+                 WHERE d.resolved_script_id = ?
+                 ORDER BY d.kind, s.logical_path",
+                &[&script_id],
+            )?,
+        };
+        if edges.is_empty() {
+            return Ok(node);
+        }
+
+        ancestors.insert(node.logical_path.clone());
+        for edge in edges {
+            let child_id = edge.get("id").and_then(Value::as_i64);
+            let child_path = match child_id {
+                Some(_) => row_string(&edge, "logical_path"),
+                None => row_string(&edge, "depends_on_path"),
+            };
+            node.children.push(self.tree_node(
+                child_path,
+                child_id,
+                Some(row_string(&edge, "kind")),
+                direction,
+                depth_left - 1,
+                ancestors,
+                expanded,
+            )?);
+        }
+        ancestors.remove(&node.logical_path);
+
+        // Only remember subtrees that actually hide something when repeated.
+        if !node.children.is_empty() {
+            expanded.insert(node.logical_path.clone());
+        }
+        Ok(node)
     }
 
     /// Return function definitions recorded for a script.

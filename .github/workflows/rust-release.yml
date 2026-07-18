@@ -116,7 +116,8 @@ jobs:
               script_id INTEGER NOT NULL REFERENCES scripts(id) ON DELETE CASCADE,
               depends_on_path TEXT NOT NULL,
               resolved_script_id INTEGER REFERENCES scripts(id) ON DELETE SET NULL,
-              UNIQUE (script_id, depends_on_path)
+              kind TEXT NOT NULL DEFAULT 'import',
+              UNIQUE (script_id, depends_on_path, kind)
           );
           CREATE INDEX idx_dependencies_resolved_script_id ON dependencies(resolved_script_id);
           CREATE TABLE vc_checkouts (
@@ -188,7 +189,7 @@ jobs:
           conn.execute(
               "INSERT INTO index_metadata (id, build_timestamp, schema_version) VALUES (1, ?, ?)",
               # Must match scat_core::core::db::SCHEMA_VERSION.
-              ("2026-06-01T00:00:00Z", 10),
+              ("2026-06-01T00:00:00Z", 11),
           )
           conn.commit()
           conn.close()
@@ -295,7 +296,8 @@ jobs:
               script_id INTEGER NOT NULL REFERENCES scripts(id) ON DELETE CASCADE,
               depends_on_path TEXT NOT NULL,
               resolved_script_id INTEGER REFERENCES scripts(id) ON DELETE SET NULL,
-              UNIQUE (script_id, depends_on_path)
+              kind TEXT NOT NULL DEFAULT 'import',
+              UNIQUE (script_id, depends_on_path, kind)
           );
           CREATE INDEX idx_dependencies_resolved_script_id ON dependencies(resolved_script_id);
           CREATE TABLE vc_checkouts (
@@ -367,7 +369,7 @@ jobs:
           conn.execute(
               "INSERT INTO index_metadata (id, build_timestamp, schema_version) VALUES (1, ?, ?)",
               # Must match scat_core::core::db::SCHEMA_VERSION.
-              ("2026-06-01T00:00:00Z", 10),
+              ("2026-06-01T00:00:00Z", 11),
           )
           conn.commit()
           conn.close()

@@ -633,6 +633,291 @@ fn build_resolves_absolute_and_relative_dependency_paths() {
 }
 
 // ---------------------------------------------------------------------------
+// Path-literal "referenced" dependencies
+// ---------------------------------------------------------------------------
+
+#[test]
+fn build_records_referenced_path_dependencies() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path().join("scripts");
+    std::fs::create_dir(&root).unwrap();
+
+    // Target script, invoked by other scripts via its full logical path.
+    std::fs::write(
+        root.join("lib.py"),
+        // A script mentioning its own logical path must NOT create a self-edge.
+        "# defined at /catalog/scripts/lib.py\nprint('lib')\n",
+    )
+    .unwrap();
+
+    // A shell script that copies + remote-executes lib.py by path, plus a
+    // reference to a path that is not indexed (must be dropped) and an
+    // unrelated temp path (must be dropped).
+    std::fs::write(
+        root.join("runner.sh"),
+        "#!/bin/bash\n\
+         scp /catalog/scripts/lib.py host:/tmp/\n\
+         ssh host python3 /catalog/scripts/lib.py\n\
+         python3 /catalog/scripts/missing.py\n\
+         cat /tmp/scratch.sh\n",
+    )
+    .unwrap();
+
+    // A JSON manifest listing scripts to run in order.
+    std::fs::write(
+        root.join("pipeline.json"),
+        r#"{"steps": ["/catalog/scripts/lib.py"]}"#,
+    )
+    .unwrap();
+
+    let db_path = dir.path().join("catalog.sqlite");
+    build_index(
+        std::slice::from_ref(&root),
+        &db_path,
+        BuildOptions {
+            logical_prefix: "/catalog/scripts".into(),
+            head_lines: 5,
+            keep_copies: 0,
+            vc_config: Some(VcConfig::default()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let conn = open_ro(&db_path);
+
+    let lib_id: i64 = conn
+        .query_row(
+            "SELECT id FROM scripts WHERE logical_path = '/catalog/scripts/lib.py'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+
+    // Every referenced edge that survived resolution must be resolved (the
+    // unresolved candidates — missing.py, /tmp/scratch.sh — are dropped).
+    let unresolved_refs: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM dependencies WHERE kind = 'referenced' AND resolved_script_id IS NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        unresolved_refs, 0,
+        "unresolved referenced edges must be dropped"
+    );
+
+    // runner.sh and pipeline.json both reference lib.py → two referenced edges,
+    // both resolved to lib.py.
+    let refs_to_lib: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM dependencies WHERE kind = 'referenced' AND resolved_script_id = ?",
+            rusqlite::params![lib_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        refs_to_lib, 2,
+        "runner.sh and pipeline.json reference lib.py"
+    );
+
+    // lib.py mentioning its own path must not create a self-edge.
+    let self_edges: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM dependencies d
+             WHERE d.kind = 'referenced' AND d.script_id = ? AND d.resolved_script_id = ?",
+            rusqlite::params![lib_id, lib_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        self_edges, 0,
+        "a script referencing its own path is not a dependency"
+    );
+}
+
+#[test]
+fn build_resolves_relative_and_cross_language_references() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path().join("scripts");
+    std::fs::create_dir_all(root.join("lib")).unwrap();
+    std::fs::create_dir_all(root.join("jobs")).unwrap();
+    std::fs::create_dir_all(root.join("bin")).unwrap();
+
+    std::fs::write(root.join("lib/common.py"), "def go():\n    pass\n").unwrap();
+    std::fs::write(root.join("lib/task.sh"), "#!/bin/bash\necho hi\n").unwrap();
+
+    // shell → python via a RELATIVE path (../lib/common.py).
+    std::fs::write(
+        root.join("jobs/run.sh"),
+        "#!/bin/bash\npython3 ../lib/common.py\n",
+    )
+    .unwrap();
+
+    // python → shell via an ABSOLUTE path (cross-language).
+    std::fs::write(
+        root.join("jobs/orchestrate.py"),
+        "import subprocess\nsubprocess.run([\"/catalog/lib/task.sh\"])\n",
+    )
+    .unwrap();
+
+    // An extension-less script (indexed via shebang) that OS-branches between
+    // a .sh and a .py — both appear as literals, so both must be captured.
+    std::fs::write(
+        root.join("bin/dispatch"),
+        "#!/bin/bash\nif [ \"$(uname)\" = Linux ]; then\n  exec /catalog/lib/task.sh\nelse\n  exec python3 /catalog/lib/common.py\nfi\n",
+    )
+    .unwrap();
+
+    let db_path = dir.path().join("catalog.sqlite");
+    build_index(
+        std::slice::from_ref(&root),
+        &db_path,
+        BuildOptions {
+            logical_prefix: "/catalog".into(),
+            head_lines: 5,
+            keep_copies: 0,
+            vc_config: Some(VcConfig::default()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let conn = open_ro(&db_path);
+    let referrers_of = |target: &str| -> Vec<String> {
+        let target_id: i64 = conn
+            .query_row(
+                "SELECT id FROM scripts WHERE logical_path = ?1",
+                rusqlite::params![target],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT s.logical_path
+                 FROM dependencies d JOIN scripts s ON s.id = d.script_id
+                 WHERE d.kind = 'referenced' AND d.resolved_script_id = ?1
+                 ORDER BY s.logical_path",
+            )
+            .unwrap();
+        stmt.query_map(rusqlite::params![target_id], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    };
+
+    // common.py is referenced by the relative shell ref and the dispatch branch.
+    assert_eq!(
+        referrers_of("/catalog/lib/common.py"),
+        vec![
+            "/catalog/bin/dispatch".to_string(),
+            "/catalog/jobs/run.sh".to_string(),
+        ]
+    );
+    // task.sh is referenced cross-language by the python orchestrator and dispatch.
+    assert_eq!(
+        referrers_of("/catalog/lib/task.sh"),
+        vec![
+            "/catalog/bin/dispatch".to_string(),
+            "/catalog/jobs/orchestrate.py".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn build_source_by_path_resolves_cleanly_without_extension_collision() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path().join("scripts");
+    std::fs::create_dir_all(root.join("lib")).unwrap();
+    std::fs::create_dir_all(root.join("jobs")).unwrap();
+
+    std::fs::write(root.join("lib/common.sh"), "#!/bin/bash\necho common\n").unwrap();
+    // Absolute and relative `source` of a path — must resolve to common.sh as a
+    // single `referenced` edge, with no import edge mis-resolved via the bare
+    // `sh` module suffix (which previously produced a bogus self/cross edge).
+    std::fs::write(
+        root.join("jobs/a.sh"),
+        "#!/bin/bash\nsource /catalog/lib/common.sh\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("jobs/b.sh"),
+        "#!/bin/bash\nsource ../lib/common.sh\n",
+    )
+    .unwrap();
+
+    let db_path = dir.path().join("catalog.sqlite");
+    build_index(
+        std::slice::from_ref(&root),
+        &db_path,
+        BuildOptions {
+            logical_prefix: "/catalog".into(),
+            head_lines: 5,
+            keep_copies: 0,
+            vc_config: Some(VcConfig::default()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let conn = open_ro(&db_path);
+
+    // a.sh and b.sh each have exactly one dependency edge: a referenced edge to
+    // common.sh. No import edge, and no bogus self- or cross-edge.
+    for caller in ["/catalog/jobs/a.sh", "/catalog/jobs/b.sh"] {
+        let edges: Vec<(String, String, Option<i64>)> = {
+            let caller_id: i64 = conn
+                .query_row(
+                    "SELECT id FROM scripts WHERE logical_path = ?1",
+                    rusqlite::params![caller],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let mut stmt = conn
+                .prepare(
+                    "SELECT depends_on_path, kind, resolved_script_id
+                     FROM dependencies WHERE script_id = ?1",
+                )
+                .unwrap();
+            stmt.query_map(rusqlite::params![caller_id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+        };
+        assert_eq!(
+            edges.len(),
+            1,
+            "{caller} should have exactly one edge: {edges:?}"
+        );
+        assert_eq!(
+            edges[0].1, "referenced",
+            "{caller} edge should be referenced"
+        );
+        assert!(edges[0].2.is_some(), "{caller} edge should be resolved");
+    }
+
+    // common.sh is used by both a.sh and b.sh.
+    let common_id: i64 = conn
+        .query_row(
+            "SELECT id FROM scripts WHERE logical_path = '/catalog/lib/common.sh'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let user_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM dependencies WHERE resolved_script_id = ?1",
+            rusqlite::params![common_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(user_count, 2);
+}
+
+// ---------------------------------------------------------------------------
 // Empty scan root
 // ---------------------------------------------------------------------------
 
