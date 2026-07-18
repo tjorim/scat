@@ -164,7 +164,10 @@ fn run_search(api: &SearchApi, query: &str, limit: usize) -> Result<Vec<JsonRow>
         api.search_with_filters(text, limit, lang, owner, tag)
             .context("failed to run search query")
     } else {
-        api.search_by_path_with_filters(text, limit, lang, owner, tag)
+        // The INSTR path search matches `/`-separated logical paths, so
+        // normalise Windows separators from the query first.
+        let path_query = text.replace('\\', "/");
+        api.search_by_path_with_filters(&path_query, limit, lang, owner, tag)
             .context("failed to run path search query")
     }
 }

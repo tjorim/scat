@@ -161,14 +161,17 @@ pub fn extract_reference_paths(content: &str) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut out = Vec::new();
     for m in REFERENCE_PATH_RE.find_iter(content) {
-        let candidate = m.as_str();
+        // Normalise Windows separators up front so a back-slash reference
+        // (`..\lib\common.py`) is captured and resolved the same as a
+        // forward-slash one — logical paths are always `/`-separated.
+        let candidate = m.as_str().replace('\\', "/");
         // A bare basename (no separator) can never match a full logical path,
         // so drop it here to keep the candidate set small.
         if !candidate.contains('/') {
             continue;
         }
-        if seen.insert(candidate.to_string()) {
-            out.push(candidate.to_string());
+        if seen.insert(candidate.clone()) {
+            out.push(candidate);
         }
     }
     out
@@ -294,6 +297,17 @@ mod tests {
         // Repeated path collapses to a single candidate.
         let refs = extract_reference_paths("a/x.py then a/x.py again");
         assert_eq!(refs, vec!["a/x.py".to_string()]);
+    }
+
+    #[test]
+    fn reference_paths_normalise_windows_backslashes() {
+        // A pure-backslash reference is captured and normalised to `/` so it
+        // resolves the same as a forward-slash path.
+        let refs = extract_reference_paths("call ..\\lib\\common.py now");
+        assert_eq!(refs, vec!["../lib/common.py".to_string()]);
+        // Mixed separators also normalise, and dedupe against the `/` form.
+        let refs = extract_reference_paths("a\\b\\c.sh and a/b/c.sh");
+        assert_eq!(refs, vec!["a/b/c.sh".to_string()]);
     }
 
     #[test]

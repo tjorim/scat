@@ -232,9 +232,8 @@ fn draw_detail_diff_view(frame: &mut Frame<'_>, app: &mut TuiApp) {
 
 fn draw_search(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
     let mut title = super::search_title(app.error.is_some(), app.search_in_flight).to_string();
-    let filters = super::search_worker::parse_query_filters(&app.query).filter_labels();
-    if !filters.is_empty() {
-        title = format!("{title} [{}]", filters.join(" "));
+    if !app.filter_labels.is_empty() {
+        title = format!("{title} [{}]", app.filter_labels.join(" "));
     }
     let text = if app.query.is_empty() {
         Text::from(Line::from(Span::styled(

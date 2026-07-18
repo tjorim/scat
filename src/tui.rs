@@ -102,6 +102,9 @@ struct TuiApp {
     inflight_detail_id: Option<u64>,
     next_detail_id: u64,
     last_keystroke_at: Option<Instant>,
+    /// Active `lang:`/`owner:`/`tag:` filter labels for the current query,
+    /// recomputed only when the query changes (not per render frame).
+    filter_labels: Vec<String>,
     pending_query: Option<String>,
     inflight_query_id: Option<u64>,
     search_in_flight: bool,
@@ -157,6 +160,7 @@ impl TuiApp {
             inflight_detail_id: None,
             next_detail_id: 0,
             last_keystroke_at: None,
+            filter_labels: Vec::new(),
             pending_query: None,
             inflight_query_id: None,
             search_in_flight: false,
@@ -236,6 +240,9 @@ impl TuiApp {
     fn schedule_query(&mut self) {
         self.pending_query = Some(self.query.clone());
         self.last_keystroke_at = Some(Instant::now());
+        // Recompute the filter labels once per query change so the render loop
+        // can read them without re-parsing the query every frame.
+        self.filter_labels = search_worker::parse_query_filters(&self.query).filter_labels();
     }
 
     fn load_selected(&mut self) -> Result<()> {

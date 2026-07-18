@@ -78,8 +78,11 @@ pub(crate) fn cmd_search(
         let rows = if use_fts {
             api.search_with_filters(q, limit, lang.as_deref(), owner.as_deref(), tag.as_deref())?
         } else {
+            // The INSTR path search matches `/`-separated logical paths, so
+            // normalise Windows separators from the query first.
+            let path_query = q.replace('\\', "/");
             api.search_by_path_with_filters(
-                q,
+                &path_query,
                 limit,
                 lang.as_deref(),
                 owner.as_deref(),
@@ -122,8 +125,10 @@ pub(crate) fn cmd_search(
 
 /// Route a text query: FTS for plain words, INSTR-based path search when the
 /// query looks like a (partial) path, since `/` and `.` are FTS5 syntax.
+/// Backslashes count as path separators so Windows-style path fragments
+/// (`scripts\foo`) route to path search too.
 pub(crate) fn query_uses_fts(query: &str) -> bool {
-    !query.contains('/') && !query.contains('.')
+    !query.contains('/') && !query.contains('\\') && !query.contains('.')
 }
 
 /// Re-sort results so exact and prefix filename matches appear first.
@@ -1113,8 +1118,8 @@ fn read_indexed_at(db_path: &Path) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        cmd_deps, cmd_show, relative_age, render_revision_lines, render_revision_stats_lines,
-        revisions_to_json,
+        cmd_deps, cmd_show, query_uses_fts, relative_age, render_revision_lines,
+        render_revision_stats_lines, revisions_to_json,
     };
     use scat_core::core::db::{JsonRow, SCHEMA_VERSION, create_db};
     use scat_core::core::search::{RevisionStats, SearchApi};
@@ -1291,6 +1296,20 @@ mod tests {
                 "    ├── /external/lib.py (not indexed)",
                 "    └── /catalog/runner.sh (ref)",
             ]
+        );
+    }
+
+    #[test]
+    fn query_uses_fts_routes_paths_including_backslashes() {
+        assert!(query_uses_fts("patch"), "plain word → FTS");
+        assert!(
+            !query_uses_fts("jobs/nightly"),
+            "forward-slash path → path search"
+        );
+        assert!(!query_uses_fts("foo.py"), "dotted name → path search");
+        assert!(
+            !query_uses_fts("scripts\\foo"),
+            "Windows backslash path → path search"
         );
     }
 
