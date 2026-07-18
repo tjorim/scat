@@ -108,7 +108,12 @@ fn extract_bash_commands(
 
         if (cmd_name == "source" || cmd_name == ".") && !args.is_empty() {
             let path = &args[0];
-            if !path.is_empty() && !seen.contains(path) {
+            // Only bare-name sources (`source common.sh`) are emitted as import
+            // edges, resolved by basename. Path-like sources
+            // (`source ../lib/common.sh`) are left to the reference extractor so
+            // they resolve correctly by path instead of via a spurious module
+            // suffix (the file extension) — see extract_reference_paths.
+            if !path.is_empty() && !path.contains('/') && !seen.contains(path) {
                 seen.insert(path.clone());
                 deps.push(path.clone());
             }
@@ -182,6 +187,13 @@ pub fn extract_deps_fallback(source: &str, language: &str) -> Vec<String> {
     for pat in patterns {
         for cap in pat.captures_iter(source) {
             let dep = cap[1].trim().to_string();
+            // Path-like deps (bash `source ../x.sh`) are handled by the
+            // reference extractor, not as import edges; Python import captures
+            // never contain a separator, so this only filters bash source
+            // paths — matching the tree-sitter extractor's bare-name rule.
+            if dep.contains('/') {
+                continue;
+            }
             if !dep.is_empty() && !seen.contains(&dep) {
                 seen.insert(dep.clone());
                 deps.push(dep);
@@ -212,18 +224,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn extracts_source_command() {
+    fn extracts_bare_name_source_command() {
         let mut ext = TreeSitterExtractor::new().unwrap();
-        let deps = ext.extract_deps("source /path/to/lib.sh\necho hello", "shell");
-        assert!(deps.contains(&"/path/to/lib.sh".to_string()));
+        let deps = ext.extract_deps("source lib.sh\necho hello", "shell");
+        assert!(deps.contains(&"lib.sh".to_string()));
         assert!(!deps.contains(&"hello".to_string()));
     }
 
     #[test]
-    fn extracts_dot_command() {
+    fn path_like_source_is_not_an_import_edge() {
+        // Path-like sources are handled by the reference extractor, not as
+        // import edges, so the module resolver never sees them.
         let mut ext = TreeSitterExtractor::new().unwrap();
-        let deps = ext.extract_deps(". ./common.sh", "shell");
-        assert!(deps.contains(&"./common.sh".to_string()));
+        assert!(
+            ext.extract_deps("source /path/to/lib.sh", "shell")
+                .is_empty()
+        );
+        assert!(ext.extract_deps(". ./common.sh", "shell").is_empty());
     }
 
     #[test]
@@ -241,10 +258,12 @@ mod tests {
     }
 
     #[test]
-    fn fallback_bash_matches_source() {
-        let deps = extract_deps_fallback("source /etc/profile\n. ./lib.sh", "shell");
-        assert!(deps.contains(&"/etc/profile".to_string()));
-        assert!(deps.contains(&"./lib.sh".to_string()));
+    fn fallback_bash_matches_bare_source_only() {
+        // Bare names become import edges; path-like sources are left to the
+        // reference extractor, matching the tree-sitter extractor.
+        let deps = extract_deps_fallback("source profile\n. ./lib.sh", "shell");
+        assert!(deps.contains(&"profile".to_string()));
+        assert!(!deps.contains(&"./lib.sh".to_string()));
     }
 
     #[test]

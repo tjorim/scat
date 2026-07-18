@@ -825,6 +825,98 @@ fn build_resolves_relative_and_cross_language_references() {
     );
 }
 
+#[test]
+fn build_source_by_path_resolves_cleanly_without_extension_collision() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path().join("scripts");
+    std::fs::create_dir_all(root.join("lib")).unwrap();
+    std::fs::create_dir_all(root.join("jobs")).unwrap();
+
+    std::fs::write(root.join("lib/common.sh"), "#!/bin/bash\necho common\n").unwrap();
+    // Absolute and relative `source` of a path — must resolve to common.sh as a
+    // single `referenced` edge, with no import edge mis-resolved via the bare
+    // `sh` module suffix (which previously produced a bogus self/cross edge).
+    std::fs::write(
+        root.join("jobs/a.sh"),
+        "#!/bin/bash\nsource /catalog/lib/common.sh\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("jobs/b.sh"),
+        "#!/bin/bash\nsource ../lib/common.sh\n",
+    )
+    .unwrap();
+
+    let db_path = dir.path().join("catalog.sqlite");
+    build_index(
+        std::slice::from_ref(&root),
+        &db_path,
+        BuildOptions {
+            logical_prefix: "/catalog".into(),
+            head_lines: 5,
+            keep_copies: 0,
+            vc_config: Some(VcConfig::default()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let conn = open_ro(&db_path);
+
+    // a.sh and b.sh each have exactly one dependency edge: a referenced edge to
+    // common.sh. No import edge, and no bogus self- or cross-edge.
+    for caller in ["/catalog/jobs/a.sh", "/catalog/jobs/b.sh"] {
+        let edges: Vec<(String, String, Option<i64>)> = {
+            let caller_id: i64 = conn
+                .query_row(
+                    "SELECT id FROM scripts WHERE logical_path = ?1",
+                    rusqlite::params![caller],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let mut stmt = conn
+                .prepare(
+                    "SELECT depends_on_path, kind, resolved_script_id
+                     FROM dependencies WHERE script_id = ?1",
+                )
+                .unwrap();
+            stmt.query_map(rusqlite::params![caller_id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+        };
+        assert_eq!(
+            edges.len(),
+            1,
+            "{caller} should have exactly one edge: {edges:?}"
+        );
+        assert_eq!(
+            edges[0].1, "referenced",
+            "{caller} edge should be referenced"
+        );
+        assert!(edges[0].2.is_some(), "{caller} edge should be resolved");
+    }
+
+    // common.sh is used by both a.sh and b.sh.
+    let common_id: i64 = conn
+        .query_row(
+            "SELECT id FROM scripts WHERE logical_path = '/catalog/lib/common.sh'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let user_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM dependencies WHERE resolved_script_id = ?1",
+            rusqlite::params![common_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(user_count, 2);
+}
+
 // ---------------------------------------------------------------------------
 // Empty scan root
 // ---------------------------------------------------------------------------

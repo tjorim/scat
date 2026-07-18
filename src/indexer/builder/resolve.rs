@@ -31,6 +31,19 @@ fn module_candidates_from_logical_path(logical_path: &str) -> Vec<String> {
     (0..parts.len()).map(|i| parts[i..].join(".")).collect()
 }
 
+/// A bare file-extension token (`sh`, `json`, …) that must never become a
+/// module-map key: a non-Python script keeps its extension in the derived
+/// module name (e.g. `common.sh` → `catalog.lib.common.sh`), so its trailing
+/// suffix candidate is the bare extension. Left in the map, `source /a/b.sh`
+/// or `import json` would spuriously resolve to whichever `.sh`/`.json` script
+/// owns that key. Two-part suffixes like `common.sh` are unaffected.
+fn is_bare_extension(token: &str) -> bool {
+    matches!(
+        token,
+        "py" | "sh" | "bash" | "ksh" | "csv" | "json" | "yml" | "yaml"
+    )
+}
+
 /// Build a `module_name → script_id` map from every indexed script.
 /// Candidates are generated longest-first so the first insertion wins for any
 /// given suffix, preferring the most-specific match.
@@ -44,6 +57,9 @@ pub(super) fn build_module_map(conn: &Connection) -> Result<HashMap<String, i64>
             .and_then(Value::as_str)
             .unwrap_or_default();
         for candidate in module_candidates_from_logical_path(path) {
+            if is_bare_extension(&candidate) {
+                continue;
+            }
             map.entry(candidate).or_insert(id);
         }
     }
@@ -440,5 +456,15 @@ mod tests {
             resolve_relative_reference("/catalog", "../../../etc/x.sh"),
             None
         );
+    }
+
+    #[test]
+    fn bare_extension_tokens_are_excluded_from_module_map() {
+        for ext in ["py", "sh", "bash", "ksh", "csv", "json", "yml", "yaml"] {
+            assert!(super::is_bare_extension(ext), "{ext} should be excluded");
+        }
+        // Two-part suffixes (real basename keys) must still be allowed.
+        assert!(!super::is_bare_extension("common.sh"));
+        assert!(!super::is_bare_extension("os"));
     }
 }

@@ -120,7 +120,10 @@ Dependency extraction uses **Tree‑sitter** for accurate parsing.
 Two kinds of dependency edges are recorded:
 
 *   **`import`** — language-level edges: Python `import`/`from` statements and
-    shell `source`/`.` directives, resolved through module/path mapping.
+    bare-name shell `source`/`.` directives (`source common.sh`), resolved
+    through module/basename mapping. A `source`/`.` of a *path*
+    (`source ../lib/common.sh`) is treated as a `referenced` edge instead, so it
+    resolves by path.
 *   **`referenced`** — a script invoked *by path* rather than imported: a shell
     script that `scp`/`ssh`-runs another script, a Python file executing one via
     `subprocess`/`paramiko`, or a JSON/YAML manifest listing scripts to run.
