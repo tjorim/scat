@@ -512,14 +512,14 @@ impl SearchApi {
             Some(s) => s,
             None => return Ok(None),
         };
-        let script_id = script.get("id").and_then(Value::as_i64).unwrap_or(0);
+        let script_id = script.get("id").and_then(Value::as_i64);
         let root_path = row_string(&script, "logical_path");
 
         let mut ancestors = BTreeSet::new();
         let mut expanded = BTreeSet::new();
         self.tree_node(
             root_path,
-            Some(script_id),
+            script_id,
             direction,
             max_depth,
             &mut ancestors,
@@ -557,6 +557,23 @@ impl SearchApi {
             return Ok(node);
         }
 
+        if depth_left == 0 {
+            // At the depth limit we only need to know whether *any* edge
+            // exists, so skip the join/order used to materialize full rows.
+            let edge_sql = match direction {
+                TreeDirection::Uses => "SELECT 1 FROM dependencies WHERE script_id = ? LIMIT 1",
+                TreeDirection::UsedBy => {
+                    "SELECT 1 FROM dependencies WHERE resolved_script_id = ? LIMIT 1"
+                }
+            };
+            node.truncated = self
+                .conn
+                .query_row(edge_sql, [script_id], |_| Ok(()))
+                .optional()?
+                .is_some();
+            return Ok(node);
+        }
+
         let edges = match direction {
             TreeDirection::Uses => query_rows(
                 &self.conn,
@@ -577,10 +594,6 @@ impl SearchApi {
             )?,
         };
         if edges.is_empty() {
-            return Ok(node);
-        }
-        if depth_left == 0 {
-            node.truncated = true;
             return Ok(node);
         }
 

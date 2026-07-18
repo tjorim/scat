@@ -535,13 +535,12 @@ fn cmd_deps_tree(
 ) -> Result<()> {
     use scat_core::core::search::TreeDirection;
 
-    // The caller already verified the script exists, so both lookups succeed.
     let uses = api
         .dependency_tree(path, TreeDirection::Uses, depth)?
-        .expect("script exists");
+        .with_context(|| format!("script '{path}' not found in catalog"))?;
     let used_by = api
         .dependency_tree(path, TreeDirection::UsedBy, depth)?
-        .expect("script exists");
+        .with_context(|| format!("script '{path}' not found in catalog"))?;
 
     if output == OutputFormat::Json {
         print_json(&serde_json::json!({
