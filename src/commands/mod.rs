@@ -1024,9 +1024,14 @@ pub(crate) fn cmd_index(
         && db_path.exists()
         && let Some(indexed_at_secs) = read_indexed_at(db_path)
     {
-        let max_mtime =
-            max_mtime_in_roots_with_shutdown(&effective_scan_roots, &effective_ignore, &shutdown)
-                .with_context(|| "Failed to check scan root modification times")?;
+        let checkout_dirs: Vec<&str> = config.all_checkout_dirs().collect();
+        let max_mtime = max_mtime_in_roots_with_shutdown(
+            &effective_scan_roots,
+            &effective_ignore,
+            &checkout_dirs,
+            &shutdown,
+        )
+        .with_context(|| "Failed to check scan root modification times")?;
         if should_skip_catalog_rebuild(indexed_at_secs, max_mtime) {
             if json {
                 print_json(&serde_json::json!({

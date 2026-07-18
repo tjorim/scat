@@ -120,10 +120,8 @@ fn collect_imports(
 ) {
     match node.kind() {
         "import_statement" => {
-            for i in 0..node.child_count() {
-                let Some(child) = node.child(i as u32) else {
-                    continue;
-                };
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
                 match child.kind() {
                     "dotted_name" => {
                         let import_name = text(child, source);
@@ -137,10 +135,8 @@ fn collect_imports(
                     "aliased_import" => {
                         let mut import_name = String::new();
                         let mut as_name = String::new();
-                        for j in 0..child.child_count() {
-                            let Some(grandchild) = child.child(j as u32) else {
-                                continue;
-                            };
+                        let mut inner_cursor = child.walk();
+                        for grandchild in child.children(&mut inner_cursor) {
                             if grandchild.kind() == "dotted_name"
                                 || grandchild.kind() == "identifier"
                             {
@@ -177,17 +173,13 @@ fn collect_imports(
             let mut module_name = String::new();
             let mut post_import_names: Vec<(String, String)> = Vec::new();
 
-            for i in 0..node.child_count() {
-                let Some(child) = node.child(i as u32) else {
-                    continue;
-                };
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
                 match child.kind() {
                     "import" => before_import_kw = false,
                     "relative_import" if before_import_kw => {
-                        for j in 0..child.child_count() {
-                            let Some(grandchild) = child.child(j as u32) else {
-                                continue;
-                            };
+                        let mut inner_cursor = child.walk();
+                        for grandchild in child.children(&mut inner_cursor) {
                             match grandchild.kind() {
                                 "import_prefix" => {
                                     prefix_dots = text(grandchild, source);
@@ -207,10 +199,8 @@ fn collect_imports(
                     "aliased_import" if !before_import_kw => {
                         let mut import_name = String::new();
                         let mut as_name = String::new();
-                        for j in 0..child.child_count() {
-                            let Some(grandchild) = child.child(j as u32) else {
-                                continue;
-                            };
+                        let mut inner_cursor = child.walk();
+                        for grandchild in child.children(&mut inner_cursor) {
                             if grandchild.kind() == "dotted_name"
                                 || grandchild.kind() == "identifier"
                             {
@@ -259,10 +249,9 @@ fn collect_imports(
             }
         }
         _ => {
-            for i in 0..node.child_count() {
-                if let Some(child) = node.child(i as u32) {
-                    collect_imports(child, source, result, seen, import_bindings);
-                }
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                collect_imports(child, source, result, seen, import_bindings);
             }
         }
     }
@@ -274,16 +263,15 @@ fn collect_definitions_in_scope(
     result: &mut AstDependencies,
     prefix: &[String],
 ) {
-    for i in 0..node.child_count() {
-        let Some(child) = node.child(i as u32) else {
-            continue;
-        };
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
         let (def_node, decorators) = match child.kind() {
             "function_definition" | "class_definition" => (Some(child), vec![]),
             "decorated_definition" => {
                 let decs = collect_decorators(child, source);
-                let inner = (0..child.child_count())
-                    .filter_map(|j| child.child(j as u32))
+                let mut inner_cursor = child.walk();
+                let inner = child
+                    .children(&mut inner_cursor)
                     .find(|gc| matches!(gc.kind(), "function_definition" | "class_definition"));
                 (inner, decs)
             }
@@ -354,10 +342,8 @@ fn add_definition(
 
 fn collect_decorators(node: Node<'_>, source: &[u8]) -> Vec<String> {
     let mut decorators = Vec::new();
-    for i in 0..node.child_count() {
-        let Some(child) = node.child(i as u32) else {
-            continue;
-        };
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
         if child.kind() == "decorator" {
             let raw = text(child, source);
             let rendered = raw.trim().trim_start_matches('@').trim().to_string();
@@ -425,18 +411,17 @@ fn collect_calls(
         let name = text(name_node, source);
         if !name.is_empty() {
             scope.push(name);
-            for i in 0..node.child_count() {
-                if let Some(child) = node.child(i as u32) {
-                    collect_calls(
-                        child,
-                        source,
-                        result,
-                        scope,
-                        import_bindings,
-                        local_names,
-                        module_name,
-                    );
-                }
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                collect_calls(
+                    child,
+                    source,
+                    result,
+                    scope,
+                    import_bindings,
+                    local_names,
+                    module_name,
+                );
             }
             let _ = scope.pop();
             return;
@@ -462,18 +447,17 @@ fn collect_calls(
         }
     }
 
-    for i in 0..node.child_count() {
-        if let Some(child) = node.child(i as u32) {
-            collect_calls(
-                child,
-                source,
-                result,
-                scope,
-                import_bindings,
-                local_names,
-                module_name,
-            );
-        }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_calls(
+            child,
+            source,
+            result,
+            scope,
+            import_bindings,
+            local_names,
+            module_name,
+        );
     }
 }
 

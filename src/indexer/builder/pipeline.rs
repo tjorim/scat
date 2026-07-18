@@ -117,6 +117,13 @@ pub(super) fn populate(
     // RAII transaction: auto-rolls back on drop if not explicitly committed.
     let tx = conn.transaction()?;
 
+    // Firing the FTS-sync triggers once per row during a bulk insert is far
+    // slower than a single bulk rebuild once all rows are in place; dropped
+    // here, restored (along with the bulk FTS rebuild) at the end of phase 3.
+    // Idempotent, so safe to re-run on a resumed build where they're already
+    // dropped from the interrupted attempt.
+    tx.execute_batch(crate::core::db::DROP_FTS_TRIGGERS_SQL)?;
+
     // Track newly indexed paths for checkpointing.
     let mut newly_indexed: HashSet<String> = already_indexed;
     let mut processed = Vec::new();
@@ -239,12 +246,14 @@ pub(super) fn populate(
         checkout_count = checkouts.len(),
         "completed build phase"
     );
-    for c in &checkouts {
-        tx.execute(
+    {
+        let mut stmt = tx.prepare(
             "INSERT OR REPLACE INTO revisions
              (logical_path, physical_path, revision_type, os_flavor, user, timestamp, age_seconds)
              VALUES (?1,?2,?3,?4,?5,?6,?7)",
-            rusqlite::params![
+        )?;
+        for c in &checkouts {
+            stmt.execute(rusqlite::params![
                 c.logical_path,
                 c.physical_path,
                 c.revision_type,
@@ -252,8 +261,8 @@ pub(super) fn populate(
                 c.user,
                 c.timestamp,
                 c.age_seconds
-            ],
-        )?;
+            ])?;
+        }
     }
 
     apply_checkout_summaries(&tx)?;
@@ -277,11 +286,11 @@ pub(super) fn populate(
             .or_default()
             .push(Value::Object(entry));
     }
-    for (lp, payload) in warnings_by_path {
-        tx.execute(
-            "UPDATE scripts SET vc_warnings = ? WHERE logical_path = ?",
-            rusqlite::params![serde_json::to_string(&payload)?, lp],
-        )?;
+    {
+        let mut stmt = tx.prepare("UPDATE scripts SET vc_warnings = ? WHERE logical_path = ?")?;
+        for (lp, payload) in warnings_by_path {
+            stmt.execute(rusqlite::params![serde_json::to_string(&payload)?, lp])?;
+        }
     }
 
     set_finalize_msg("Resolving dependencies…");
@@ -297,6 +306,11 @@ pub(super) fn populate(
         phase = "resolve_dependencies",
         "completed dependency resolution phase"
     );
+
+    set_finalize_msg("Rebuilding search index…");
+    debug!(phase = "rebuild_fts", "starting FTS rebuild phase");
+    tx.execute_batch(crate::core::db::REBUILD_FTS_AND_RESTORE_TRIGGERS_SQL)?;
+    debug!(phase = "rebuild_fts", "completed FTS rebuild phase");
 
     tx.execute(
         "INSERT OR REPLACE INTO index_metadata (id, build_timestamp, schema_version)
@@ -361,39 +375,39 @@ fn process_script(
     let related_json = serde_json::to_string(&meta.related)?;
     let fields_json = serde_json::to_string(&meta.fields)?;
 
-    conn.execute(
+    conn.prepare_cached(
         "INSERT OR REPLACE INTO scripts
          (logical_path, language, size, mtime, content,
           owner, purpose, tags, entry_points, related, symlink_target,
           metadata_json, vc_warnings, indexed_at)
          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
-        rusqlite::params![
-            record.logical_path,
-            record.language,
-            record.size as i64,
-            record.mtime,
-            meta.content,
-            meta.owner,
-            meta.purpose,
-            tags_json,
-            ep_json,
-            related_json,
-            record.symlink_target,
-            fields_json,
-            "[]",
-            indexed_at,
-        ],
-    )?;
+    )?
+    .execute(rusqlite::params![
+        record.logical_path,
+        record.language,
+        record.size as i64,
+        record.mtime,
+        meta.content,
+        meta.owner,
+        meta.purpose,
+        tags_json,
+        ep_json,
+        related_json,
+        record.symlink_target,
+        fields_json,
+        "[]",
+        indexed_at,
+    ])?;
 
     let script_id = conn.last_insert_rowid();
 
     let deps = extract_deps(record, &meta.content, ts, ast_result.as_ref());
     let dep_count = deps.len();
     for dep in &deps {
-        conn.execute(
+        conn.prepare_cached(
             "INSERT OR IGNORE INTO dependencies (script_id, depends_on_path) VALUES (?1,?2)",
-            rusqlite::params![script_id, dep],
-        )?;
+        )?
+        .execute(rusqlite::params![script_id, dep])?;
     }
 
     // Path-literal "referenced" edges (a script copied/executed by path, or
@@ -404,43 +418,43 @@ fn process_script(
         if reference == record.logical_path {
             continue;
         }
-        conn.execute(
+        conn.prepare_cached(
             "INSERT OR IGNORE INTO dependencies (script_id, depends_on_path, kind)
              VALUES (?1, ?2, 'referenced')",
-            rusqlite::params![script_id, reference],
-        )?;
+        )?
+        .execute(rusqlite::params![script_id, reference])?;
     }
 
     if let Some(ast) = ast_result {
         for definition in &ast.definitions {
-            conn.execute(
+            conn.prepare_cached(
                 "INSERT OR IGNORE INTO function_definitions
                  (script_id, name, kind, line, docstring, decorators)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                rusqlite::params![
-                    script_id,
-                    definition.name,
-                    definition.kind,
-                    definition.line as i64,
-                    definition.docstring,
-                    serde_json::to_string(&definition.decorators)?,
-                ],
-            )?;
+            )?
+            .execute(rusqlite::params![
+                script_id,
+                definition.name,
+                definition.kind,
+                definition.line as i64,
+                definition.docstring,
+                serde_json::to_string(&definition.decorators)?,
+            ])?;
         }
 
         for call in &ast.calls {
-            conn.execute(
+            conn.prepare_cached(
                 "INSERT INTO function_calls
                  (script_id, caller, callee, line, resolved_target_name)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
-                rusqlite::params![
-                    script_id,
-                    call.caller,
-                    call.callee,
-                    call.line as i64,
-                    call.resolved_target,
-                ],
-            )?;
+            )?
+            .execute(rusqlite::params![
+                script_id,
+                call.caller,
+                call.callee,
+                call.line as i64,
+                call.resolved_target,
+            ])?;
         }
     }
 

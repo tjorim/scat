@@ -435,23 +435,55 @@ pub fn scan_paths(
 
 /// Walk `roots` (respecting `.catignore` and `ignore_files`) and return the
 /// newest file mtime as UNIX epoch seconds, or `None` if no files are found.
-pub fn max_mtime_in_roots(roots: &[PathBuf], ignore_files: &[PathBuf]) -> Result<Option<f64>> {
+/// Pass an empty `checkout_dirs` slice to fall back to the default names
+/// (`DEVELOP`, `ARCHIVE`) — see [`scan_paths_with_revisions`].
+pub fn max_mtime_in_roots(
+    roots: &[PathBuf],
+    ignore_files: &[PathBuf],
+    checkout_dirs: &[&str],
+) -> Result<Option<f64>> {
     let shutdown = AtomicBool::new(false);
-    max_mtime_in_roots_with_shutdown(roots, ignore_files, &shutdown)
+    max_mtime_in_roots_with_shutdown(roots, ignore_files, checkout_dirs, &shutdown)
 }
 
 /// Walk `roots` like [`max_mtime_in_roots`], aborting early if `shutdown` is set.
+///
+/// DEVELOP/ARCHIVE checkout directories are pruned before descending, same as
+/// [`scan_paths_with_revisions`] — otherwise this "is a rebuild needed" check
+/// would walk every engineer's checkout tree just to stat mtimes that are
+/// never used, doubling the cost of a walk the real scan is about to repeat
+/// anyway.
 pub fn max_mtime_in_roots_with_shutdown(
     roots: &[PathBuf],
     ignore_files: &[PathBuf],
+    checkout_dirs: &[&str],
     shutdown: &AtomicBool,
 ) -> Result<Option<f64>> {
+    use crate::core::vc::{DEFAULT_ARCHIVE_DIRS, DEFAULT_DEVELOP_DIRS};
+    let default_checkout_dirs: Vec<&str> = DEFAULT_DEVELOP_DIRS
+        .iter()
+        .chain(DEFAULT_ARCHIVE_DIRS.iter())
+        .copied()
+        .collect();
+    let effective_checkout_dirs: &[&str] = if checkout_dirs.is_empty() {
+        &default_checkout_dirs
+    } else {
+        checkout_dirs
+    };
+    let checkout_dirs_set: std::sync::Arc<std::collections::HashSet<String>> = std::sync::Arc::new(
+        effective_checkout_dirs
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+    );
+
     let external_ignore_paths = get_external_ignore_paths(ignore_files)?;
     let mut max_mtime: Option<f64> = None;
     let canonical_roots = canonicalize_roots(roots);
 
     for root in roots {
         let croots = canonical_roots.clone();
+        let cds = checkout_dirs_set.clone();
         let mut walk = WalkBuilder::new(root);
         walk.follow_links(true)
             .hidden(false)
@@ -462,11 +494,14 @@ pub fn max_mtime_in_roots_with_shutdown(
             .parents(false)
             .add_custom_ignore_filename(".catignore")
             .filter_entry(move |e| {
-                if e.file_type().map(|t| t.is_dir()).unwrap_or(false)
-                    && e.path_is_symlink()
-                    && !is_within_roots(e.path(), &croots)
-                {
-                    return false;
+                if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    let name = e.file_name().to_str().unwrap_or("");
+                    if cds.contains(name) {
+                        return false;
+                    }
+                    if e.path_is_symlink() && !is_within_roots(e.path(), &croots) {
+                        return false;
+                    }
                 }
                 true
             });
@@ -721,7 +756,7 @@ mod tests {
     fn max_mtime_returns_none_for_empty_roots() {
         let dir = tempfile::TempDir::new().unwrap();
         // Empty directory — no files at all.
-        let result = max_mtime_in_roots(&[dir.path().to_path_buf()], &[]).unwrap();
+        let result = max_mtime_in_roots(&[dir.path().to_path_buf()], &[], &[]).unwrap();
         assert!(result.is_none());
     }
 
@@ -731,8 +766,9 @@ mod tests {
         std::fs::write(dir.path().join("a.py"), "# python").unwrap();
         let shutdown = AtomicBool::new(true);
 
-        let err = max_mtime_in_roots_with_shutdown(&[dir.path().to_path_buf()], &[], &shutdown)
-            .unwrap_err();
+        let err =
+            max_mtime_in_roots_with_shutdown(&[dir.path().to_path_buf()], &[], &[], &shutdown)
+                .unwrap_err();
 
         assert!(matches!(err, Error::Interrupted));
     }
@@ -743,7 +779,7 @@ mod tests {
         std::fs::write(dir.path().join("a.py"), "# python").unwrap();
         std::fs::write(dir.path().join("b.sh"), "#!/bin/bash").unwrap();
 
-        let result = max_mtime_in_roots(&[dir.path().to_path_buf()], &[])
+        let result = max_mtime_in_roots(&[dir.path().to_path_buf()], &[], &[])
             .unwrap()
             .expect("expected a non-None mtime");
 
@@ -764,13 +800,28 @@ mod tests {
         // epoch value.  The .catignore exclusion test is handled structurally
         // (if vendor/skip.py were included the walk would return more items,
         // covered by the scan_respects_root_catignore scanner test).
-        let result = max_mtime_in_roots(&[dir.path().to_path_buf()], &[])
+        let result = max_mtime_in_roots(&[dir.path().to_path_buf()], &[], &[])
             .unwrap()
             .expect("expected a non-None mtime");
 
         assert!(
             result > 1_000_000_000.0,
             "mtime should be a plausible epoch"
+        );
+    }
+
+    #[test]
+    fn max_mtime_skips_checkout_dirs() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let develop = dir.path().join("DEVELOP");
+        std::fs::create_dir_all(&develop).unwrap();
+        std::fs::write(develop.join("tool_20240315_1430_jdoe"), "echo hi").unwrap();
+
+        let result = max_mtime_in_roots(&[dir.path().to_path_buf()], &[], &[]).unwrap();
+        assert!(
+            result.is_none(),
+            "DEVELOP dir files must not affect the up-to-date check, otherwise every \
+             engineer checkout touch would force a full rebuild"
         );
     }
 

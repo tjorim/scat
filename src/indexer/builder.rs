@@ -195,6 +195,12 @@ pub fn build_index(
         } else {
             create_db(&tmp_path)?
         };
+        // Relax durability and grow caches for this throwaway build
+        // connection — see `apply_bulk_build_pragmas` doc comment. Applied
+        // unconditionally since these are per-connection settings, not
+        // persisted in the database file, so a resumed build's freshly
+        // reopened connection needs them too.
+        crate::core::db::apply_bulk_build_pragmas(&conn)?;
         let mut ts = TreeSitterExtractor::new()?;
         debug!(phase = "populate", "starting populate phase");
         populate(

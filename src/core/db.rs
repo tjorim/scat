@@ -213,6 +213,49 @@ CREATE TABLE IF NOT EXISTS index_metadata (
 "#;
 
 // ---------------------------------------------------------------------------
+// Bulk-build FTS trigger management
+// ---------------------------------------------------------------------------
+//
+// The FTS-sync triggers below mirror `scripts_ai`/`scripts_ad`/`scripts_au`
+// in `DDL` above and must be kept in sync with them. They exist as a
+// separate pair of statements (rather than being derived from `DDL`) so a
+// bulk build can drop them for the duration of the insert-heavy phase —
+// firing one FTS write per row during a full catalog rebuild is far slower
+// than a single bulk `INSERT INTO script_fts(script_fts) VALUES('rebuild')`
+// once all rows are in place — and restore them (verbatim) afterwards so the
+// live, swapped-in database keeps incremental FTS maintenance.
+
+/// Drops the FTS-sync triggers. Safe to run even if they're already absent.
+pub const DROP_FTS_TRIGGERS_SQL: &str = "
+DROP TRIGGER IF EXISTS scripts_ai;
+DROP TRIGGER IF EXISTS scripts_ad;
+DROP TRIGGER IF EXISTS scripts_au;
+";
+
+/// Bulk-rebuilds the FTS index from current `scripts` content, then restores
+/// the triggers dropped by [`DROP_FTS_TRIGGERS_SQL`].
+pub const REBUILD_FTS_AND_RESTORE_TRIGGERS_SQL: &str = "
+INSERT INTO script_fts(script_fts) VALUES('rebuild');
+
+CREATE TRIGGER IF NOT EXISTS scripts_ai AFTER INSERT ON scripts BEGIN
+    INSERT INTO script_fts(rowid, logical_path, content, owner, purpose, tags)
+    VALUES (new.id, new.logical_path, new.content, new.owner, new.purpose, new.tags);
+END;
+
+CREATE TRIGGER IF NOT EXISTS scripts_ad AFTER DELETE ON scripts BEGIN
+    INSERT INTO script_fts(script_fts, rowid, logical_path, content, owner, purpose, tags)
+    VALUES ('delete', old.id, old.logical_path, old.content, old.owner, old.purpose, old.tags);
+END;
+
+CREATE TRIGGER IF NOT EXISTS scripts_au AFTER UPDATE ON scripts BEGIN
+    INSERT INTO script_fts(script_fts, rowid, logical_path, content, owner, purpose, tags)
+    VALUES ('delete', old.id, old.logical_path, old.content, old.owner, old.purpose, old.tags);
+    INSERT INTO script_fts(rowid, logical_path, content, owner, purpose, tags)
+    VALUES (new.id, new.logical_path, new.content, new.owner, new.purpose, new.tags);
+END;
+";
+
+// ---------------------------------------------------------------------------
 // Public helpers
 // ---------------------------------------------------------------------------
 
@@ -262,6 +305,36 @@ pub fn create_db(path: &Path) -> Result<Connection> {
         "initialized database"
     );
     Ok(conn)
+}
+
+/// Relax durability and grow caches for a connection used to build a
+/// throwaway index database.
+///
+/// The build always writes into a temp/WIP file that is `PRAGMA
+/// integrity_check`-validated before being atomically swapped in as the
+/// live database (see `indexer::builder::build_index`); if the process
+/// dies mid-build, the WIP file is either resumed from its checkpoint or
+/// discarded and rebuilt from scratch, and the previously-swapped-in live
+/// database is untouched either way. That makes `synchronous = OFF` free
+/// speed here — there is no live data whose durability this could
+/// compromise — unlike on a connection to a database other code writes to
+/// directly.
+///
+/// `synchronous`, `cache_size`, and `temp_store` are per-connection
+/// settings that SQLite does not persist in the database file, so this must
+/// be called on every connection used for a build (both a freshly created
+/// one and one reopened to resume a checkpointed build), not just once at
+/// schema-creation time.
+pub fn apply_bulk_build_pragmas(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "
+        PRAGMA synchronous = OFF;
+        PRAGMA temp_store = MEMORY;
+        PRAGMA cache_size = -65536;
+        ",
+    )?;
+    conn.set_prepared_statement_cache_capacity(64);
+    Ok(())
 }
 
 /// Run a full-text search with optional language, owner, and tag filters.
