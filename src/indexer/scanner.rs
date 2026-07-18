@@ -41,8 +41,6 @@ pub struct ScriptRecord {
     pub size: u64,
     /// File mtime as UNIX epoch seconds.
     pub mtime: f64,
-    /// First `N` lines captured for metadata parsing.
-    pub first_lines: Vec<String>,
     /// Optional logical path of resolved symlink target.
     pub symlink_target: Option<String>,
 }
@@ -313,19 +311,22 @@ pub fn scan_paths_with_revisions(
                 .map(|e| format!(".{}", e.to_lowercase()))
                 .unwrap_or_default();
 
-            let (language, first_lines) = if SCRIPT_EXTENSIONS.contains(&ext.as_str()) {
-                let lang = detect_language(filepath);
-                (lang, None)
+            // Only extensionless files need their head read here (to sniff a
+            // shebang); extension-matched files don't — nothing downstream
+            // consumes a pre-read head, so reading one would just be a wasted
+            // partial read that `extractor::extract` (which reads the whole
+            // file) throws away.
+            let language = if SCRIPT_EXTENSIONS.contains(&ext.as_str()) {
+                detect_language(filepath)
             } else if ext.is_empty() {
                 let head = read_head(filepath, head_lines);
-                let lang = head.first().and_then(|l| shebang_language(l));
-                match lang {
+                match head.first().and_then(|l| shebang_language(l)) {
                     None => {
                         skipped_in_root += 1;
                         total_skipped += 1;
                         continue;
                     }
-                    Some(l) => (l, Some(head)),
+                    Some(l) => l,
                 }
             } else {
                 skipped_in_root += 1;
@@ -362,7 +363,6 @@ pub fn scan_paths_with_revisions(
                 .unwrap_or(0.0);
 
             let logical_path = make_logical_path(filepath, root, logical_prefix);
-            let first_lines = first_lines.unwrap_or_else(|| read_head(filepath, head_lines));
 
             let symlink_target = if entry.path_is_symlink() {
                 std::fs::canonicalize(filepath)
@@ -388,7 +388,6 @@ pub fn scan_paths_with_revisions(
                 language: language.to_string(),
                 size,
                 mtime,
-                first_lines,
                 symlink_target,
             });
             found_in_root += 1;
