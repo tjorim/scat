@@ -41,6 +41,8 @@ pub struct DependencyEntry {
     pub purpose: Value,
     /// Whether the dependency resolved to an indexed script.
     pub indexed: bool,
+    /// Edge kind: `import` (language-level) or `referenced` (path literal).
+    pub kind: String,
 }
 
 /// Direction of a transitive dependency traversal.
@@ -68,6 +70,10 @@ pub struct DepsTreeNode {
     /// Children exist but were cut off by the depth limit.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub truncated: bool,
+    /// Edge kind by which the parent reaches this node: `import` or
+    /// `referenced`. `None` on the root, which has no incoming edge.
+    #[serde(rename = "via", skip_serializing_if = "Option::is_none")]
+    pub via_kind: Option<String>,
     /// Expanded child nodes.
     pub children: Vec<DepsTreeNode>,
 }
@@ -458,11 +464,11 @@ impl SearchApi {
 
         let uses_rows = query_rows(
             &self.conn,
-            "SELECT d.depends_on_path, s.logical_path, s.language, s.owner, s.purpose
+            "SELECT d.depends_on_path, d.kind, s.logical_path, s.language, s.owner, s.purpose
              FROM dependencies d
              LEFT JOIN scripts s ON s.id = d.resolved_script_id
              WHERE d.script_id = ?
-             ORDER BY d.depends_on_path",
+             ORDER BY d.kind, d.depends_on_path",
             &[&script_id],
         )?;
 
@@ -479,13 +485,14 @@ impl SearchApi {
                     owner: row.get("owner").cloned().unwrap_or(Value::Null),
                     purpose: row.get("purpose").cloned().unwrap_or(Value::Null),
                     indexed,
+                    kind: row_string(&row, "kind"),
                 }
             })
             .collect();
 
         let used_by = query_rows(
             &self.conn,
-            "SELECT s.logical_path, s.language, s.owner, s.purpose
+            "SELECT s.logical_path, s.language, s.owner, s.purpose, d.kind
              FROM scripts s JOIN dependencies d ON d.script_id = s.id
              WHERE d.resolved_script_id = ?
              ORDER BY s.logical_path",
@@ -520,6 +527,7 @@ impl SearchApi {
         self.tree_node(
             root_path,
             script_id,
+            None,
             direction,
             max_depth,
             &mut ancestors,
@@ -528,10 +536,12 @@ impl SearchApi {
         .map(Some)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn tree_node(
         &self,
         logical_path: String,
         script_id: Option<i64>,
+        via_kind: Option<String>,
         direction: TreeDirection,
         depth_left: usize,
         ancestors: &mut BTreeSet<String>,
@@ -542,6 +552,7 @@ impl SearchApi {
             cycle: false,
             repeated: false,
             truncated: false,
+            via_kind,
             children: vec![],
             logical_path,
         };
@@ -577,19 +588,19 @@ impl SearchApi {
         let edges = match direction {
             TreeDirection::Uses => query_rows(
                 &self.conn,
-                "SELECT d.depends_on_path, s.logical_path, s.id
+                "SELECT d.depends_on_path, d.kind, s.logical_path, s.id
                  FROM dependencies d
                  LEFT JOIN scripts s ON s.id = d.resolved_script_id
                  WHERE d.script_id = ?
-                 ORDER BY COALESCE(s.logical_path, d.depends_on_path)",
+                 ORDER BY d.kind, COALESCE(s.logical_path, d.depends_on_path)",
                 &[&script_id],
             )?,
             TreeDirection::UsedBy => query_rows(
                 &self.conn,
-                "SELECT s.logical_path, s.id
+                "SELECT s.logical_path, s.id, d.kind
                  FROM scripts s JOIN dependencies d ON d.script_id = s.id
                  WHERE d.resolved_script_id = ?
-                 ORDER BY s.logical_path",
+                 ORDER BY d.kind, s.logical_path",
                 &[&script_id],
             )?,
         };
@@ -607,6 +618,7 @@ impl SearchApi {
             node.children.push(self.tree_node(
                 child_path,
                 child_id,
+                Some(row_string(&edge, "kind")),
                 direction,
                 depth_left - 1,
                 ancestors,

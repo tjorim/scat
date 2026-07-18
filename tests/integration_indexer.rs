@@ -633,6 +633,111 @@ fn build_resolves_absolute_and_relative_dependency_paths() {
 }
 
 // ---------------------------------------------------------------------------
+// Path-literal "referenced" dependencies
+// ---------------------------------------------------------------------------
+
+#[test]
+fn build_records_referenced_path_dependencies() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path().join("scripts");
+    std::fs::create_dir(&root).unwrap();
+
+    // Target script, invoked by other scripts via its full logical path.
+    std::fs::write(
+        root.join("lib.py"),
+        // A script mentioning its own logical path must NOT create a self-edge.
+        "# defined at /catalog/scripts/lib.py\nprint('lib')\n",
+    )
+    .unwrap();
+
+    // A shell script that copies + remote-executes lib.py by path, plus a
+    // reference to a path that is not indexed (must be dropped) and an
+    // unrelated temp path (must be dropped).
+    std::fs::write(
+        root.join("runner.sh"),
+        "#!/bin/bash\n\
+         scp /catalog/scripts/lib.py host:/tmp/\n\
+         ssh host python3 /catalog/scripts/lib.py\n\
+         python3 /catalog/scripts/missing.py\n\
+         cat /tmp/scratch.sh\n",
+    )
+    .unwrap();
+
+    // A JSON manifest listing scripts to run in order.
+    std::fs::write(
+        root.join("pipeline.json"),
+        r#"{"steps": ["/catalog/scripts/lib.py"]}"#,
+    )
+    .unwrap();
+
+    let db_path = dir.path().join("catalog.sqlite");
+    build_index(
+        std::slice::from_ref(&root),
+        &db_path,
+        BuildOptions {
+            logical_prefix: "/catalog/scripts".into(),
+            head_lines: 5,
+            keep_copies: 0,
+            vc_config: Some(VcConfig::default()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let conn = open_ro(&db_path);
+
+    let lib_id: i64 = conn
+        .query_row(
+            "SELECT id FROM scripts WHERE logical_path = '/catalog/scripts/lib.py'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+
+    // Every referenced edge that survived resolution must be resolved (the
+    // unresolved candidates — missing.py, /tmp/scratch.sh — are dropped).
+    let unresolved_refs: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM dependencies WHERE kind = 'referenced' AND resolved_script_id IS NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        unresolved_refs, 0,
+        "unresolved referenced edges must be dropped"
+    );
+
+    // runner.sh and pipeline.json both reference lib.py → two referenced edges,
+    // both resolved to lib.py.
+    let refs_to_lib: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM dependencies WHERE kind = 'referenced' AND resolved_script_id = ?",
+            rusqlite::params![lib_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        refs_to_lib, 2,
+        "runner.sh and pipeline.json reference lib.py"
+    );
+
+    // lib.py mentioning its own path must not create a self-edge.
+    let self_edges: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM dependencies d
+             WHERE d.kind = 'referenced' AND d.script_id = ? AND d.resolved_script_id = ?",
+            rusqlite::params![lib_id, lib_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        self_edges, 0,
+        "a script referencing its own path is not a dependency"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Empty scan root
 // ---------------------------------------------------------------------------
 

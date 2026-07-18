@@ -115,6 +115,20 @@ scat completions bash
 
 Dependency extraction uses **Tree‑sitter** for accurate parsing.
 
+### Dependency edge kinds
+
+Two kinds of dependency edges are recorded:
+
+*   **`import`** — language-level edges: Python `import`/`from` statements and
+    shell `source`/`.` directives, resolved through module/path mapping.
+*   **`referenced`** — a script invoked *by path* rather than imported: a shell
+    script that `scp`/`ssh`-runs another script, a Python file executing one via
+    `subprocess`/`paramiko`, or a JSON/YAML manifest listing scripts to run.
+    These are found by scanning the file body for path literals and are kept
+    only when the path matches an indexed script's logical path exactly, so
+    unrelated strings (logs, temp files) are discarded. In `scat deps` they show
+    as `ref` (flat table) or `(ref)` (tree).
+
 ***
 
 ## Metadata

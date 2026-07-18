@@ -510,6 +510,7 @@ pub(crate) fn cmd_deps(
             .map(|u| {
                 vec![
                     u.logical_path.clone(),
+                    kind_label(&u.kind).to_string(),
                     u.language.as_str().unwrap_or("—").to_string(),
                     if u.indexed { "yes" } else { "no" }.to_string(),
                 ]
@@ -517,7 +518,7 @@ pub(crate) fn cmd_deps(
             .collect::<Vec<_>>();
         println!(
             "{}",
-            render_table(&["Path", "Language", "Indexed"], &rows, no_color)
+            render_table(&["Path", "Kind", "Language", "Indexed"], &rows, no_color)
         );
     }
     if !graph.used_by.is_empty() {
@@ -525,6 +526,16 @@ pub(crate) fn cmd_deps(
         print_script_table(&graph.used_by, no_color);
     }
     Ok(())
+}
+
+/// Short display label for a dependency edge kind. `referenced` edges (a script
+/// invoked by path rather than imported) show as `ref`.
+fn kind_label(kind: &str) -> &str {
+    match kind {
+        "referenced" => "ref",
+        "import" => "import",
+        other => other,
+    }
 }
 
 fn cmd_deps_tree(
@@ -559,6 +570,7 @@ fn cmd_deps_tree(
     let mut legend_repeat = false;
     let mut legend_cycle = false;
     let mut legend_truncated = false;
+    let mut legend_ref = false;
     for (heading, tree) in [("Uses", &uses), ("Used by", &used_by)] {
         if tree.children.is_empty() {
             continue;
@@ -571,6 +583,10 @@ fn cmd_deps_tree(
         legend_repeat |= tree_has(tree, &|n| n.repeated);
         legend_cycle |= tree_has(tree, &|n| n.cycle);
         legend_truncated |= tree_has(tree, &|n| n.truncated);
+        legend_ref |= tree_has(tree, &|n| n.via_kind.as_deref() == Some("referenced"));
+    }
+    if legend_ref {
+        println!("(ref) referenced by path (copied/executed/manifested), not imported");
     }
     if legend_repeat {
         println!("(*) subtree already shown above");
@@ -594,6 +610,9 @@ fn tree_has(
 fn render_tree_lines(root: &scat_core::core::search::DepsTreeNode) -> Vec<String> {
     fn node_label(node: &scat_core::core::search::DepsTreeNode) -> String {
         let mut label = node.logical_path.clone();
+        if node.via_kind.as_deref() == Some("referenced") {
+            label.push_str(" (ref)");
+        }
         if !node.indexed {
             label.push_str(" (not indexed)");
         }
@@ -1236,6 +1255,7 @@ mod tests {
             cycle: false,
             repeated: false,
             truncated: false,
+            via_kind: Some("import".to_string()),
             children,
         };
 
@@ -1243,6 +1263,8 @@ mod tests {
         external.indexed = false;
         let mut shared_again = node("/catalog/shared.py", vec![]);
         shared_again.repeated = true;
+        let mut referenced = node("/catalog/runner.sh", vec![]);
+        referenced.via_kind = Some("referenced".to_string());
         let root = node(
             "/catalog/a.py",
             vec![
@@ -1253,7 +1275,7 @@ mod tests {
                         vec![node("/catalog/leaf.py", vec![])],
                     )],
                 ),
-                node("/catalog/c.py", vec![shared_again, external]),
+                node("/catalog/c.py", vec![shared_again, external, referenced]),
             ],
         );
 
@@ -1266,7 +1288,8 @@ mod tests {
                 "│       └── /catalog/leaf.py",
                 "└── /catalog/c.py",
                 "    ├── /catalog/shared.py (*)",
-                "    └── /external/lib.py (not indexed)",
+                "    ├── /external/lib.py (not indexed)",
+                "    └── /catalog/runner.sh (ref)",
             ]
         );
     }

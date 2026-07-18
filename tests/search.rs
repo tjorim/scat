@@ -66,6 +66,22 @@ fn insert_dep(api: &SearchApi, from_path: &str, to_path: &str) {
         .unwrap();
 }
 
+/// Insert a resolved `referenced` (path-literal) dependency edge.
+fn insert_reference_dep(api: &SearchApi, from_path: &str, to_path: &str) {
+    api.conn
+        .execute(
+            "INSERT INTO dependencies (script_id, depends_on_path, resolved_script_id, kind)
+             VALUES (
+                 (SELECT id FROM scripts WHERE logical_path = ?1),
+                 ?2,
+                 (SELECT id FROM scripts WHERE logical_path = ?2),
+                 'referenced'
+             )",
+            rusqlite::params![from_path, to_path],
+        )
+        .unwrap();
+}
+
 fn insert_revision(
     api: &SearchApi,
     logical_path: &str,
@@ -797,6 +813,54 @@ fn dependency_tree_truncates_at_depth() {
         .unwrap();
     let c = &tree.children[0].children[0];
     assert!(!c.truncated, "c.py has no children to hide");
+}
+
+#[test]
+fn dependency_graph_and_tree_carry_edge_kind() {
+    let (api, _f) = make_api();
+    insert(&api, "/catalog/scripts/a.py", "", "python", "", "");
+    insert(&api, "/catalog/scripts/b.py", "", "python", "", "");
+    insert(&api, "/catalog/scripts/run.sh", "", "shell", "", "");
+
+    // a.py imports b.py and references run.sh by path.
+    insert_dep(&api, "/catalog/scripts/a.py", "/catalog/scripts/b.py");
+    insert_reference_dep(&api, "/catalog/scripts/a.py", "/catalog/scripts/run.sh");
+
+    let graph = api.dependency_graph("/catalog/scripts/a.py").unwrap();
+    let by_path = |p: &str| {
+        graph
+            .uses
+            .iter()
+            .find(|u| u.logical_path == p)
+            .unwrap_or_else(|| panic!("missing {p}"))
+    };
+    assert_eq!(by_path("/catalog/scripts/b.py").kind, "import");
+    assert_eq!(by_path("/catalog/scripts/run.sh").kind, "referenced");
+
+    // The tree tags each child with the edge kind used to reach it.
+    let tree = api
+        .dependency_tree("/catalog/scripts/a.py", TreeDirection::Uses, 5)
+        .unwrap()
+        .unwrap();
+    assert_eq!(tree.via_kind, None, "root has no incoming edge");
+    let via = |p: &str| {
+        tree.children
+            .iter()
+            .find(|c| c.logical_path == p)
+            .and_then(|c| c.via_kind.as_deref())
+    };
+    assert_eq!(via("/catalog/scripts/b.py"), Some("import"));
+    assert_eq!(via("/catalog/scripts/run.sh"), Some("referenced"));
+
+    // The reverse direction carries the kind too.
+    let used_by = api
+        .dependency_tree("/catalog/scripts/run.sh", TreeDirection::UsedBy, 5)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        used_by.children.first().and_then(|c| c.via_kind.as_deref()),
+        Some("referenced")
+    );
 }
 
 #[test]

@@ -267,6 +267,7 @@ pub(super) fn populate(
 
     let module_map = super::resolve::build_module_map(&tx)?;
     super::resolve::resolve_dependency_targets(&tx, &module_map)?;
+    super::resolve::resolve_reference_targets(&tx)?;
     super::resolve::resolve_function_targets(&tx, &module_map)?;
 
     tx.execute(
@@ -331,6 +332,21 @@ fn process_script(
         conn.execute(
             "INSERT OR IGNORE INTO dependencies (script_id, depends_on_path) VALUES (?1,?2)",
             rusqlite::params![script_id, dep],
+        )?;
+    }
+
+    // Path-literal "referenced" edges (a script copied/executed by path, or
+    // listed in a manifest). Candidates that don't resolve to an indexed
+    // script are dropped later in `resolve_reference_targets`; a script
+    // mentioning its own path is not a dependency, so skip it here.
+    for reference in crate::indexer::treesitter_deps::extract_reference_paths(&meta.content) {
+        if reference == record.logical_path {
+            continue;
+        }
+        conn.execute(
+            "INSERT OR IGNORE INTO dependencies (script_id, depends_on_path, kind)
+             VALUES (?1, ?2, 'referenced')",
+            rusqlite::params![script_id, reference],
         )?;
     }
 

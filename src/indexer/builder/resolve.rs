@@ -97,7 +97,7 @@ pub(super) fn resolve_dependency_targets(
         "SELECT d.id, d.depends_on_path, s.logical_path AS caller_path
          FROM dependencies d
          JOIN scripts s ON s.id = d.script_id
-         WHERE d.resolved_script_id IS NULL",
+         WHERE d.resolved_script_id IS NULL AND d.kind = 'import'",
         &[],
     )?;
 
@@ -147,6 +147,30 @@ pub(super) fn resolve_dependency_targets(
         }
     }
 
+    Ok(())
+}
+
+/// Resolve `referenced` path-literal edges by exact match against indexed
+/// logical paths, then drop any that stay unresolved.
+///
+/// Unlike imports (whose unresolved edges point at real external libraries and
+/// are worth keeping), an unresolved path literal is almost always an unrelated
+/// string — a log file, a temp path, a copy destination that differs from the
+/// source's own logical path — rather than a genuine script edge. Keeping only
+/// exact logical-path matches is what makes this heuristic high-precision.
+pub(super) fn resolve_reference_targets(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "UPDATE dependencies
+         SET resolved_script_id = (
+             SELECT s.id FROM scripts s WHERE s.logical_path = dependencies.depends_on_path
+         )
+         WHERE kind = 'referenced' AND resolved_script_id IS NULL",
+        [],
+    )?;
+    conn.execute(
+        "DELETE FROM dependencies WHERE kind = 'referenced' AND resolved_script_id IS NULL",
+        [],
+    )?;
     Ok(())
 }
 

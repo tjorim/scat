@@ -136,6 +136,39 @@ static PYTHON_IMPORT_RE: Lazy<Vec<Regex>> = Lazy::new(|| {
 static BASH_SOURCE_RE: Lazy<Vec<Regex>> =
     Lazy::new(|| vec![Regex::new(r#"(?m)^\s*(?:source|\.)\s+["']?([^\s"';]+)["']?"#).unwrap()]);
 
+static REFERENCE_PATH_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"[\w./\\-]+\.(?:py|sh|bash|ksh)\b").unwrap());
+
+/// Extract path-shaped string literals that point at other scripts.
+///
+/// This is language-agnostic: it scans the raw file text for tokens that look
+/// like a path to a `.py`/`.sh`/`.bash`/`.ksh` file and contain a `/`
+/// separator, regardless of whether they appear inside an `ssh`/`scp`/`rsync`
+/// command, a `subprocess`/`paramiko` invocation, or a JSON/YAML manifest
+/// list. These "called, not imported" edges are invisible to the AST-based
+/// import extractors.
+///
+/// Extraction is deliberately liberal — precision comes from resolution: a
+/// candidate is only kept as a dependency edge if it matches an indexed
+/// script's logical path exactly (see `resolve_reference_targets`), so
+/// unrelated path strings (logs, temp files) are discarded rather than stored.
+pub fn extract_reference_paths(content: &str) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for m in REFERENCE_PATH_RE.find_iter(content) {
+        let candidate = m.as_str();
+        // A bare basename (no separator) can never match a full logical path,
+        // so drop it here to keep the candidate set small.
+        if !candidate.contains('/') {
+            continue;
+        }
+        if seen.insert(candidate.to_string()) {
+            out.push(candidate.to_string());
+        }
+    }
+    out
+}
+
 /// Regex fallback dependency extraction for Python/shell sources.
 pub fn extract_deps_fallback(source: &str, language: &str) -> Vec<String> {
     let patterns: &[Regex] = match normalise_lang(language) {
@@ -212,5 +245,42 @@ mod tests {
         let deps = extract_deps_fallback("source /etc/profile\n. ./lib.sh", "shell");
         assert!(deps.contains(&"/etc/profile".to_string()));
         assert!(deps.contains(&"./lib.sh".to_string()));
+    }
+
+    #[test]
+    fn reference_paths_from_ssh_and_scp() {
+        let content = "scp /catalog/scripts/lib/deploy.py host:/tmp/\n\
+                       ssh host python3 /catalog/scripts/jobs/nightly.py";
+        let refs = extract_reference_paths(content);
+        assert!(refs.contains(&"/catalog/scripts/lib/deploy.py".to_string()));
+        assert!(refs.contains(&"/catalog/scripts/jobs/nightly.py".to_string()));
+    }
+
+    #[test]
+    fn reference_paths_from_paramiko_and_json() {
+        let python = "client.exec_command('/catalog/scripts/run.sh --flag')";
+        let refs = extract_reference_paths(python);
+        assert_eq!(refs, vec!["/catalog/scripts/run.sh".to_string()]);
+
+        let manifest = r#"{"steps": ["/catalog/scripts/a.py", "/catalog/scripts/b.sh"]}"#;
+        let refs = extract_reference_paths(manifest);
+        assert!(refs.contains(&"/catalog/scripts/a.py".to_string()));
+        assert!(refs.contains(&"/catalog/scripts/b.sh".to_string()));
+    }
+
+    #[test]
+    fn reference_paths_ignore_bare_basenames_and_dedupe() {
+        // No separator → cannot match a full logical path, so it is dropped.
+        assert!(extract_reference_paths("run foo.py now").is_empty());
+        // Repeated path collapses to a single candidate.
+        let refs = extract_reference_paths("a/x.py then a/x.py again");
+        assert_eq!(refs, vec!["a/x.py".to_string()]);
+    }
+
+    #[test]
+    fn reference_paths_skip_unrelated_and_similar_extensions() {
+        // .bashrc / .shell must not be captured as .bash / .sh.
+        let refs = extract_reference_paths("source ~/.bashrc\nedit /etc/foo.shell");
+        assert!(refs.is_empty(), "unexpected: {refs:?}");
     }
 }
