@@ -737,6 +737,94 @@ fn build_records_referenced_path_dependencies() {
     );
 }
 
+#[test]
+fn build_resolves_relative_and_cross_language_references() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path().join("scripts");
+    std::fs::create_dir_all(root.join("lib")).unwrap();
+    std::fs::create_dir_all(root.join("jobs")).unwrap();
+    std::fs::create_dir_all(root.join("bin")).unwrap();
+
+    std::fs::write(root.join("lib/common.py"), "def go():\n    pass\n").unwrap();
+    std::fs::write(root.join("lib/task.sh"), "#!/bin/bash\necho hi\n").unwrap();
+
+    // shell → python via a RELATIVE path (../lib/common.py).
+    std::fs::write(
+        root.join("jobs/run.sh"),
+        "#!/bin/bash\npython3 ../lib/common.py\n",
+    )
+    .unwrap();
+
+    // python → shell via an ABSOLUTE path (cross-language).
+    std::fs::write(
+        root.join("jobs/orchestrate.py"),
+        "import subprocess\nsubprocess.run([\"/catalog/lib/task.sh\"])\n",
+    )
+    .unwrap();
+
+    // An extension-less script (indexed via shebang) that OS-branches between
+    // a .sh and a .py — both appear as literals, so both must be captured.
+    std::fs::write(
+        root.join("bin/dispatch"),
+        "#!/bin/bash\nif [ \"$(uname)\" = Linux ]; then\n  exec /catalog/lib/task.sh\nelse\n  exec python3 /catalog/lib/common.py\nfi\n",
+    )
+    .unwrap();
+
+    let db_path = dir.path().join("catalog.sqlite");
+    build_index(
+        std::slice::from_ref(&root),
+        &db_path,
+        BuildOptions {
+            logical_prefix: "/catalog".into(),
+            head_lines: 5,
+            keep_copies: 0,
+            vc_config: Some(VcConfig::default()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let conn = open_ro(&db_path);
+    let referrers_of = |target: &str| -> Vec<String> {
+        let target_id: i64 = conn
+            .query_row(
+                "SELECT id FROM scripts WHERE logical_path = ?1",
+                rusqlite::params![target],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT s.logical_path
+                 FROM dependencies d JOIN scripts s ON s.id = d.script_id
+                 WHERE d.kind = 'referenced' AND d.resolved_script_id = ?1
+                 ORDER BY s.logical_path",
+            )
+            .unwrap();
+        stmt.query_map(rusqlite::params![target_id], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    };
+
+    // common.py is referenced by the relative shell ref and the dispatch branch.
+    assert_eq!(
+        referrers_of("/catalog/lib/common.py"),
+        vec![
+            "/catalog/bin/dispatch".to_string(),
+            "/catalog/jobs/run.sh".to_string(),
+        ]
+    );
+    // task.sh is referenced cross-language by the python orchestrator and dispatch.
+    assert_eq!(
+        referrers_of("/catalog/lib/task.sh"),
+        vec![
+            "/catalog/bin/dispatch".to_string(),
+            "/catalog/jobs/orchestrate.py".to_string(),
+        ]
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Empty scan root
 // ---------------------------------------------------------------------------

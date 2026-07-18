@@ -150,15 +150,55 @@ pub(super) fn resolve_dependency_targets(
     Ok(())
 }
 
-/// Resolve `referenced` path-literal edges by exact match against indexed
-/// logical paths, then drop any that stay unresolved.
+/// Directory portion of a logical path (everything before the last `/`).
+/// A top-level path like `/foo.py` yields `/`; a bare name yields `""`.
+fn logical_parent_dir(logical_path: &str) -> &str {
+    match logical_path.rfind('/') {
+        Some(0) => "/",
+        Some(idx) => &logical_path[..idx],
+        None => "",
+    }
+}
+
+/// Resolve a relative reference (`./x.py`, `../lib/x.py`, `sub/x.py`) against
+/// the referencing script's logical directory, collapsing `.`/`..` on the
+/// `/`-separated logical path. Returns `None` if the reference escapes the
+/// root or is empty. Backslashes are normalised to `/` first.
+fn resolve_relative_reference(base_dir: &str, reference: &str) -> Option<String> {
+    let reference = reference.replace('\\', "/");
+    let mut components: Vec<&str> = base_dir.split('/').filter(|c| !c.is_empty()).collect();
+    for part in reference.split('/') {
+        match part {
+            "" | "." => continue,
+            ".." => {
+                components.pop()?;
+            }
+            other => components.push(other),
+        }
+    }
+    if components.is_empty() {
+        None
+    } else {
+        Some(format!("/{}", components.join("/")))
+    }
+}
+
+/// Resolve `referenced` path-literal edges against indexed logical paths, then
+/// drop any that stay unresolved.
+///
+/// Two forms are resolved:
+/// - **Absolute** references (`/catalog/scripts/lib/x.py`) by exact match.
+/// - **Relative** references (`./x.py`, `../lib/x.py`, `sub/x.py`) against the
+///   referencing script's own logical directory, mirroring how relative
+///   imports/`source` directives resolve.
 ///
 /// Unlike imports (whose unresolved edges point at real external libraries and
 /// are worth keeping), an unresolved path literal is almost always an unrelated
 /// string — a log file, a temp path, a copy destination that differs from the
 /// source's own logical path — rather than a genuine script edge. Keeping only
-/// exact logical-path matches is what makes this heuristic high-precision.
+/// edges that resolve to an indexed script is what makes this high-precision.
 pub(super) fn resolve_reference_targets(conn: &Connection) -> Result<()> {
+    // Pass 1: absolute references — exact logical-path match.
     conn.execute(
         "UPDATE dependencies
          SET resolved_script_id = (
@@ -167,6 +207,68 @@ pub(super) fn resolve_reference_targets(conn: &Connection) -> Result<()> {
          WHERE kind = 'referenced' AND resolved_script_id IS NULL",
         [],
     )?;
+
+    // Pass 2: relative references — resolve against the caller's directory.
+    let unresolved = query_rows(
+        conn,
+        "SELECT d.id, d.depends_on_path, d.script_id, s.logical_path AS caller_path
+         FROM dependencies d
+         JOIN scripts s ON s.id = d.script_id
+         WHERE d.kind = 'referenced' AND d.resolved_script_id IS NULL",
+        &[],
+    )?;
+
+    if !unresolved.is_empty() {
+        let mut path_to_id: HashMap<String, i64> = HashMap::default();
+        for row in query_rows(conn, "SELECT id, logical_path FROM scripts", &[])? {
+            let id = row.get("id").and_then(Value::as_i64).unwrap_or_default();
+            let lp = row
+                .get("logical_path")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            path_to_id.insert(lp, id);
+        }
+
+        let mut updates: Vec<(i64, i64)> = Vec::new();
+        for row in unresolved {
+            let dep_id = row.get("id").and_then(Value::as_i64).unwrap_or_default();
+            let caller_id = row
+                .get("script_id")
+                .and_then(Value::as_i64)
+                .unwrap_or_default();
+            let reference = row
+                .get("depends_on_path")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            // Absolute references were already tried in pass 1.
+            if reference.starts_with('/') {
+                continue;
+            }
+            let caller_path = row
+                .get("caller_path")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if let Some(resolved) =
+                resolve_relative_reference(logical_parent_dir(caller_path), reference)
+                && let Some(&target_id) = path_to_id.get(&resolved)
+                // A relative path that points back at the referencing script
+                // (e.g. `./self.sh`) is not a dependency.
+                && target_id != caller_id
+            {
+                updates.push((target_id, dep_id));
+            }
+        }
+
+        if !updates.is_empty() {
+            let mut stmt =
+                conn.prepare("UPDATE dependencies SET resolved_script_id = ?1 WHERE id = ?2")?;
+            for (target_id, dep_id) in updates {
+                stmt.execute(rusqlite::params![target_id, dep_id])?;
+            }
+        }
+    }
+
     conn.execute(
         "DELETE FROM dependencies WHERE kind = 'referenced' AND resolved_script_id IS NULL",
         [],
@@ -291,6 +393,52 @@ mod tests {
         assert_eq!(
             resolve_relative_dep(".", "pkg.mod", false),
             Some("pkg".to_string())
+        );
+    }
+
+    use super::{logical_parent_dir, resolve_relative_reference};
+
+    #[test]
+    fn logical_parent_dir_cases() {
+        assert_eq!(
+            logical_parent_dir("/catalog/scripts/jobs/x.sh"),
+            "/catalog/scripts/jobs"
+        );
+        assert_eq!(logical_parent_dir("/foo.py"), "/");
+        assert_eq!(logical_parent_dir("bare.py"), "");
+    }
+
+    #[test]
+    fn resolve_relative_reference_dotdot_and_dot() {
+        let base = logical_parent_dir("/catalog/scripts/jobs/run.sh");
+        assert_eq!(
+            resolve_relative_reference(base, "../lib/common.py"),
+            Some("/catalog/scripts/lib/common.py".to_string())
+        );
+        assert_eq!(
+            resolve_relative_reference(base, "./sibling.py"),
+            Some("/catalog/scripts/jobs/sibling.py".to_string())
+        );
+        assert_eq!(
+            resolve_relative_reference(base, "sub/leaf.py"),
+            Some("/catalog/scripts/jobs/sub/leaf.py".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_relative_reference_normalises_backslashes() {
+        let base = logical_parent_dir("/catalog/scripts/jobs/run.sh");
+        assert_eq!(
+            resolve_relative_reference(base, "..\\lib\\common.py"),
+            Some("/catalog/scripts/lib/common.py".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_relative_reference_escaping_root_is_none() {
+        assert_eq!(
+            resolve_relative_reference("/catalog", "../../../etc/x.sh"),
+            None
         );
     }
 }
