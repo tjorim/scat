@@ -125,8 +125,12 @@ Two kinds of dependency edges are recorded:
     script that `scp`/`ssh`-runs another script, a Python file executing one via
     `subprocess`/`paramiko`, or a JSON/YAML manifest listing scripts to run.
     These are found by scanning the file body for path literals and are kept
-    only when the path matches an indexed script's logical path exactly, so
-    unrelated strings (logs, temp files) are discarded. In `scat deps` they show
+    only when the path resolves to an indexed script — either an **absolute**
+    logical path matched exactly, or a **relative** path (`./x.py`,
+    `../lib/x.py`) resolved against the referencing script's own directory.
+    Unrelated strings (logs, temp files, copy destinations) are discarded.
+    Resolution is language-agnostic, so cross-language edges (a shell script
+    invoking a Python one, or vice versa) are captured. In `scat deps` they show
     as `ref` (flat table) or `(ref)` (tree).
 
 ***
