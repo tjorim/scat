@@ -88,7 +88,9 @@ jobs:
 
       - name: Fail on high-severity advisories
         run: |
-          cargo audit --json > audit.json
+          # cargo audit exits non-zero when any advisory matches, regardless of
+          # severity; ignore its exit code and let the filter below decide.
+          cargo audit --json > audit.json || true
           python - <<'PY'
           import json
           import sys
