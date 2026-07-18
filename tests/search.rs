@@ -1,7 +1,7 @@
 /// Integration tests for SearchApi against an in-memory database
 /// built with the production schema (schema version 4).
 use scat_core::core::db::{SCHEMA_VERSION, create_db};
-use scat_core::core::search::{SearchApi, compare_catalogs};
+use scat_core::core::search::{SearchApi, TreeDirection, compare_catalogs};
 use scat_core::core::vc::REVISION_TYPE_DEVELOP;
 use tempfile::NamedTempFile;
 
@@ -633,6 +633,179 @@ fn dependency_graph_unindexed_dependency() {
     assert!(
         !g.uses[0].indexed,
         "external dep not in catalog → indexed=false"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// dependency_tree
+// ---------------------------------------------------------------------------
+
+#[test]
+fn dependency_tree_walks_transitive_uses() {
+    let (api, _f) = make_api();
+    for path in ["a.py", "b.py", "c.py"] {
+        insert(
+            &api,
+            &format!("/catalog/scripts/{path}"),
+            "",
+            "python",
+            "",
+            "",
+        );
+    }
+    insert_dep(&api, "/catalog/scripts/a.py", "/catalog/scripts/b.py");
+    insert_dep(&api, "/catalog/scripts/b.py", "/catalog/scripts/c.py");
+    insert_dep(&api, "/catalog/scripts/a.py", "/external/lib.py");
+
+    let tree = api
+        .dependency_tree("/catalog/scripts/a.py", TreeDirection::Uses, 5)
+        .unwrap()
+        .expect("a.py is indexed");
+
+    assert_eq!(tree.logical_path, "/catalog/scripts/a.py");
+    assert_eq!(tree.children.len(), 2);
+    let b = &tree.children[0];
+    assert_eq!(b.logical_path, "/catalog/scripts/b.py");
+    assert_eq!(b.children.len(), 1);
+    assert_eq!(b.children[0].logical_path, "/catalog/scripts/c.py");
+    assert!(b.children[0].children.is_empty());
+    let external = &tree.children[1];
+    assert_eq!(external.logical_path, "/external/lib.py");
+    assert!(!external.indexed);
+    assert!(external.children.is_empty());
+}
+
+#[test]
+fn dependency_tree_used_by_direction() {
+    let (api, _f) = make_api();
+    for path in ["a.py", "b.py", "c.py"] {
+        insert(
+            &api,
+            &format!("/catalog/scripts/{path}"),
+            "",
+            "python",
+            "",
+            "",
+        );
+    }
+    insert_dep(&api, "/catalog/scripts/a.py", "/catalog/scripts/b.py");
+    insert_dep(&api, "/catalog/scripts/b.py", "/catalog/scripts/c.py");
+
+    let tree = api
+        .dependency_tree("/catalog/scripts/c.py", TreeDirection::UsedBy, 5)
+        .unwrap()
+        .expect("c.py is indexed");
+
+    assert_eq!(tree.children.len(), 1);
+    assert_eq!(tree.children[0].logical_path, "/catalog/scripts/b.py");
+    assert_eq!(tree.children[0].children.len(), 1);
+    assert_eq!(
+        tree.children[0].children[0].logical_path,
+        "/catalog/scripts/a.py"
+    );
+}
+
+#[test]
+fn dependency_tree_marks_cycles() {
+    let (api, _f) = make_api();
+    insert(&api, "/catalog/scripts/a.py", "", "python", "", "");
+    insert(&api, "/catalog/scripts/b.py", "", "python", "", "");
+    insert_dep(&api, "/catalog/scripts/a.py", "/catalog/scripts/b.py");
+    insert_dep(&api, "/catalog/scripts/b.py", "/catalog/scripts/a.py");
+
+    let tree = api
+        .dependency_tree("/catalog/scripts/a.py", TreeDirection::Uses, 10)
+        .unwrap()
+        .unwrap();
+
+    let b = &tree.children[0];
+    let a_again = &b.children[0];
+    assert_eq!(a_again.logical_path, "/catalog/scripts/a.py");
+    assert!(
+        a_again.cycle,
+        "back-edge to an ancestor is marked as a cycle"
+    );
+    assert!(a_again.children.is_empty());
+}
+
+#[test]
+fn dependency_tree_marks_repeated_subtrees() {
+    let (api, _f) = make_api();
+    // Diamond: a → b, a → c, b → shared, c → shared, shared → leaf.
+    for path in ["a.py", "b.py", "c.py", "shared.py", "leaf.py"] {
+        insert(
+            &api,
+            &format!("/catalog/scripts/{path}"),
+            "",
+            "python",
+            "",
+            "",
+        );
+    }
+    insert_dep(&api, "/catalog/scripts/a.py", "/catalog/scripts/b.py");
+    insert_dep(&api, "/catalog/scripts/a.py", "/catalog/scripts/c.py");
+    insert_dep(&api, "/catalog/scripts/b.py", "/catalog/scripts/shared.py");
+    insert_dep(&api, "/catalog/scripts/c.py", "/catalog/scripts/shared.py");
+    insert_dep(
+        &api,
+        "/catalog/scripts/shared.py",
+        "/catalog/scripts/leaf.py",
+    );
+
+    let tree = api
+        .dependency_tree("/catalog/scripts/a.py", TreeDirection::Uses, 10)
+        .unwrap()
+        .unwrap();
+
+    let first_shared = &tree.children[0].children[0];
+    assert!(!first_shared.repeated);
+    assert_eq!(first_shared.children.len(), 1, "first visit is expanded");
+    let second_shared = &tree.children[1].children[0];
+    assert!(second_shared.repeated, "second visit is collapsed");
+    assert!(second_shared.children.is_empty());
+}
+
+#[test]
+fn dependency_tree_truncates_at_depth() {
+    let (api, _f) = make_api();
+    for path in ["a.py", "b.py", "c.py"] {
+        insert(
+            &api,
+            &format!("/catalog/scripts/{path}"),
+            "",
+            "python",
+            "",
+            "",
+        );
+    }
+    insert_dep(&api, "/catalog/scripts/a.py", "/catalog/scripts/b.py");
+    insert_dep(&api, "/catalog/scripts/b.py", "/catalog/scripts/c.py");
+
+    let tree = api
+        .dependency_tree("/catalog/scripts/a.py", TreeDirection::Uses, 1)
+        .unwrap()
+        .unwrap();
+
+    let b = &tree.children[0];
+    assert!(b.truncated, "b.py has hidden children beyond the limit");
+    assert!(b.children.is_empty());
+
+    // A leaf at the depth limit is NOT marked truncated.
+    let tree = api
+        .dependency_tree("/catalog/scripts/a.py", TreeDirection::Uses, 2)
+        .unwrap()
+        .unwrap();
+    let c = &tree.children[0].children[0];
+    assert!(!c.truncated, "c.py has no children to hide");
+}
+
+#[test]
+fn dependency_tree_missing_script_returns_none() {
+    let (api, _f) = make_api();
+    assert!(
+        api.dependency_tree("/catalog/scripts/ghost.py", TreeDirection::Uses, 5)
+            .unwrap()
+            .is_none()
     );
 }
 

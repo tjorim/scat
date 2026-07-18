@@ -73,9 +73,14 @@ This tool provides a **single searchable index** without:
 - Scriptable and automation‑friendly
 - JSON output where applicable
 - Suitable for power users and CI jobs
+- Transitive dependency trees: `scat deps <path> --tree [--depth N]`
+- Shell completions: `scat completions bash|zsh|fish|powershell|elvish`
 
 ### TUI
 - Interactive search and filtering
+  - `lang:`, `owner:`, and `tag:` tokens in the search box filter results the
+    same way the CLI's `--lang`/`--owner`/`--tag` flags do
+    (e.g. `backup lang:python owner:alice`)
 - Results list with script preview
 - Metadata, checkout state, and related scripts panes
 - Keyboard-first navigation
@@ -95,8 +100,10 @@ Example commands:
 scat search "patch freeze"
 scat show /catalog/scripts/foo/bar.py
 scat deps /catalog/scripts/foo/bar.py
+scat deps /catalog/scripts/foo/bar.py --tree --depth 3
 scat catalog stats
 scat tui
+scat completions bash
 ````
 
 ***

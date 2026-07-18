@@ -102,6 +102,12 @@ pub(crate) enum Commands {
     Deps {
         /// Logical path of the script.
         path: String,
+        /// Show transitive dependency trees instead of the flat direct lists.
+        #[arg(long)]
+        tree: bool,
+        /// Maximum tree depth (implies --tree; default 5).
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        depth: Option<u64>,
         /// Output format.
         #[arg(long, value_enum, default_value_t = OutputFormat::Table)]
         output: OutputFormat,
@@ -174,6 +180,15 @@ pub(crate) enum Commands {
     Catalog {
         #[command(subcommand)]
         command: CatalogCommands,
+    },
+
+    /// Generate shell completion script on stdout.
+    ///
+    /// Example: scat completions bash > /etc/bash_completion.d/scat
+    Completions {
+        /// Shell to generate completions for.
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
     },
 }
 
@@ -663,6 +678,7 @@ mod tests {
             Commands::Deps {
                 ref path,
                 output: OutputFormat::Json,
+                ..
             } if path == "/catalog/scripts/foo.py"
         ));
     }
@@ -700,6 +716,61 @@ mod tests {
             "--regex",
             r"check.*\.py",
         ]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn clap_parses_deps_tree_and_depth() {
+        let cli = Cli::try_parse_from([
+            "scat",
+            "--db",
+            "catalog.sqlite",
+            "deps",
+            "/catalog/scripts/foo.py",
+            "--tree",
+            "--depth",
+            "3",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Commands::Deps {
+                tree: true,
+                depth: Some(3),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn clap_deps_rejects_zero_depth() {
+        let result = Cli::try_parse_from([
+            "scat",
+            "--db",
+            "catalog.sqlite",
+            "deps",
+            "/catalog/scripts/foo.py",
+            "--depth",
+            "0",
+        ]);
+        assert!(result.is_err(), "--depth 0 should be rejected");
+    }
+
+    #[test]
+    fn clap_parses_completions_shell() {
+        let cli = Cli::try_parse_from(["scat", "completions", "bash"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Completions {
+                shell: clap_complete::Shell::Bash
+            }
+        ));
+    }
+
+    #[test]
+    fn clap_completions_rejects_unknown_shell() {
+        let result = Cli::try_parse_from(["scat", "completions", "tcsh"]);
         assert!(result.is_err());
     }
 

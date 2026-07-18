@@ -120,12 +120,14 @@ pub(crate) fn cmd_search(
     Ok(())
 }
 
-/// Re-sort results so exact and prefix filename matches appear first.
-/// Preserves the original (BM25) order within each tier.
-fn query_uses_fts(query: &str) -> bool {
+/// Route a text query: FTS for plain words, INSTR-based path search when the
+/// query looks like a (partial) path, since `/` and `.` are FTS5 syntax.
+pub(crate) fn query_uses_fts(query: &str) -> bool {
     !query.contains('/') && !query.contains('.')
 }
 
+/// Re-sort results so exact and prefix filename matches appear first.
+/// Preserves the original (BM25) order within each tier.
 fn sort_by_name_relevance(
     mut results: Vec<scat_core::core::db::JsonRow>,
     query: &str,
@@ -464,9 +466,14 @@ pub(crate) fn cmd_status(
     Ok(())
 }
 
+/// Default traversal depth for `scat deps --tree` without an explicit --depth.
+const DEFAULT_TREE_DEPTH: usize = 5;
+
 pub(crate) fn cmd_deps(
     api: &scat_core::core::search::SearchApi,
     path: &str,
+    tree: bool,
+    depth: Option<usize>,
     output: OutputFormat,
     no_color: bool,
 ) -> Result<()> {
@@ -474,6 +481,10 @@ pub(crate) fn cmd_deps(
         Some(s) => s,
         None => anyhow::bail!("script '{path}' not found in catalog"),
     };
+
+    if tree || depth.is_some() {
+        return cmd_deps_tree(api, path, depth.unwrap_or(DEFAULT_TREE_DEPTH), output);
+    }
 
     if output == OutputFormat::Json {
         let graph = api.dependency_graph(path)?;
@@ -514,6 +525,111 @@ pub(crate) fn cmd_deps(
         print_script_table(&graph.used_by, no_color);
     }
     Ok(())
+}
+
+fn cmd_deps_tree(
+    api: &scat_core::core::search::SearchApi,
+    path: &str,
+    depth: usize,
+    output: OutputFormat,
+) -> Result<()> {
+    use scat_core::core::search::TreeDirection;
+
+    // The caller already verified the script exists, so both lookups succeed.
+    let uses = api
+        .dependency_tree(path, TreeDirection::Uses, depth)?
+        .expect("script exists");
+    let used_by = api
+        .dependency_tree(path, TreeDirection::UsedBy, depth)?
+        .expect("script exists");
+
+    if output == OutputFormat::Json {
+        print_json(&serde_json::json!({
+            "depth": depth,
+            "uses": uses,
+            "used_by": used_by,
+        }));
+        return Ok(());
+    }
+
+    if uses.children.is_empty() && used_by.children.is_empty() {
+        println!("No dependencies found for {path}.");
+        return Ok(());
+    }
+
+    let mut legend_repeat = false;
+    let mut legend_cycle = false;
+    let mut legend_truncated = false;
+    for (heading, tree) in [("Uses", &uses), ("Used by", &used_by)] {
+        if tree.children.is_empty() {
+            continue;
+        }
+        println!("{heading} (depth ≤ {depth}):");
+        for line in render_tree_lines(tree) {
+            println!("{line}");
+        }
+        println!();
+        legend_repeat |= tree_has(tree, &|n| n.repeated);
+        legend_cycle |= tree_has(tree, &|n| n.cycle);
+        legend_truncated |= tree_has(tree, &|n| n.truncated);
+    }
+    if legend_repeat {
+        println!("(*) subtree already shown above");
+    }
+    if legend_cycle {
+        println!("(cycle) path depends on itself through this chain");
+    }
+    if legend_truncated {
+        println!("(…) children beyond the depth limit; raise with --depth");
+    }
+    Ok(())
+}
+
+fn tree_has(
+    node: &scat_core::core::search::DepsTreeNode,
+    predicate: &impl Fn(&scat_core::core::search::DepsTreeNode) -> bool,
+) -> bool {
+    predicate(node) || node.children.iter().any(|child| tree_has(child, predicate))
+}
+
+fn render_tree_lines(root: &scat_core::core::search::DepsTreeNode) -> Vec<String> {
+    fn node_label(node: &scat_core::core::search::DepsTreeNode) -> String {
+        let mut label = node.logical_path.clone();
+        if !node.indexed {
+            label.push_str(" (not indexed)");
+        }
+        if node.cycle {
+            label.push_str(" (cycle)");
+        }
+        if node.repeated {
+            label.push_str(" (*)");
+        }
+        if node.truncated {
+            label.push_str(" (…)");
+        }
+        label
+    }
+
+    fn push_children(
+        node: &scat_core::core::search::DepsTreeNode,
+        prefix: &str,
+        out: &mut Vec<String>,
+    ) {
+        let last_index = node.children.len().saturating_sub(1);
+        for (index, child) in node.children.iter().enumerate() {
+            let (branch, continuation) = if index == last_index {
+                ("└── ", "    ")
+            } else {
+                ("├── ", "│   ")
+            };
+            out.push(format!("{prefix}{branch}{}", node_label(child)));
+            push_children(child, &format!("{prefix}{continuation}"), out);
+        }
+    }
+
+    let mut out = vec![node_label(root)];
+    push_children(root, "", &mut out);
+    out
 }
 
 pub(crate) fn cmd_stats(
@@ -1098,6 +1214,8 @@ mod tests {
         let err = cmd_deps(
             &api,
             "/catalog/scripts/missing.py",
+            false,
+            None,
             super::OutputFormat::Table,
             true,
         )
@@ -1106,6 +1224,51 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "script '/catalog/scripts/missing.py' not found in catalog"
+        );
+    }
+
+    #[test]
+    fn render_tree_lines_draws_branches_and_markers() {
+        use scat_core::core::search::DepsTreeNode;
+
+        let node = |path: &str, children: Vec<DepsTreeNode>| DepsTreeNode {
+            logical_path: path.to_string(),
+            indexed: true,
+            cycle: false,
+            repeated: false,
+            truncated: false,
+            children,
+        };
+
+        let mut external = node("/external/lib.py", vec![]);
+        external.indexed = false;
+        let mut shared_again = node("/catalog/shared.py", vec![]);
+        shared_again.repeated = true;
+        let root = node(
+            "/catalog/a.py",
+            vec![
+                node(
+                    "/catalog/b.py",
+                    vec![node(
+                        "/catalog/shared.py",
+                        vec![node("/catalog/leaf.py", vec![])],
+                    )],
+                ),
+                node("/catalog/c.py", vec![shared_again, external]),
+            ],
+        );
+
+        assert_eq!(
+            super::render_tree_lines(&root),
+            vec![
+                "/catalog/a.py",
+                "├── /catalog/b.py",
+                "│   └── /catalog/shared.py",
+                "│       └── /catalog/leaf.py",
+                "└── /catalog/c.py",
+                "    ├── /catalog/shared.py (*)",
+                "    └── /external/lib.py (not indexed)",
+            ]
         );
     }
 

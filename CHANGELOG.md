@@ -10,6 +10,8 @@ All notable changes to this project will be documented in this file.
 
 ### CLI and Output
 
+- **Shell completions** — added `scat completions <shell>` which prints a completion script for bash, zsh, fish, PowerShell, or elvish on stdout (e.g. `scat completions bash > /etc/bash_completion.d/scat`). Needs no catalog database.
+- **Transitive dependency trees** — added `--tree` and `--depth <n>` (default depth 5, implies `--tree`) to `scat deps`, rendering cycle-safe "Uses" and "Used by" trees with box-drawing branches. Repeated subtrees are collapsed and marked `(*)`, back-edges to an ancestor are marked `(cycle)`, unresolved dependencies are marked `(not indexed)`, and nodes with children beyond the depth limit are marked `(…)`; a legend is printed when markers appear. `--output json` emits the nested trees with `cycle`/`repeated`/`truncated` flags.
 - **`NO_COLOR` support** — `scat` now honors the [`NO_COLOR`](https://no-color.org/) environment variable in addition to the `--no-color` flag when deciding whether to colorize output.
 - **Clearer not-found errors** — `scat show` and `scat deps` now report a missing script through the central error path with a clean message instead of a raw `tracing` log line followed by a bare `exit(1)`.
 - **Cross-platform basename ranking** — search result name-relevance ranking now splits on both `/` and `\` so basenames resolve correctly for paths carrying Windows-style separators.
@@ -17,6 +19,8 @@ All notable changes to this project will be documented in this file.
 
 ### TUI
 
+- **Search filters** — the TUI search box now understands `lang:` (or `language:`), `owner:`, and `tag:` tokens, matching the CLI's `--lang`/`--owner`/`--tag` flags (e.g. `backup lang:python owner:alice`). Active filters are shown in the search pane title, a filter-only query lists all matching scripts, and a filter key with an empty value (mid-typing) is ignored.
+- **Path-aware search routing** — TUI queries containing `/` or `.` now route to the same INSTR-based path search the CLI uses instead of erroring as invalid FTS5 syntax, so `jobs/nightly` or `foo.py` find scripts by path fragment.
 - **Read-only full-script viewer** ([#15](https://github.com/tjorim/scat/issues/15)) — added a TUI action to open the full selected script in an external read-only viewer/editor, bypassing the `PREVIEW_LINES` preview cap.
   - `v` opens the **indexed catalog content** (`scripts.content`) written to a temp file that preserves the original filename/extension for syntax highlighting.
   - `V` opens the **live filesystem source** resolved through the configured path mapping (falling back to the logical path when it is already a real file), and fails clearly when the source file cannot be found. The existence check runs on a background worker (with stale-request draining) to keep the render loop responsive on slow network mounts.
