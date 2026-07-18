@@ -111,23 +111,26 @@ impl TreeSitterExtractor {
 // Iterative (not recursive) pre-order walk: a deeply nested script (many
 // levels of `if`/command substitution) could otherwise overflow the native
 // stack, since recursion depth would track AST nesting depth directly.
+// Children are read once per node through a TreeCursor: `Node::child(i)`
+// costs O(log i), which degrades on very wide nodes (e.g. a flat script
+// whose root has one child per statement); cursor iteration is O(1) per
+// sibling.
 fn extract_bash_commands(
     root: Node<'_>,
     source: &[u8],
     deps: &mut Vec<String>,
     seen: &mut HashSet<String>,
 ) {
+    let mut cursor = root.walk();
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
+        let children: Vec<Node<'_>> = node.children(&mut cursor).collect();
+
         if node.kind() == "command" {
             let mut cmd_name = String::new();
             let mut args: Vec<String> = Vec::new();
 
-            for i in 0..node.child_count() {
-                let child = match node.child(i as u32) {
-                    Some(c) => c,
-                    None => continue,
-                };
+            for child in &children {
                 match child.kind() {
                     "command_name" => {
                         cmd_name = child.utf8_text(source).unwrap_or("").trim().to_string();
@@ -158,11 +161,7 @@ fn extract_bash_commands(
         // Push children in reverse so they're popped left-to-right, matching
         // the original recursive pre-order traversal (and so `deps` order is
         // unchanged).
-        for i in (0..node.child_count()).rev() {
-            if let Some(child) = node.child(i as u32) {
-                stack.push(child);
-            }
-        }
+        stack.extend(children.into_iter().rev());
     }
 }
 
