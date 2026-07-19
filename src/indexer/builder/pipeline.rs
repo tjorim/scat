@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use indicatif::{ProgressBar, ProgressStyle};
+use rayon::prelude::*;
 use rusqlite::Connection;
 use serde_json::Value;
 use tracing::{debug, warn};
@@ -10,12 +11,19 @@ use tracing::{debug, warn};
 use crate::core::db::SCHEMA_VERSION;
 use crate::core::vc::{ProcessedScript, VcConfig, infer_warnings, scan_checkouts};
 use crate::error::{Error, Result};
+use crate::indexer::ast_deps::AstDependencies;
 use crate::indexer::checkpoint::{Checkpoint, write_checkpoint};
-use crate::indexer::extractor::extract;
+use crate::indexer::extractor::{ExtractedMetadata, extract};
 use crate::indexer::scanner::{ScriptRecord, scan_paths_with_revisions};
 use crate::indexer::treesitter_deps::TreeSitterExtractor;
 
 use super::IndexResult;
+
+/// Number of scripts extracted per parallel batch in phase 2. Bounds how
+/// long a Ctrl-C or progress-bar update has to wait — extraction within a
+/// batch runs across all cores, but batches themselves run one at a time —
+/// while still giving each batch enough work to spread well across cores.
+const EXTRACT_BATCH_SIZE: usize = 200;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn populate(
@@ -24,7 +32,6 @@ pub(super) fn populate(
     logical_prefix: &str,
     head_lines: usize,
     ignore_files: &[PathBuf],
-    ts: &mut TreeSitterExtractor,
     result: &mut IndexResult,
     vc_config: &VcConfig,
     db_path: &Path,
@@ -151,43 +158,69 @@ pub(super) fn populate(
         (0, 0)
     };
 
-    for record in &to_process {
-        // Check for Ctrl-C interrupt.
+    for batch in to_process.chunks(EXTRACT_BATCH_SIZE) {
+        // Check for Ctrl-C interrupt before starting the next batch's
+        // (parallel, not itself interruptible mid-flight) extraction.
         if shutdown.load(Ordering::SeqCst) {
             checkpoint_for_resume(tx, db_path, result, newly_indexed, dry_run)?;
             return Err(Error::Interrupted);
         }
 
-        if let Some(pb) = &index_pb {
-            pb.set_message(format!(
-                "python {} shell {}  errors {}",
-                python_count,
-                shell_count,
-                result.errors.len()
-            ));
-        }
+        // The CPU-bound work — file read, tree-sitter parse, regex
+        // extraction — is independent per script, so it runs in parallel
+        // across a worker pool (one TreeSitterExtractor per worker, lazily
+        // created). SQLite writes stay strictly sequential on `tx` below,
+        // since SQLite only supports one writer at a time.
+        let extracted: Vec<(&ScriptRecord, Result<ExtractedRow<'_>>)> = batch
+            .par_iter()
+            .map_init(
+                || TreeSitterExtractor::new().expect("failed to initialize tree-sitter extractor"),
+                |worker_ts, record| {
+                    let record: &ScriptRecord = record;
+                    (record, extract_for_insert(record, worker_ts))
+                },
+            )
+            .collect();
 
-        match process_script(&tx, record, ts, &build_ts) {
-            Ok((ps, dep_count)) => {
-                result.scripts_indexed += 1;
-                result.dependencies_indexed += dep_count;
-                newly_indexed.insert(record.physical_path.clone());
-                match record.language.as_str() {
-                    "python" => python_count += 1,
-                    "shell" => shell_count += 1,
-                    _ => {}
+        for (record, extraction) in extracted {
+            // Check for Ctrl-C interrupt.
+            if shutdown.load(Ordering::SeqCst) {
+                checkpoint_for_resume(tx, db_path, result, newly_indexed, dry_run)?;
+                return Err(Error::Interrupted);
+            }
+
+            if let Some(pb) = &index_pb {
+                pb.set_message(format!(
+                    "python {} shell {}  errors {}",
+                    python_count,
+                    shell_count,
+                    result.errors.len()
+                ));
+            }
+
+            let outcome = extraction.and_then(|row| insert_extracted_row(&tx, &row, &build_ts));
+            match outcome {
+                Ok((ps, dep_count)) => {
+                    result.scripts_indexed += 1;
+                    result.dependencies_indexed += dep_count;
+                    newly_indexed.insert(record.physical_path.clone());
+                    match record.language.as_str() {
+                        "python" => python_count += 1,
+                        "shell" => shell_count += 1,
+                        _ => {}
+                    }
+                    processed.push(ps);
                 }
-                processed.push(ps);
+                Err(e) => {
+                    result
+                        .errors
+                        .push((record.physical_path.clone(), e.to_string()));
+                }
             }
-            Err(e) => {
-                result
-                    .errors
-                    .push((record.physical_path.clone(), e.to_string()));
-            }
-        }
 
-        if let Some(pb) = &index_pb {
-            pb.inc(1);
+            if let Some(pb) = &index_pb {
+                pb.inc(1);
+            }
         }
     }
 
@@ -356,12 +389,27 @@ fn checkpoint_for_resume(
     Ok(())
 }
 
-fn process_script(
-    conn: &Connection,
-    record: &ScriptRecord,
+/// Everything `extract_for_insert` computes for one script — pure, so it can
+/// run on any worker thread. `insert_extracted_row` writes this into the
+/// database sequentially afterward.
+struct ExtractedRow<'a> {
+    record: &'a ScriptRecord,
+    meta: ExtractedMetadata,
+    ast_result: Option<AstDependencies>,
+    deps: Vec<String>,
+    references: Vec<String>,
+    tags_json: String,
+    ep_json: String,
+    related_json: String,
+    fields_json: String,
+}
+
+/// File read, parsing, and dependency/reference extraction for one script.
+/// No database access — safe to call from any worker thread.
+fn extract_for_insert<'a>(
+    record: &'a ScriptRecord,
     ts: &mut TreeSitterExtractor,
-    indexed_at: &str,
-) -> Result<(ProcessedScript, usize)> {
+) -> Result<ExtractedRow<'a>> {
     let meta = extract(record);
     let ast_result = if record.language == "python" {
         let module_name = super::resolve::module_name_from_logical_path(&record.logical_path);
@@ -375,6 +423,39 @@ fn process_script(
     let related_json = serde_json::to_string(&meta.related)?;
     let fields_json = serde_json::to_string(&meta.fields)?;
 
+    let deps = extract_deps(record, &meta.content, ts, ast_result.as_ref());
+
+    // Path-literal "referenced" edges (a script copied/executed by path, or
+    // listed in a manifest). Candidates that don't resolve to an indexed
+    // script are dropped later in `resolve_reference_targets`; a script
+    // mentioning its own path is not a dependency, so skip it here.
+    let references = crate::indexer::treesitter_deps::extract_reference_paths(&meta.content)
+        .into_iter()
+        .filter(|reference| reference != &record.logical_path)
+        .collect();
+
+    Ok(ExtractedRow {
+        record,
+        meta,
+        ast_result,
+        deps,
+        references,
+        tags_json,
+        ep_json,
+        related_json,
+        fields_json,
+    })
+}
+
+/// Writes one already-extracted script into the database. Must run
+/// sequentially against `conn` — SQLite allows only one writer at a time.
+fn insert_extracted_row(
+    conn: &Connection,
+    row: &ExtractedRow<'_>,
+    indexed_at: &str,
+) -> Result<(ProcessedScript, usize)> {
+    let record = row.record;
+
     conn.prepare_cached(
         "INSERT OR REPLACE INTO scripts
          (logical_path, language, size, mtime, content,
@@ -387,37 +468,29 @@ fn process_script(
         record.language,
         record.size as i64,
         record.mtime,
-        meta.content,
-        meta.owner,
-        meta.purpose,
-        tags_json,
-        ep_json,
-        related_json,
+        row.meta.content,
+        row.meta.owner,
+        row.meta.purpose,
+        row.tags_json,
+        row.ep_json,
+        row.related_json,
         record.symlink_target,
-        fields_json,
+        row.fields_json,
         "[]",
         indexed_at,
     ])?;
 
     let script_id = conn.last_insert_rowid();
 
-    let deps = extract_deps(record, &meta.content, ts, ast_result.as_ref());
-    let dep_count = deps.len();
-    for dep in &deps {
+    let dep_count = row.deps.len();
+    for dep in &row.deps {
         conn.prepare_cached(
             "INSERT OR IGNORE INTO dependencies (script_id, depends_on_path) VALUES (?1,?2)",
         )?
         .execute(rusqlite::params![script_id, dep])?;
     }
 
-    // Path-literal "referenced" edges (a script copied/executed by path, or
-    // listed in a manifest). Candidates that don't resolve to an indexed
-    // script are dropped later in `resolve_reference_targets`; a script
-    // mentioning its own path is not a dependency, so skip it here.
-    for reference in crate::indexer::treesitter_deps::extract_reference_paths(&meta.content) {
-        if reference == record.logical_path {
-            continue;
-        }
+    for reference in &row.references {
         conn.prepare_cached(
             "INSERT OR IGNORE INTO dependencies (script_id, depends_on_path, kind)
              VALUES (?1, ?2, 'referenced')",
@@ -425,7 +498,7 @@ fn process_script(
         .execute(rusqlite::params![script_id, reference])?;
     }
 
-    if let Some(ast) = ast_result {
+    if let Some(ast) = &row.ast_result {
         for definition in &ast.definitions {
             conn.prepare_cached(
                 "INSERT OR IGNORE INTO function_definitions

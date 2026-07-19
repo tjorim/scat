@@ -12,7 +12,6 @@ use crate::core::vc::{VcConfig, load_vc_config};
 use crate::error::{Error, Result};
 use crate::indexer::atomic::{atomic_swap, rotate_copies};
 use crate::indexer::checkpoint::{Checkpoint, delete_wip_pair, read_checkpoint, wip_path};
-use crate::indexer::treesitter_deps::TreeSitterExtractor;
 
 mod pipeline;
 mod resolve;
@@ -201,7 +200,6 @@ pub fn build_index(
         // persisted in the database file, so a resumed build's freshly
         // reopened connection needs them too.
         crate::core::db::apply_bulk_build_pragmas(&conn)?;
-        let mut ts = TreeSitterExtractor::new()?;
         debug!(phase = "populate", "starting populate phase");
         populate(
             &mut conn,
@@ -209,7 +207,6 @@ pub fn build_index(
             &opts.logical_prefix,
             head_lines,
             &opts.ignore_files,
-            &mut ts,
             &mut result,
             &vc_config,
             db_path,
