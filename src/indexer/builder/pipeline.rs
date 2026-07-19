@@ -39,6 +39,7 @@ pub(super) fn populate(
     shutdown: &AtomicBool,
     use_progress: bool,
     dry_run: bool,
+    incremental: bool,
 ) -> Result<()> {
     let build_ts = chrono::Utc::now().to_rfc3339();
 
@@ -86,13 +87,35 @@ pub(super) fn populate(
         pb.finish_and_clear();
     }
 
+    // RAII transaction: auto-rolls back on drop if not explicitly committed.
+    // Opened here (rather than just before phase 2) so the incremental-seed
+    // diff below can query the database it's about to build on top of.
+    let tx = conn.transaction()?;
+
+    // Firing the FTS-sync triggers once per row during a bulk insert is far
+    // slower than a single bulk rebuild once all rows are in place; dropped
+    // here, restored (along with the bulk FTS rebuild) at the end of phase 3.
+    // Idempotent, so safe to re-run on a resumed build where they're already
+    // dropped from the interrupted attempt.
+    tx.execute_batch(crate::core::db::DROP_FTS_TRIGGERS_SQL)?;
+
     // -----------------------------------------------------------------------
-    // Resume: determine which records to skip.
+    // Resume / incremental: determine which records to skip.
     // -----------------------------------------------------------------------
-    let already_indexed = resume_checkpoint
+    // A resume checkpoint (mid-build interrupt) and incremental seeding
+    // (starting from the previous completed build — see
+    // `builder::build_index`) both mean "some of `records` don't need
+    // re-extraction"; they share `already_indexed` since only one applies on
+    // any given run (incremental seeding only happens on a fresh, non-resume
+    // attempt — see the caller).
+    let mut already_indexed = resume_checkpoint
         .as_ref()
         .map(|c| c.indexed.clone())
         .unwrap_or_default();
+
+    if incremental {
+        seed_from_existing_database(&tx, &records, &mut already_indexed)?;
+    }
 
     // Count how many we are actually going to process.
     let to_process: Vec<&ScriptRecord> = records
@@ -103,6 +126,7 @@ pub(super) fn populate(
     // Seed result counters from already-indexed scripts so the final summary
     // is accurate.
     result.scripts_indexed = already_indexed.len();
+    result.scripts_reused = already_indexed.len();
 
     // -----------------------------------------------------------------------
     // Phase 2: Extract / index
@@ -121,22 +145,14 @@ pub(super) fn populate(
         None
     };
 
-    // RAII transaction: auto-rolls back on drop if not explicitly committed.
-    let tx = conn.transaction()?;
-
-    // Firing the FTS-sync triggers once per row during a bulk insert is far
-    // slower than a single bulk rebuild once all rows are in place; dropped
-    // here, restored (along with the bulk FTS rebuild) at the end of phase 3.
-    // Idempotent, so safe to re-run on a resumed build where they're already
-    // dropped from the interrupted attempt.
-    tx.execute_batch(crate::core::db::DROP_FTS_TRIGGERS_SQL)?;
-
     // Track newly indexed paths for checkpointing.
     let mut newly_indexed: HashSet<String> = already_indexed;
     let mut processed = Vec::new();
 
-    // When resuming, count already-indexed scripts by language for accurate progress display.
-    let (mut python_count, mut shell_count) = if resume_checkpoint.is_some() {
+    // When resuming or building incrementally, `scripts` already has rows
+    // from before this run started, so seed the display counters from it —
+    // otherwise the "python N shell M" progress message would undercount.
+    let (mut python_count, mut shell_count) = if resume_checkpoint.is_some() || incremental {
         let mut py_count = 0usize;
         let mut sh_count = 0usize;
         {
@@ -279,6 +295,13 @@ pub(super) fn populate(
         checkout_count = checkouts.len(),
         "completed build phase"
     );
+    // `scan_checkouts` always returns the complete current set (it isn't
+    // itself incremental), so clearing first and re-inserting fresh is
+    // simpler than diffing — and correct either way, since a stale
+    // checkout revision must not survive after its DEVELOP/ARCHIVE entry is
+    // gone (a no-op on the always-fresh-db path, where this table starts
+    // empty anyway).
+    tx.execute("DELETE FROM revisions", [])?;
     {
         let mut stmt = tx.prepare(
             "INSERT OR REPLACE INTO revisions
@@ -297,6 +320,17 @@ pub(super) fn populate(
             ])?;
         }
     }
+
+    // Reset derived checkout/warning state before re-deriving it below —
+    // otherwise a script whose checkout was cleaned up, or whose warning no
+    // longer applies, would keep showing stale state forever on an
+    // incrementally-seeded database (a no-op on the always-fresh-db path,
+    // where every row was just inserted with these already at their default).
+    tx.execute(
+        "UPDATE scripts SET checkout_user = NULL, checkout_timestamp = NULL,
+         checkout_os = NULL, checkout_age_seconds = NULL, vc_warnings = '[]'",
+        [],
+    )?;
 
     apply_checkout_summaries(&tx)?;
 
@@ -386,6 +420,59 @@ fn checkpoint_for_resume(
             warn!(error = %e, "failed to rename WIP database — resume may not work");
         }
     }
+    Ok(())
+}
+
+/// For an incrementally-seeded database (started from a copy of the
+/// previous completed build — see `builder::build_index`), find scripts
+/// already present with matching size and mtime and add their physical
+/// paths to `already_indexed`, same as a resume checkpoint would, so
+/// phase 2 skips re-extracting them.
+///
+/// Scripts present in the database but no longer found by this scan are
+/// deleted outright. This is what makes the rest of the pipeline safe to
+/// leave untouched: the schema's `ON DELETE SET NULL` foreign keys
+/// (`dependencies.resolved_script_id`, `function_calls.resolved_target_*`)
+/// null out anything that referenced a deleted script, and phase 3's
+/// resolve passes already only touch rows where the resolved id `IS NULL`
+/// — so a dependency that pointed at a script which just got replaced (new
+/// content, new row, new id) or removed correctly gets re-resolved against
+/// current state without any incremental-specific resolve logic.
+fn seed_from_existing_database(
+    tx: &Connection,
+    records: &[ScriptRecord],
+    already_indexed: &mut HashSet<String>,
+) -> Result<()> {
+    let mut existing: HashMap<String, (i64, f64)> = HashMap::new();
+    {
+        let mut stmt = tx.prepare("SELECT logical_path, size, mtime FROM scripts")?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let logical_path: String = row.get(0)?;
+            let size: i64 = row.get(1)?;
+            let mtime: f64 = row.get(2)?;
+            existing.insert(logical_path, (size, mtime));
+        }
+    }
+
+    let current_paths: HashSet<&str> = records.iter().map(|r| r.logical_path.as_str()).collect();
+    let removed: Vec<&String> = existing
+        .keys()
+        .filter(|lp| !current_paths.contains(lp.as_str()))
+        .collect();
+    if !removed.is_empty() {
+        let mut stmt = tx.prepare("DELETE FROM scripts WHERE logical_path = ?1")?;
+        for logical_path in removed {
+            stmt.execute(rusqlite::params![logical_path])?;
+        }
+    }
+
+    for record in records {
+        if existing.get(&record.logical_path) == Some(&(record.size as i64, record.mtime)) {
+            already_indexed.insert(record.physical_path.clone());
+        }
+    }
+
     Ok(())
 }
 

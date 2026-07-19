@@ -76,7 +76,7 @@ pub fn append_script_filters(
 // DDL (see SCHEMA_VERSION)
 // ---------------------------------------------------------------------------
 
-const DDL: &str = r#"
+pub(crate) const DDL: &str = r#"
 PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS scripts (
@@ -305,6 +305,25 @@ pub fn create_db(path: &Path) -> Result<Connection> {
         "initialized database"
     );
     Ok(conn)
+}
+
+/// Returns the `schema_version` stored in an existing database's
+/// `index_metadata` row, or `None` if `path` doesn't exist, isn't a valid
+/// SQLite database, or has no metadata row yet.
+///
+/// Used to decide whether a previous completed build is eligible to seed an
+/// incremental rebuild (see `indexer::builder::build_index`) — a schema
+/// mismatch means the stored rows may not match the current column set, so
+/// callers should treat any outcome other than `Some(SCHEMA_VERSION)` as
+/// ineligible and fall back to a full rebuild.
+pub fn schema_version_of(path: &Path) -> Option<i64> {
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    conn.query_row(
+        "SELECT schema_version FROM index_metadata WHERE id = 1",
+        [],
+        |row| row.get(0),
+    )
+    .ok()
 }
 
 /// Relax durability and grow caches for a connection used to build a

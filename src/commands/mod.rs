@@ -977,6 +977,7 @@ pub(crate) fn cmd_index(
     quiet: bool,
     no_resume: bool,
     force: bool,
+    no_incremental: bool,
 ) -> Result<()> {
     let effective_scan_roots: Vec<PathBuf> = if scan_roots.is_empty() {
         config.scan_roots.clone()
@@ -1054,6 +1055,7 @@ pub(crate) fn cmd_index(
         vc_config: Some(config),
         quiet: quiet || json,
         no_resume,
+        no_incremental,
         shutdown: Some(shutdown),
     };
 
@@ -1063,15 +1065,22 @@ pub(crate) fn cmd_index(
     if json {
         print_json(&serde_json::json!({
             "scripts_indexed": result.scripts_indexed,
+            "scripts_reused": result.scripts_reused,
             "dependencies_indexed": result.dependencies_indexed,
             "db_path": result.db_path.display().to_string(),
             "dry_run": result.dry_run,
             "errors": result.errors.iter().map(|(p, e)| serde_json::json!({"path": p, "error": e})).collect::<Vec<_>>(),
         }));
     } else {
+        let reused_suffix = if result.scripts_reused > 0 {
+            format!(" ({} reused unchanged)", result.scripts_reused)
+        } else {
+            String::new()
+        };
         println!(
-            "Indexed {} scripts in total ({} dependencies) → {}{}",
+            "Indexed {} scripts in total{} ({} dependencies) → {}{}",
             result.scripts_indexed,
+            reused_suffix,
             result.dependencies_indexed,
             result.db_path.display(),
             if dry_run { " (dry run)" } else { "" }

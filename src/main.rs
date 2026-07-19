@@ -199,6 +199,7 @@ fn cmd_catalog(
         quiet,
         no_resume,
         force,
+        no_incremental,
         json,
     } = command
     {
@@ -215,6 +216,7 @@ fn cmd_catalog(
             quiet,
             no_resume,
             force,
+            no_incremental,
         );
     }
 

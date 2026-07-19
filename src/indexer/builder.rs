@@ -27,6 +27,10 @@ use self::pipeline::populate;
 pub struct IndexResult {
     /// Number of scripts inserted/updated.
     pub scripts_indexed: usize,
+    /// Of `scripts_indexed`, how many were skipped (not re-extracted) because
+    /// they were already present and unchanged — from an incrementally
+    /// seeded previous build, or from an interrupted attempt being resumed.
+    pub scripts_reused: usize,
     /// Number of dependency edges recorded.
     pub dependencies_indexed: usize,
     /// Output database path (tmp path for dry-run).
@@ -56,6 +60,9 @@ pub struct BuildOptions {
     pub quiet: bool,
     /// Ignore any existing checkpoint and start fresh.
     pub no_resume: bool,
+    /// Always do a full rebuild instead of seeding from the previous
+    /// completed build. See `build_index`'s incremental-seeding doc comment.
+    pub no_incremental: bool,
     /// Shared shutdown flag for Ctrl-C handling. If None, a local handler is registered.
     pub shutdown: Option<Arc<AtomicBool>>,
 }
@@ -157,8 +164,26 @@ pub fn build_index(
         tmp_path
     };
 
+    // -----------------------------------------------------------------------
+    // Incremental seeding: on a fresh (non-resume) attempt, start from a copy
+    // of the previous completed build instead of an empty database, so
+    // `populate` can skip re-extracting scripts that haven't changed. Only
+    // eligible when the previous build's schema matches exactly — a version
+    // bump means the stored rows may not match the current column set, so
+    // this always falls back to a full rebuild rather than risk seeding from
+    // incompatible data. `validate` also has the side effect of fully
+    // checkpointing `db_path`'s WAL (SQLite checkpoints on last-connection
+    // close), which is what makes a raw file copy of it safe.
+    let incremental_seed = resume_checkpoint.is_none()
+        && !opts.dry_run
+        && !opts.no_incremental
+        && db_path.exists()
+        && crate::core::db::schema_version_of(db_path) == Some(crate::core::db::SCHEMA_VERSION)
+        && validate(db_path).is_ok();
+
     let mut result = IndexResult {
         scripts_indexed: 0,
+        scripts_reused: 0,
         dependencies_indexed: 0,
         db_path: tmp_path.clone(),
         dry_run: opts.dry_run,
@@ -191,6 +216,17 @@ pub fn build_index(
         let mut conn = if resume_checkpoint.is_some() {
             // Open the existing WIP database for appending.
             Connection::open(&tmp_path)?
+        } else if incremental_seed {
+            // A plain byte copy is safe here specifically because `validate`
+            // above just forced db_path's WAL to fully checkpoint into the
+            // main file (see the incremental_seed comment) — there's nothing
+            // left in a `-wal` sidecar that a raw file copy would miss.
+            std::fs::copy(db_path, &tmp_path)?;
+            let conn = Connection::open(&tmp_path)?;
+            // Idempotent; cheap safety net against schema drift even though
+            // schema_version already matched.
+            conn.execute_batch(crate::core::db::DDL)?;
+            conn
         } else {
             create_db(&tmp_path)?
         };
@@ -200,7 +236,11 @@ pub fn build_index(
         // persisted in the database file, so a resumed build's freshly
         // reopened connection needs them too.
         crate::core::db::apply_bulk_build_pragmas(&conn)?;
-        debug!(phase = "populate", "starting populate phase");
+        debug!(
+            phase = "populate",
+            incremental = incremental_seed,
+            "starting populate phase"
+        );
         populate(
             &mut conn,
             scan_roots,
@@ -214,6 +254,7 @@ pub fn build_index(
             &shutdown,
             use_progress,
             opts.dry_run,
+            incremental_seed,
         )
     })();
 
@@ -455,6 +496,194 @@ mod tests {
             err.to_string()
                 .contains("database path must be a file, found directory"),
             "unexpected error: {err}"
+        );
+    }
+
+    fn incremental_opts(keep_copies: usize) -> BuildOptions {
+        BuildOptions {
+            logical_prefix: "/catalog/scripts".into(),
+            head_lines: 10,
+            keep_copies,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn incremental_reuses_unchanged_scripts() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().join("scripts");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("a.py"), "import os\n").unwrap();
+        std::fs::write(root.join("b.py"), "import sys\n").unwrap();
+        let db_path = dir.path().join("scripts.sqlite");
+
+        let first =
+            build_index(std::slice::from_ref(&root), &db_path, incremental_opts(0)).unwrap();
+        assert_eq!(first.scripts_reused, 0, "first build has nothing to reuse");
+        assert_eq!(first.scripts_indexed, 2);
+
+        // Nothing changed on disk — the second build should reuse both.
+        let second =
+            build_index(std::slice::from_ref(&root), &db_path, incremental_opts(0)).unwrap();
+        assert_eq!(second.scripts_indexed, 2);
+        assert_eq!(
+            second.scripts_reused, 2,
+            "unchanged scripts should be reused, not re-extracted"
+        );
+    }
+
+    #[test]
+    fn incremental_reextracts_changed_script() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().join("scripts");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("a.py"), "# @brief original\n").unwrap();
+        std::fs::write(root.join("b.py"), "import sys\n").unwrap();
+        let db_path = dir.path().join("scripts.sqlite");
+
+        build_index(std::slice::from_ref(&root), &db_path, incremental_opts(0)).unwrap();
+
+        // Change only a.py's content (and thus its size).
+        std::fs::write(root.join("a.py"), "# @brief updated and longer\n").unwrap();
+
+        let second =
+            build_index(std::slice::from_ref(&root), &db_path, incremental_opts(0)).unwrap();
+        assert_eq!(second.scripts_indexed, 2);
+        assert_eq!(
+            second.scripts_reused, 1,
+            "only the unchanged script should be reused"
+        );
+
+        let conn =
+            Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .unwrap();
+        let purpose: String = conn
+            .query_row(
+                "SELECT purpose FROM scripts WHERE logical_path LIKE '%a.py'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(purpose, "updated and longer");
+    }
+
+    #[test]
+    fn incremental_removes_deleted_script_and_unresolves_dependents() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().join("scripts");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("main.py"), "import helper\n").unwrap();
+        std::fs::write(root.join("helper.py"), "pass\n").unwrap();
+        let db_path = dir.path().join("scripts.sqlite");
+
+        build_index(std::slice::from_ref(&root), &db_path, incremental_opts(0)).unwrap();
+
+        {
+            let conn =
+                Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                    .unwrap();
+            let resolved: Option<i64> = conn
+                .query_row(
+                    "SELECT d.resolved_script_id FROM dependencies d
+                     JOIN scripts s ON s.id = d.script_id
+                     WHERE s.logical_path LIKE '%main.py'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(
+                resolved.is_some(),
+                "helper.py should resolve before deletion"
+            );
+        }
+
+        // Remove helper.py from disk; main.py itself is untouched.
+        std::fs::remove_file(root.join("helper.py")).unwrap();
+
+        let second =
+            build_index(std::slice::from_ref(&root), &db_path, incremental_opts(0)).unwrap();
+        assert_eq!(second.scripts_indexed, 1, "only main.py remains");
+        assert_eq!(
+            second.scripts_reused, 1,
+            "main.py's own content didn't change, so it should be reused"
+        );
+
+        let conn =
+            Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .unwrap();
+        let helper_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM scripts WHERE logical_path LIKE '%helper.py'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(helper_count, 0, "deleted script's row must be removed");
+
+        let resolved_after: Option<i64> = conn
+            .query_row(
+                "SELECT d.resolved_script_id FROM dependencies d
+                 JOIN scripts s ON s.id = d.script_id
+                 WHERE s.logical_path LIKE '%main.py'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            resolved_after.is_none(),
+            "a dependency on a now-deleted script must become unresolved, not dangle"
+        );
+    }
+
+    #[test]
+    fn no_incremental_flag_forces_full_rebuild() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().join("scripts");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("a.py"), "pass\n").unwrap();
+        let db_path = dir.path().join("scripts.sqlite");
+
+        build_index(std::slice::from_ref(&root), &db_path, incremental_opts(0)).unwrap();
+
+        let second = build_index(
+            std::slice::from_ref(&root),
+            &db_path,
+            BuildOptions {
+                no_incremental: true,
+                ..incremental_opts(0)
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            second.scripts_reused, 0,
+            "--no-incremental must force a full rebuild"
+        );
+    }
+
+    #[test]
+    fn incremental_falls_back_on_schema_mismatch() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().join("scripts");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("a.py"), "pass\n").unwrap();
+        let db_path = dir.path().join("scripts.sqlite");
+
+        build_index(std::slice::from_ref(&root), &db_path, incremental_opts(0)).unwrap();
+
+        // Simulate a schema upgrade since the last build.
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute("UPDATE index_metadata SET schema_version = -1", [])
+                .unwrap();
+        }
+
+        let second =
+            build_index(std::slice::from_ref(&root), &db_path, incremental_opts(0)).unwrap();
+
+        assert_eq!(
+            second.scripts_reused, 0,
+            "a schema_version mismatch must fall back to a full rebuild"
         );
     }
 }
