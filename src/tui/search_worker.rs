@@ -161,7 +161,8 @@ fn run_search(api: &SearchApi, query: &str, limit: usize) -> Result<Vec<JsonRow>
             .context("failed to list scripts");
     }
     if crate::commands::query_uses_fts(text) {
-        api.search_with_filters(text, limit, lang, owner, tag)
+        let live = auto_prefix_last_term(text);
+        api.search_with_filters(&live, limit, lang, owner, tag)
             .context("failed to run search query")
     } else {
         // The INSTR path search matches `/`-separated logical paths, so
@@ -170,6 +171,29 @@ fn run_search(api: &SearchApi, query: &str, limit: usize) -> Result<Vec<JsonRow>
         api.search_by_path_with_filters(&path_query, limit, lang, owner, tag)
             .context("failed to run path search query")
     }
+}
+
+/// Append `*` to the last (still-being-typed) term so live search matches
+/// as a prefix instead of requiring the complete word.
+///
+/// FTS5 has no implicit prefix matching, so a search-as-you-type box would
+/// otherwise only ever match once the current word is typed out in full.
+/// The last term is left untouched if it already ends in `*`, or if the
+/// user explicitly closed it in double quotes — quoting is the existing
+/// escape hatch for "match this exactly," and extending it with a `*`
+/// would silently break that guarantee.
+fn auto_prefix_last_term(text: &str) -> String {
+    let trimmed = text.trim_end();
+    if trimmed.is_empty() || trimmed.ends_with('*') {
+        return text.to_string();
+    }
+    // An odd number of quotes means the last term is an unterminated quoted
+    // phrase (still being typed); an even count ending in `"` means it was
+    // explicitly closed. Either way, leave quoting semantics alone.
+    if trimmed.matches('"').count() % 2 == 1 || trimmed.ends_with('"') {
+        return text.to_string();
+    }
+    format!("{trimmed}*")
 }
 
 #[cfg(test)]
@@ -318,6 +342,70 @@ mod tests {
             rows[0].get("logical_path").unwrap().as_str().unwrap(),
             "/catalog/scripts/a.py"
         );
+    }
+
+    #[test]
+    fn auto_prefix_last_term_appends_star_to_bare_trailing_word() {
+        assert_eq!(super::auto_prefix_last_term("consol"), "consol*");
+        assert_eq!(super::auto_prefix_last_term("foo bar"), "foo bar*");
+    }
+
+    #[test]
+    fn auto_prefix_last_term_leaves_explicit_prefix_and_quotes_alone() {
+        assert_eq!(super::auto_prefix_last_term("consol*"), "consol*");
+        assert_eq!(super::auto_prefix_last_term("\"consol\""), "\"consol\"");
+        assert_eq!(super::auto_prefix_last_term("foo \"bar\""), "foo \"bar\"");
+        // Still-open quote (mid-typing a phrase): leave as-is too.
+        assert_eq!(super::auto_prefix_last_term("foo \"bar"), "foo \"bar");
+    }
+
+    #[test]
+    fn auto_prefix_last_term_handles_empty_and_whitespace() {
+        assert_eq!(super::auto_prefix_last_term(""), "");
+        assert_eq!(super::auto_prefix_last_term("foo "), "foo*");
+    }
+
+    #[test]
+    fn partial_word_now_matches_via_live_auto_prefix() {
+        // "alph" alone would find nothing under plain FTS5 token matching;
+        // the search worker auto-prefixes the trailing term so live typing
+        // finds /catalog/scripts/a.py (content "needle alpha") before the
+        // word is finished.
+        let db = make_db();
+        let worker = SearchWorker::new(db.path()).unwrap();
+        worker
+            .send(SearchRequest {
+                id: 9,
+                query: "alph".to_string(),
+                limit: 200,
+            })
+            .unwrap();
+        let response = recv_response(&worker);
+        assert_eq!(response.id, 9);
+        let rows = response.result.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].get("logical_path").unwrap().as_str().unwrap(),
+            "/catalog/scripts/a.py"
+        );
+    }
+
+    #[test]
+    fn explicitly_quoted_partial_term_is_not_auto_prefixed() {
+        // Quoting is the escape hatch for "match exactly"; a quoted partial
+        // word must not match, unlike the bare equivalent above.
+        let db = make_db();
+        let worker = SearchWorker::new(db.path()).unwrap();
+        worker
+            .send(SearchRequest {
+                id: 10,
+                query: "\"alph\"".to_string(),
+                limit: 200,
+            })
+            .unwrap();
+        let response = recv_response(&worker);
+        assert_eq!(response.id, 10);
+        assert_eq!(response.result.unwrap().len(), 0);
     }
 
     #[test]
