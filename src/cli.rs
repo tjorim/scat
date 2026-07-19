@@ -224,6 +224,10 @@ pub(crate) enum CatalogCommands {
         /// Skip the up-to-date check and always perform a full rebuild.
         #[arg(long)]
         force: bool,
+        /// Always rebuild from scratch instead of seeding from the previous
+        /// completed build (which skips re-extracting unchanged scripts).
+        #[arg(long)]
+        no_incremental: bool,
         /// Emit machine-readable JSON output.
         #[arg(long)]
         json: bool,

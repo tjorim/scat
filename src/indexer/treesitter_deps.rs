@@ -13,6 +13,36 @@ use crate::indexer::ast_deps::{
 // Extractor
 // ---------------------------------------------------------------------------
 
+/// Upper bound on how long a single-file parse may run before it is aborted.
+/// Pathological input (e.g. a minified/generated file with extreme nesting)
+/// can otherwise take a very long time to parse, stalling the whole indexing
+/// run on one file; on timeout the parse returns `None` and callers fall
+/// back to the regex-based extractor.
+const PARSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Parse `source` with a wall-clock deadline, returning `None` if parsing
+/// doesn't finish in time (in addition to the normal `None`-on-no-language
+/// case). Shared by both the bash extraction below and the Python AST
+/// extractor in [`crate::indexer::ast_deps`].
+pub(crate) fn parse_with_timeout(
+    parser: &mut tree_sitter::Parser,
+    source: &[u8],
+) -> Option<tree_sitter::Tree> {
+    let deadline = std::time::Instant::now() + PARSE_TIMEOUT;
+    let mut progress = |_state: &tree_sitter::ParseState| {
+        if std::time::Instant::now() >= deadline {
+            std::ops::ControlFlow::Break(())
+        } else {
+            std::ops::ControlFlow::Continue(())
+        }
+    };
+    parser.parse_with_options(
+        &mut |i, _| source.get(i..).unwrap_or_default(),
+        None,
+        Some(tree_sitter::ParseOptions::new().progress_callback(&mut progress)),
+    )
+}
+
 /// Tree-sitter based dependency extractor for Python and shell.
 pub struct TreeSitterExtractor {
     python_parser: tree_sitter::Parser,
@@ -50,7 +80,7 @@ impl TreeSitterExtractor {
             "python" => extract_python_deps(&mut self.python_parser, source).imports,
             "bash" => {
                 let source_bytes = source.as_bytes();
-                match self.bash_parser.parse(source_bytes, None) {
+                match parse_with_timeout(&mut self.bash_parser, source_bytes) {
                     Some(tree) => {
                         let mut deps = Vec::new();
                         let mut seen = HashSet::new();
@@ -78,51 +108,82 @@ impl TreeSitterExtractor {
 // Bash tree walker
 // ---------------------------------------------------------------------------
 
+// Iterative (not recursive) pre-order walk, navigated entirely through
+// TreeCursor with no Vec allocation at all: a deeply nested script (many
+// levels of `if`/command substitution) could otherwise overflow the native
+// stack if this recursed, since recursion depth would track AST nesting
+// depth directly; and `Node::child(i)`/collecting children into a Vec per
+// node costs allocation + O(log i) lookups that a plain cursor walk
+// (goto_first_child / goto_next_sibling / goto_parent) avoids entirely.
 fn extract_bash_commands(
-    node: Node<'_>,
+    root: Node<'_>,
     source: &[u8],
     deps: &mut Vec<String>,
     seen: &mut HashSet<String>,
 ) {
-    if node.kind() == "command" {
-        let mut cmd_name = String::new();
-        let mut args: Vec<String> = Vec::new();
+    let mut cursor = root.walk();
+    let mut reached_root = false;
+    while !reached_root {
+        let node = cursor.node();
 
-        for i in 0..node.child_count() {
-            let child = match node.child(i as u32) {
-                Some(c) => c,
-                None => continue,
-            };
-            match child.kind() {
-                "command_name" => {
-                    cmd_name = child.utf8_text(source).unwrap_or("").trim().to_string();
+        if node.kind() == "command" {
+            let mut cmd_name = String::new();
+            // Only the first "word"-like child is ever used (matches a
+            // `source <first-arg>` invocation), so track just that instead
+            // of collecting every argument into a Vec.
+            let mut first_arg: Option<String> = None;
+
+            let mut child_cursor = node.walk();
+            for child in node.children(&mut child_cursor) {
+                match child.kind() {
+                    "command_name" => {
+                        cmd_name = child.utf8_text(source).unwrap_or("").trim().to_string();
+                    }
+                    "word" | "string" | "raw_string" | "ansi_c_string" | "concatenation"
+                        if first_arg.is_none() =>
+                    {
+                        let raw = child.utf8_text(source).unwrap_or("").trim();
+                        first_arg = Some(raw.trim_matches('"').trim_matches('\'').to_string());
+                    }
+                    _ => {}
                 }
-                "word" | "string" | "raw_string" | "ansi_c_string" | "concatenation" => {
-                    let raw = child.utf8_text(source).unwrap_or("").trim();
-                    let stripped = raw.trim_matches('"').trim_matches('\'');
-                    args.push(stripped.to_string());
+            }
+
+            if (cmd_name == "source" || cmd_name == ".")
+                && let Some(path) = first_arg
+            {
+                // Only bare-name sources (`source common.sh`) are emitted as import
+                // edges, resolved by basename. Path-like sources
+                // (`source ../lib/common.sh`) are left to the reference extractor so
+                // they resolve correctly by path instead of via a spurious module
+                // suffix (the file extension) — see extract_reference_paths.
+                if !path.is_empty() && !path.contains('/') && !seen.contains(&path) {
+                    seen.insert(path.clone());
+                    deps.push(path);
                 }
-                _ => {}
             }
         }
 
-        if (cmd_name == "source" || cmd_name == ".") && !args.is_empty() {
-            let path = &args[0];
-            // Only bare-name sources (`source common.sh`) are emitted as import
-            // edges, resolved by basename. Path-like sources
-            // (`source ../lib/common.sh`) are left to the reference extractor so
-            // they resolve correctly by path instead of via a spurious module
-            // suffix (the file extension) — see extract_reference_paths.
-            if !path.is_empty() && !path.contains('/') && !seen.contains(path) {
-                seen.insert(path.clone());
-                deps.push(path.clone());
-            }
+        if cursor.goto_first_child() {
+            continue;
         }
-    }
-
-    for i in 0..node.child_count() {
-        if let Some(child) = node.child(i as u32) {
-            extract_bash_commands(child, source, deps, seen);
+        if cursor.goto_next_sibling() {
+            continue;
+        }
+        // Backtrack until a next sibling is found, or we've climbed back to
+        // (not past) `root` — bounds the walk to root's own subtree.
+        loop {
+            if !cursor.goto_parent() {
+                reached_root = true;
+                break;
+            }
+            if cursor.node() == root {
+                reached_root = true;
+                break;
+            }
+            if cursor.goto_next_sibling() {
+                break;
+            }
         }
     }
 }
@@ -315,5 +376,24 @@ mod tests {
         // .bashrc / .shell must not be captured as .bash / .sh.
         let refs = extract_reference_paths("source ~/.bashrc\nedit /etc/foo.shell");
         assert!(refs.is_empty(), "unexpected: {refs:?}");
+    }
+
+    #[test]
+    fn extract_deps_handles_deeply_nested_script_without_stack_overflow() {
+        // The command walk used to be recursive, tracking AST nesting depth
+        // 1:1 with native stack depth. A deeply nested script would overflow
+        // the stack; the iterative walk must handle this without crashing.
+        let mut source = String::new();
+        for _ in 0..20_000 {
+            source.push_str("if true; then ");
+        }
+        source.push_str("source lib.sh");
+        for _ in 0..20_000 {
+            source.push_str("; fi");
+        }
+
+        let mut ext = TreeSitterExtractor::new().unwrap();
+        let deps = ext.extract_deps(&source, "shell");
+        assert!(deps.contains(&"lib.sh".to_string()));
     }
 }

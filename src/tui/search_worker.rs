@@ -161,7 +161,8 @@ fn run_search(api: &SearchApi, query: &str, limit: usize) -> Result<Vec<JsonRow>
             .context("failed to list scripts");
     }
     if crate::commands::query_uses_fts(text) {
-        api.search_with_filters(text, limit, lang, owner, tag)
+        let live = auto_prefix_last_term(text);
+        api.search_with_filters(&live, limit, lang, owner, tag)
             .context("failed to run search query")
     } else {
         // The INSTR path search matches `/`-separated logical paths, so
@@ -170,6 +171,33 @@ fn run_search(api: &SearchApi, query: &str, limit: usize) -> Result<Vec<JsonRow>
         api.search_by_path_with_filters(&path_query, limit, lang, owner, tag)
             .context("failed to run path search query")
     }
+}
+
+/// Append `*` to the last (still-being-typed) term so live search matches
+/// as a prefix instead of requiring the complete word.
+///
+/// FTS5 has no implicit prefix matching, so a search-as-you-type box would
+/// otherwise only ever match once the current word is typed out in full.
+/// This applies uniformly whether the trailing term is a bare word or a
+/// quoted phrase — quoting controls word-adjacency semantics (keeping
+/// `"foo bar"` together as a phrase instead of two independent terms), not
+/// exact-vs-prefix matching, so it stays "starts with what's typed so far"
+/// either way.
+///
+/// An odd number of `"` means the last term is a quoted phrase still being
+/// typed (unterminated); the quote is closed here so the `*` lands after it
+/// as FTS5's phrase-prefix operator, rather than becoming a literal `*`
+/// inside the (still-open) quoted content. The term is left untouched if it
+/// already ends in `*`.
+fn auto_prefix_last_term(text: &str) -> String {
+    let trimmed = text.trim_end();
+    if trimmed.is_empty() || trimmed.ends_with('*') {
+        return text.to_string();
+    }
+    if trimmed.matches('"').count() % 2 == 1 {
+        return format!("{trimmed}\"*");
+    }
+    format!("{trimmed}*")
 }
 
 #[cfg(test)]
@@ -321,9 +349,100 @@ mod tests {
     }
 
     #[test]
-    fn invalid_query_returns_error_string() {
+    fn auto_prefix_last_term_appends_star_to_bare_trailing_word() {
+        assert_eq!(super::auto_prefix_last_term("consol"), "consol*");
+        assert_eq!(super::auto_prefix_last_term("foo bar"), "foo bar*");
+    }
+
+    #[test]
+    fn auto_prefix_last_term_leaves_already_starred_terms_alone() {
+        assert_eq!(super::auto_prefix_last_term("consol*"), "consol*");
+        assert_eq!(super::auto_prefix_last_term("\"consol\"*"), "\"consol\"*");
+    }
+
+    #[test]
+    fn auto_prefix_last_term_star_prefixes_quoted_phrases_too() {
+        // A closed quote gets `*` appended after it (FTS5 phrase-prefix
+        // syntax): quoting controls word-adjacency, not exact-vs-prefix.
+        assert_eq!(super::auto_prefix_last_term("\"consol\""), "\"consol\"*");
+        assert_eq!(super::auto_prefix_last_term("foo \"bar\""), "foo \"bar\"*");
+        // A still-open quote is auto-closed so the `*` lands outside it as
+        // the prefix operator, instead of becoming literal quoted content.
+        assert_eq!(super::auto_prefix_last_term("foo \"bar"), "foo \"bar\"*");
+    }
+
+    #[test]
+    fn auto_prefix_last_term_handles_empty_and_whitespace() {
+        assert_eq!(super::auto_prefix_last_term(""), "");
+        assert_eq!(super::auto_prefix_last_term("foo "), "foo*");
+    }
+
+    #[test]
+    fn partial_word_now_matches_via_live_auto_prefix() {
+        // "alph" alone would find nothing under plain FTS5 token matching;
+        // the search worker auto-prefixes the trailing term so live typing
+        // finds /catalog/scripts/a.py (content "needle alpha") before the
+        // word is finished.
         let db = make_db();
         let worker = SearchWorker::new(db.path()).unwrap();
+        worker
+            .send(SearchRequest {
+                id: 9,
+                query: "alph".to_string(),
+                limit: 200,
+            })
+            .unwrap();
+        let response = recv_response(&worker);
+        assert_eq!(response.id, 9);
+        let rows = response.result.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].get("logical_path").unwrap().as_str().unwrap(),
+            "/catalog/scripts/a.py"
+        );
+    }
+
+    #[test]
+    fn quoted_partial_term_is_also_prefix_matched() {
+        // Quoting doesn't opt out of live prefix matching, whether it's
+        // closed or the user hasn't typed the closing `"` yet — both should
+        // still find a.py's "needle alpha" content by "starts with alph".
+        let db = make_db();
+        let worker = SearchWorker::new(db.path()).unwrap();
+
+        worker
+            .send(SearchRequest {
+                id: 10,
+                query: "\"alph\"".to_string(),
+                limit: 200,
+            })
+            .unwrap();
+        let response = recv_response(&worker);
+        assert_eq!(response.id, 10);
+        assert_eq!(response.result.unwrap().len(), 1);
+
+        worker
+            .send(SearchRequest {
+                id: 11,
+                query: "\"alph".to_string(),
+                limit: 200,
+            })
+            .unwrap();
+        let response = recv_response(&worker);
+        assert_eq!(response.id, 11);
+        assert_eq!(response.result.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn previously_invalid_fts_syntax_no_longer_errors() {
+        // These used to reach FTS5's MATCH raw and error (unbalanced quote,
+        // hyphen-as-column-exclusion-operator); the query is now sanitized
+        // before it reaches FTS5, so both come back Ok — a lone `"` finds
+        // nothing meaningful to search for, while the hyphenated query
+        // matches literally instead of erroring out.
+        let db = make_db();
+        let worker = SearchWorker::new(db.path()).unwrap();
+
         worker
             .send(SearchRequest {
                 id: 7,
@@ -333,6 +452,22 @@ mod tests {
             .unwrap();
         let response = recv_response(&worker);
         assert_eq!(response.id, 7);
-        assert!(response.result.is_err());
+        assert_eq!(response.result.unwrap().len(), 0);
+
+        worker
+            .send(SearchRequest {
+                id: 8,
+                query: "needle-alpha".to_string(),
+                limit: 200,
+            })
+            .unwrap();
+        let response = recv_response(&worker);
+        assert_eq!(response.id, 8);
+        let rows = response.result.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].get("logical_path").unwrap().as_str().unwrap(),
+            "/catalog/scripts/a.py"
+        );
     }
 }

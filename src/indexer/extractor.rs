@@ -138,7 +138,6 @@ pub struct ExtractedMetadata {
 pub fn extract(record: &ScriptRecord) -> ExtractedMetadata {
     let mut meta = ExtractedMetadata::default();
     let content = read_file(Path::new(&record.physical_path));
-    meta.content = content.clone();
 
     parse_header_comments(&content, &mut meta);
 
@@ -146,6 +145,7 @@ pub fn extract(record: &ScriptRecord) -> ExtractedMetadata {
         parse_python_docstring(&content, &mut meta);
     }
 
+    meta.content = content;
     meta
 }
 

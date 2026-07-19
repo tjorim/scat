@@ -996,7 +996,8 @@ fn max_mtime_returns_none_for_no_files() {
     let dir = tempfile::TempDir::new().unwrap();
     // Empty directory — no files present at all.
     let mtime =
-        scat_core::indexer::scanner::max_mtime_in_roots(&[dir.path().to_path_buf()], &[]).unwrap();
+        scat_core::indexer::scanner::max_mtime_in_roots(&[dir.path().to_path_buf()], &[], &[])
+            .unwrap();
     assert!(mtime.is_none());
 }
 
@@ -1004,9 +1005,10 @@ fn max_mtime_returns_none_for_no_files() {
 fn max_mtime_returns_positive_epoch_for_existing_files() {
     let dir = tempfile::TempDir::new().unwrap();
     std::fs::write(dir.path().join("a.py"), "# hello").unwrap();
-    let mtime = scat_core::indexer::scanner::max_mtime_in_roots(&[dir.path().to_path_buf()], &[])
-        .unwrap()
-        .expect("expected Some mtime");
+    let mtime =
+        scat_core::indexer::scanner::max_mtime_in_roots(&[dir.path().to_path_buf()], &[], &[])
+            .unwrap()
+            .expect("expected Some mtime");
     assert!(mtime > 1_000_000_000.0, "mtime should be a plausible epoch");
 }
 
@@ -1024,7 +1026,7 @@ fn build_timestamp_after_index_is_newer_than_pre_build_mtime() {
 
     // Capture max mtime BEFORE the build.
     let pre_build_mtime =
-        scat_core::indexer::scanner::max_mtime_in_roots(std::slice::from_ref(&root), &[])
+        scat_core::indexer::scanner::max_mtime_in_roots(std::slice::from_ref(&root), &[], &[])
             .unwrap()
             .expect("expected Some mtime");
 
