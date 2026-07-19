@@ -374,6 +374,18 @@ pub(super) fn populate(
         phase = "resolve_dependencies",
         "starting dependency resolution phase"
     );
+    // Reset before resolving rather than trusting rows carried over from an
+    // incremental seed: the resolve passes below only touch `IS NULL` rows,
+    // and the module map is rebuilt from the full current script set every
+    // build, so a dependency resolved in a previous build could otherwise
+    // keep pointing at a stale target after a new/changed script starts
+    // shadowing it. A no-op for fresh builds, where every row already
+    // starts NULL.
+    tx.execute("UPDATE dependencies SET resolved_script_id = NULL", [])?;
+    tx.execute(
+        "UPDATE function_calls SET resolved_target_script_id = NULL",
+        [],
+    )?;
     let module_map = super::resolve::build_module_map(&tx)?;
     super::resolve::resolve_dependency_targets(&tx, &module_map)?;
     super::resolve::resolve_reference_targets(&tx)?;
@@ -439,14 +451,14 @@ fn checkpoint_for_resume(
 /// phase 2 skips re-extracting them.
 ///
 /// Scripts present in the database but no longer found by this scan are
-/// deleted outright. This is what makes the rest of the pipeline safe to
-/// leave untouched: the schema's `ON DELETE SET NULL` foreign keys
+/// deleted outright; the schema's `ON DELETE SET NULL` foreign keys
 /// (`dependencies.resolved_script_id`, `function_calls.resolved_target_*`)
-/// null out anything that referenced a deleted script, and phase 3's
-/// resolve passes already only touch rows where the resolved id `IS NULL`
-/// — so a dependency that pointed at a script which just got replaced (new
-/// content, new row, new id) or removed correctly gets re-resolved against
-/// current state without any incremental-specific resolve logic.
+/// null out anything that referenced a deleted script. Everything else
+/// carried over from the seed — including already-resolved edges between
+/// two unchanged scripts — gets re-resolved from scratch too, since phase 3
+/// resets every resolved id to `NULL` before its resolve passes run; a
+/// dependency can't be left pointing at a stale target after a new or
+/// changed script starts shadowing it.
 fn seed_from_existing_database(
     tx: &Connection,
     records: &[ScriptRecord],

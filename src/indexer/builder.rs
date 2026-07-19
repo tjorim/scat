@@ -726,6 +726,80 @@ mod tests {
     }
 
     #[test]
+    fn incremental_reresolves_dependency_pointing_at_stale_target() {
+        // Simulates what an incremental seed can carry over: a dependency
+        // row whose `resolved_script_id` no longer matches what fresh
+        // resolution would produce (e.g. a shadowing script changed which
+        // target is correct). Since `caller.py` itself doesn't change
+        // between builds, phase 2 reuses it without touching its
+        // dependency row — so if the resolve phase only re-resolved rows
+        // that were already NULL, this stale value would never be
+        // corrected. It must be reset and re-resolved on every build.
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().join("scripts");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("caller.py"), "import helper\n").unwrap();
+        std::fs::write(root.join("helper.py"), "pass\n").unwrap();
+        let db_path = dir.path().join("scripts.sqlite");
+
+        build_index(std::slice::from_ref(&root), &db_path, incremental_opts(0)).unwrap();
+
+        let (caller_id, helper_id) = {
+            let conn = Connection::open(&db_path).unwrap();
+            let caller_id: i64 = conn
+                .query_row(
+                    "SELECT id FROM scripts WHERE logical_path LIKE '%caller.py'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let helper_id: i64 = conn
+                .query_row(
+                    "SELECT id FROM scripts WHERE logical_path LIKE '%helper.py'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            // Corrupt the resolution to point at the wrong (but
+            // FK-valid) target, standing in for a stale value carried
+            // over by an incremental seed.
+            conn.execute(
+                "UPDATE dependencies SET resolved_script_id = ?1 WHERE script_id = ?2",
+                rusqlite::params![caller_id, caller_id],
+            )
+            .unwrap();
+            (caller_id, helper_id)
+        };
+
+        // Nothing on disk changed, so caller.py is reused rather than
+        // re-extracted — its dependency row is only touched by the
+        // resolve phase, not by extraction.
+        let second =
+            build_index(std::slice::from_ref(&root), &db_path, incremental_opts(0)).unwrap();
+        assert_eq!(
+            second.scripts_reused, 2,
+            "both scripts are unchanged on disk"
+        );
+
+        let conn =
+            Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .unwrap();
+        let resolved: Option<i64> = conn
+            .query_row(
+                "SELECT resolved_script_id FROM dependencies WHERE script_id = ?1",
+                [caller_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            resolved,
+            Some(helper_id),
+            "the resolve phase must reset and re-resolve every dependency, \
+             not just ones already NULL, so a stale carried-over target gets corrected"
+        );
+    }
+
+    #[test]
     fn seed_from_previous_build_copies_data_via_backup_api() {
         let dir = tempfile::TempDir::new().unwrap();
         let root = dir.path().join("scripts");
