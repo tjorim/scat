@@ -321,9 +321,15 @@ mod tests {
     }
 
     #[test]
-    fn invalid_query_returns_error_string() {
+    fn previously_invalid_fts_syntax_no_longer_errors() {
+        // These used to reach FTS5's MATCH raw and error (unbalanced quote,
+        // hyphen-as-column-exclusion-operator); the query is now sanitized
+        // before it reaches FTS5, so both come back Ok — a lone `"` finds
+        // nothing meaningful to search for, while the hyphenated query
+        // matches literally instead of erroring out.
         let db = make_db();
         let worker = SearchWorker::new(db.path()).unwrap();
+
         worker
             .send(SearchRequest {
                 id: 7,
@@ -333,6 +339,22 @@ mod tests {
             .unwrap();
         let response = recv_response(&worker);
         assert_eq!(response.id, 7);
-        assert!(response.result.is_err());
+        assert_eq!(response.result.unwrap().len(), 0);
+
+        worker
+            .send(SearchRequest {
+                id: 8,
+                query: "needle-alpha".to_string(),
+                limit: 200,
+            })
+            .unwrap();
+        let response = recv_response(&worker);
+        assert_eq!(response.id, 8);
+        let rows = response.result.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].get("logical_path").unwrap().as_str().unwrap(),
+            "/catalog/scripts/a.py"
+        );
     }
 }

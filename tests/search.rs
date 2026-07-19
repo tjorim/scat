@@ -134,6 +134,50 @@ fn search_returns_ranked_results() {
 }
 
 #[test]
+fn search_handles_fts5_operator_characters_without_erroring() {
+    // These characters are meaningful FTS5 query syntax (`-` is a column
+    // exclusion operator, `"` opens a phrase, `(` groups, `AND` is a boolean
+    // keyword) and previously reached `MATCH` unescaped, erroring on
+    // anything but the plainest queries. search_with_filters now sanitizes
+    // the query first, so all of these succeed — some finding the script
+    // they describe, others (a lone quote, a bare boolean keyword with no
+    // matching content) just finding nothing.
+    let (api, _f) = make_api();
+    insert(
+        &api,
+        "/catalog/scripts/nightly-backup.sh",
+        "nightly backup job",
+        "shell",
+        "alice",
+        "",
+    );
+
+    let hyphenated = api
+        .search_with_filters("nightly-backup", 10, None, None, None)
+        .unwrap();
+    assert_eq!(hyphenated.len(), 1);
+    assert_eq!(
+        hyphenated[0]["logical_path"].as_str().unwrap(),
+        "/catalog/scripts/nightly-backup.sh"
+    );
+
+    assert!(
+        api.search_with_filters("\"", 10, None, None, None)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        api.search_with_filters("(nightly)", 10, None, None, None)
+            .is_ok()
+    );
+    assert!(api.search_with_filters("AND", 10, None, None, None).is_ok());
+    assert!(
+        api.search_with_filters("*nightly", 10, None, None, None)
+            .is_ok()
+    );
+}
+
+#[test]
 fn search_language_filter() {
     let (api, _f) = make_api();
     insert(

@@ -356,7 +356,95 @@ pub fn apply_bulk_build_pragmas(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Rewrite a free-text search query into an FTS5 MATCH expression that can
+/// never produce a syntax error, regardless of what the user typed.
+///
+/// FTS5's query grammar treats `"` (phrase), `-`/`:`/`(`/`)`/`*`/`^` and the
+/// barewords `AND`/`OR`/`NOT`/`NEAR` as operators. Passed straight through to
+/// `MATCH`, an unbalanced quote, a hyphenated word, or a reference to a
+/// nonexistent column name (`foo:bar`) all raise a hard error — for example
+/// a plain search for `nightly-backup` (with no `.` or `/` to route it to
+/// path search instead) would otherwise fail outright.
+///
+/// Every term — whether or not the user quoted it themselves — is
+/// re-emitted here as an explicit, escaped phrase, so none of that syntax is
+/// ever interpreted as an operator. One consequence: the AND/OR/NOT/NEAR
+/// boolean query language becomes unreachable from free-text search, which
+/// is the right tradeoff for a "search for this script" tool rather than a
+/// query console — a user typing `helm and kubectl` almost certainly wants
+/// scripts mentioning both words literally, not a boolean filter. A
+/// trailing `*` — bare (`foo*`) or on a user-quoted phrase (`"foo bar"*`) —
+/// is preserved as FTS5's prefix-match operator, since `MATCH '"foo"*'` is
+/// valid syntax and prefix search is worth keeping. Terms separated by
+/// whitespace combine with FTS5's implicit AND, same as the original
+/// unsanitized query would have.
+///
+/// Returns an empty string when there are no real search terms left (the
+/// input was empty, whitespace-only, or e.g. a lone unterminated `"`) —
+/// `MATCH ''` is itself a syntax error, so callers must check for this and
+/// skip the FTS query entirely rather than pass an empty string through.
+pub fn sanitize_fts_query(input: &str) -> String {
+    let chars: Vec<char> = input.chars().collect();
+    let n = chars.len();
+    let mut i = 0;
+    let mut terms: Vec<String> = Vec::new();
+
+    while i < n {
+        while i < n && chars[i].is_whitespace() {
+            i += 1;
+        }
+        if i >= n {
+            break;
+        }
+
+        let (content, prefix): (String, bool) = if chars[i] == '"' {
+            i += 1;
+            let start = i;
+            while i < n && chars[i] != '"' {
+                i += 1;
+            }
+            let content: String = chars[start..i].iter().collect();
+            if i < n {
+                i += 1; // consume the closing quote
+            }
+            let prefix = i < n && chars[i] == '*';
+            if prefix {
+                i += 1;
+            }
+            (content, prefix)
+        } else {
+            let start = i;
+            while i < n && !chars[i].is_whitespace() && chars[i] != '"' {
+                i += 1;
+            }
+            let word = &chars[start..i];
+            if word.len() > 1 && *word.last().unwrap() == '*' {
+                (word[..word.len() - 1].iter().collect(), true)
+            } else {
+                (word.iter().collect(), false)
+            }
+        };
+
+        if content.trim().is_empty() {
+            continue;
+        }
+
+        let escaped = content.replace('"', "\"\"");
+        let mut term = format!("\"{escaped}\"");
+        if prefix {
+            term.push('*');
+        }
+        terms.push(term);
+    }
+
+    terms.join(" ")
+}
+
 /// Run a full-text search with optional language, owner, and tag filters.
+///
+/// `query` is rewritten through [`sanitize_fts_query`] before being matched,
+/// so it can contain any text — including FTS5 operator characters — without
+/// risk of a syntax error.
 ///
 /// Filters are applied in SQLite before `LIMIT` so callers receive up to
 /// `limit` rows that match all requested criteria.
@@ -368,8 +456,16 @@ pub fn fts_query_filtered(
     owner: Option<&str>,
     tag: Option<&str>,
 ) -> Result<Vec<JsonRow>> {
+    let sanitized = sanitize_fts_query(query);
+    if sanitized.is_empty() {
+        // No real search terms after sanitizing — `MATCH ''` is itself a
+        // syntax error, and there's nothing meaningful to search for anyway.
+        return Ok(vec![]);
+    }
+
     debug!(
         query = %query,
+        sanitized = %sanitized,
         limit,
         language = ?language,
         owner = ?owner,
@@ -386,7 +482,7 @@ pub fn fts_query_filtered(
         ",
     );
     let lim = limit as i64;
-    let mut params = vec![SqlValue::Text(query.to_string())];
+    let mut params = vec![SqlValue::Text(sanitized)];
 
     append_script_filters(&mut sql, &mut params, Some("s."), language, owner, tag);
     sql.push_str(" ORDER BY bm25(script_fts) LIMIT ?");
@@ -537,5 +633,113 @@ mod tests {
                 SqlValue::Text("deploy".to_string()),
             ]
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // sanitize_fts_query
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sanitize_quotes_plain_words_preserving_implicit_and() {
+        assert_eq!(sanitize_fts_query("foo"), "\"foo\"");
+        assert_eq!(sanitize_fts_query("foo bar"), "\"foo\" \"bar\"");
+        assert_eq!(sanitize_fts_query("  foo   bar  "), "\"foo\" \"bar\"");
+    }
+
+    #[test]
+    fn sanitize_neutralises_operator_characters() {
+        // Hyphen: FTS5 treats it as a column-exclusion operator and errors
+        // ("no such column: bar") on `foo-bar` unquoted.
+        assert_eq!(sanitize_fts_query("nightly-backup"), "\"nightly-backup\"");
+        // Colon: a valid-looking-but-wrong column filter errors too.
+        assert_eq!(sanitize_fts_query("owner:bob"), "\"owner:bob\"");
+        // Parens and boolean keywords are neutralised to literal text.
+        assert_eq!(sanitize_fts_query("(foo)"), "\"(foo)\"");
+        assert_eq!(sanitize_fts_query("AND"), "\"AND\"");
+        assert_eq!(sanitize_fts_query("foo AND bar"), "\"foo\" \"AND\" \"bar\"");
+    }
+
+    #[test]
+    fn sanitize_preserves_prefix_search() {
+        assert_eq!(sanitize_fts_query("check*"), "\"check\"*");
+        assert_eq!(sanitize_fts_query("\"check mc\"*"), "\"check mc\"*");
+        // A bare lone `*` has nothing to strip a prefix from; keep it as a
+        // harmless literal rather than emitting an empty term.
+        assert_eq!(sanitize_fts_query("*"), "\"*\"");
+        // Leading `*` is not an FTS5 operator position and is treated as
+        // ordinary (if unmatchable-as-a-prefix) literal text, not an error.
+        assert_eq!(sanitize_fts_query("*foo"), "\"*foo\"");
+    }
+
+    #[test]
+    fn sanitize_preserves_user_supplied_phrases() {
+        assert_eq!(sanitize_fts_query("\"foo bar\""), "\"foo bar\"");
+        assert_eq!(sanitize_fts_query("\"foo bar\" baz"), "\"foo bar\" \"baz\"");
+    }
+
+    #[test]
+    fn sanitize_treats_a_stray_mid_word_quote_as_a_hard_delimiter() {
+        // Both the bare-word and phrase readers stop exactly at a `"`, so a
+        // quote can never survive into a single term's content — a `"`
+        // appearing mid-word just ends that word and starts a new (here,
+        // empty and dropped) phrase. The result is still always valid,
+        // non-erroring FTS5 syntax, just as two implicit-AND terms rather
+        // than one term with an embedded quote.
+        assert_eq!(sanitize_fts_query("foo\"bar"), "\"foo\" \"bar\"");
+    }
+
+    #[test]
+    fn sanitize_handles_unbalanced_and_empty_input_without_panicking() {
+        assert_eq!(sanitize_fts_query("\""), "");
+        assert_eq!(sanitize_fts_query("\"\""), "");
+        assert_eq!(sanitize_fts_query(""), "");
+        assert_eq!(sanitize_fts_query("   "), "");
+        assert_eq!(sanitize_fts_query("\"unterminated"), "\"unterminated\"");
+    }
+
+    #[test]
+    fn sanitize_handles_multibyte_input_without_panicking() {
+        // Regression guard: an earlier char-indexing approach that sliced by
+        // byte offset instead of char offset could panic on non-ASCII input.
+        assert_eq!(sanitize_fts_query("café"), "\"café\"");
+        assert_eq!(sanitize_fts_query("日本語*"), "\"日本語\"*");
+    }
+
+    // -----------------------------------------------------------------------
+    // fts_query_filtered: end-to-end, previously-erroring inputs
+    // -----------------------------------------------------------------------
+
+    fn make_fts_test_db() -> (Connection, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let conn = create_db(&dir.path().join("t.sqlite")).unwrap();
+        conn.execute(
+            "INSERT INTO scripts (logical_path, language, content, owner, purpose)
+             VALUES ('/catalog/scripts/nightly-backup.sh', 'shell', 'nightly backup job', 'alice', '')",
+            [],
+        )
+        .unwrap();
+        (conn, dir)
+    }
+
+    #[test]
+    fn fts_query_filtered_no_longer_errors_on_hyphenated_query() {
+        let (conn, _dir) = make_fts_test_db();
+        let rows = fts_query_filtered(&conn, "nightly-backup", 10, None, None, None).unwrap();
+        assert_eq!(rows.len(), 1);
+    }
+
+    #[test]
+    fn fts_query_filtered_returns_empty_instead_of_erroring_on_lone_quote() {
+        let (conn, _dir) = make_fts_test_db();
+        let rows = fts_query_filtered(&conn, "\"", 10, None, None, None).unwrap();
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn fts_query_filtered_no_longer_errors_on_leading_asterisk_or_bare_boolean_keyword() {
+        let (conn, _dir) = make_fts_test_db();
+        assert!(fts_query_filtered(&conn, "*nightly", 10, None, None, None).is_ok());
+        assert!(fts_query_filtered(&conn, "AND", 10, None, None, None).is_ok());
+        assert!(fts_query_filtered(&conn, "(nightly)", 10, None, None, None).is_ok());
     }
 }
