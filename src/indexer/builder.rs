@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use indicatif::{ProgressBar, ProgressStyle};
 use rusqlite::Connection;
 use tempfile::NamedTempFile;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::core::db::create_db;
 use crate::core::vc::{VcConfig, load_vc_config};
@@ -171,15 +171,21 @@ pub fn build_index(
     // eligible when the previous build's schema matches exactly — a version
     // bump means the stored rows may not match the current column set, so
     // this always falls back to a full rebuild rather than risk seeding from
-    // incompatible data. `validate` also has the side effect of fully
-    // checkpointing `db_path`'s WAL (SQLite checkpoints on last-connection
-    // close), which is what makes a raw file copy of it safe.
+    // incompatible data.
+    //
+    // Deliberately does *not* run a `PRAGMA integrity_check` on db_path here:
+    // it was already validated at the end of whatever build produced it, a
+    // full check is slow on a large catalog (defeating the point of doing
+    // this incrementally), and `seed_from_previous_build` below falls back to
+    // a full rebuild on its own if db_path turns out to be unreadable. A
+    // build's own output is still always integrity-checked (see `validate`
+    // below) before it's ever swapped in as the live database, regardless of
+    // whether this path was taken.
     let incremental_seed = resume_checkpoint.is_none()
         && !opts.dry_run
         && !opts.no_incremental
         && db_path.exists()
-        && crate::core::db::schema_version_of(db_path) == Some(crate::core::db::SCHEMA_VERSION)
-        && validate(db_path).is_ok();
+        && crate::core::db::schema_version_of(db_path) == Some(crate::core::db::SCHEMA_VERSION);
 
     let mut result = IndexResult {
         scripts_indexed: 0,
@@ -213,22 +219,28 @@ pub fn build_index(
             path = %tmp_path.display(),
             "starting create_db phase"
         );
-        let mut conn = if resume_checkpoint.is_some() {
+        let (mut conn, incremental) = if resume_checkpoint.is_some() {
             // Open the existing WIP database for appending.
-            Connection::open(&tmp_path)?
+            (Connection::open(&tmp_path)?, false)
         } else if incremental_seed {
-            // A plain byte copy is safe here specifically because `validate`
-            // above just forced db_path's WAL to fully checkpoint into the
-            // main file (see the incremental_seed comment) — there's nothing
-            // left in a `-wal` sidecar that a raw file copy would miss.
-            std::fs::copy(db_path, &tmp_path)?;
-            let conn = Connection::open(&tmp_path)?;
-            // Idempotent; cheap safety net against schema drift even though
-            // schema_version already matched.
-            conn.execute_batch(crate::core::db::DDL)?;
-            conn
+            match seed_from_previous_build(db_path, &tmp_path) {
+                Ok(conn) => (conn, true),
+                Err(e) => {
+                    // db_path turned out to be unreadable/corrupt, or the
+                    // backup step otherwise failed — fall back to a full
+                    // rebuild rather than fail the whole run over it. This
+                    // is also why `incremental_seed` above doesn't itself
+                    // integrity-check db_path: this is the fallback for
+                    // exactly that case.
+                    warn!(
+                        error = %e,
+                        "failed to seed incremental build from previous database, falling back to a full rebuild"
+                    );
+                    (create_db(&tmp_path)?, false)
+                }
+            }
         } else {
-            create_db(&tmp_path)?
+            (create_db(&tmp_path)?, false)
         };
         // Relax durability and grow caches for this throwaway build
         // connection — see `apply_bulk_build_pragmas` doc comment. Applied
@@ -236,11 +248,7 @@ pub fn build_index(
         // persisted in the database file, so a resumed build's freshly
         // reopened connection needs them too.
         crate::core::db::apply_bulk_build_pragmas(&conn)?;
-        debug!(
-            phase = "populate",
-            incremental = incremental_seed,
-            "starting populate phase"
-        );
+        debug!(phase = "populate", incremental, "starting populate phase");
         populate(
             &mut conn,
             scan_roots,
@@ -254,7 +262,7 @@ pub fn build_index(
             &shutdown,
             use_progress,
             opts.dry_run,
-            incremental_seed,
+            incremental,
         )
     })();
 
@@ -347,6 +355,36 @@ fn stderr_is_tty() -> bool {
     // Use the `std::io::IsTerminal` trait (stable since Rust 1.70).
     use std::io::IsTerminal;
     std::io::stderr().is_terminal()
+}
+
+// ---------------------------------------------------------------------------
+// Incremental seeding
+// ---------------------------------------------------------------------------
+
+/// Seed `tmp_path` with a consistent snapshot of `db_path` via SQLite's
+/// Online Backup API, then reapply the schema DDL (idempotent; a cheap
+/// safety net against schema drift even though the caller already checked
+/// `schema_version`).
+///
+/// The backup API — not a raw `std::fs::copy` — is what makes this safe
+/// under concurrent access: `db_path` is the live catalog, and a reader (an
+/// open TUI session, a search query) could be holding a connection to it at
+/// the moment a build starts. SQLite only checkpoints a WAL-mode database's
+/// write-ahead log into the main file when the *last* connection to it
+/// closes; with a concurrent reader still open, a plain file copy of just
+/// the main file could silently miss whatever's still sitting in the `-wal`
+/// sidecar. The backup API instead reads through SQLite's own consistent
+/// snapshot mechanism and copies page-by-page, so it's correct regardless of
+/// what's checkpointed versus what's still in the WAL.
+fn seed_from_previous_build(db_path: &Path, tmp_path: &Path) -> Result<Connection> {
+    let src = Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let mut dst = Connection::open(tmp_path)?;
+    {
+        let backup = rusqlite::backup::Backup::new(&src, &mut dst)?;
+        backup.step(-1)?;
+    }
+    dst.execute_batch(crate::core::db::DDL)?;
+    Ok(dst)
 }
 
 // ---------------------------------------------------------------------------
@@ -684,6 +722,42 @@ mod tests {
         assert_eq!(
             second.scripts_reused, 0,
             "a schema_version mismatch must fall back to a full rebuild"
+        );
+    }
+
+    #[test]
+    fn seed_from_previous_build_copies_data_via_backup_api() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().join("scripts");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("a.py"), "pass\n").unwrap();
+        let db_path = dir.path().join("scripts.sqlite");
+
+        build_index(std::slice::from_ref(&root), &db_path, incremental_opts(0)).unwrap();
+
+        let tmp_path = dir.path().join("seeded.sqlite");
+        let conn = seed_from_previous_build(&db_path, &tmp_path).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM scripts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "backup-seeded database should contain the previous build's rows"
+        );
+    }
+
+    #[test]
+    fn seed_from_previous_build_errors_on_invalid_source_instead_of_panicking() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let bogus_src = dir.path().join("not-a-database.sqlite");
+        std::fs::write(&bogus_src, b"not a sqlite file at all").unwrap();
+        let tmp_path = dir.path().join("seeded.sqlite");
+
+        let err = seed_from_previous_build(&bogus_src, &tmp_path);
+        assert!(
+            err.is_err(),
+            "an unreadable/corrupt source must return an error, not panic, \
+             so build_index's caller can fall back to a full rebuild"
         );
     }
 }

@@ -25,6 +25,17 @@ use super::IndexResult;
 /// while still giving each batch enough work to spread well across cores.
 const EXTRACT_BATCH_SIZE: usize = 200;
 
+thread_local! {
+    // One TreeSitterExtractor per worker thread, reused across every batch
+    // for that thread's lifetime rather than rebuilt (two fresh parsers)
+    // for every batch — `map_init` would otherwise re-run its init closure
+    // once per batch per thread, since cached `map_init` state doesn't
+    // persist across separate `.par_iter()` calls.
+    static EXTRACTOR: std::cell::RefCell<TreeSitterExtractor> = std::cell::RefCell::new(
+        TreeSitterExtractor::new().expect("failed to initialize tree-sitter extractor")
+    );
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn populate(
     conn: &mut Connection,
@@ -184,18 +195,16 @@ pub(super) fn populate(
 
         // The CPU-bound work — file read, tree-sitter parse, regex
         // extraction — is independent per script, so it runs in parallel
-        // across a worker pool (one TreeSitterExtractor per worker, lazily
-        // created). SQLite writes stay strictly sequential on `tx` below,
-        // since SQLite only supports one writer at a time.
+        // across a worker pool (one TreeSitterExtractor per worker thread,
+        // cached in EXTRACTOR). SQLite writes stay strictly sequential on
+        // `tx` below, since SQLite only supports one writer at a time.
         let extracted: Vec<(&ScriptRecord, Result<ExtractedRow<'_>>)> = batch
             .par_iter()
-            .map_init(
-                || TreeSitterExtractor::new().expect("failed to initialize tree-sitter extractor"),
-                |worker_ts, record| {
-                    let record: &ScriptRecord = record;
-                    (record, extract_for_insert(record, worker_ts))
-                },
-            )
+            .map(|record| {
+                let record: &ScriptRecord = record;
+                let row = EXTRACTOR.with(|ts| extract_for_insert(record, &mut ts.borrow_mut()));
+                (record, row)
+            })
             .collect();
 
         for (record, extraction) in extracted {

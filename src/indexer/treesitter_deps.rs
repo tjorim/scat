@@ -108,13 +108,13 @@ impl TreeSitterExtractor {
 // Bash tree walker
 // ---------------------------------------------------------------------------
 
-// Iterative (not recursive) pre-order walk: a deeply nested script (many
+// Iterative (not recursive) pre-order walk, navigated entirely through
+// TreeCursor with no Vec allocation at all: a deeply nested script (many
 // levels of `if`/command substitution) could otherwise overflow the native
-// stack, since recursion depth would track AST nesting depth directly.
-// Children are read once per node through a TreeCursor: `Node::child(i)`
-// costs O(log i), which degrades on very wide nodes (e.g. a flat script
-// whose root has one child per statement); cursor iteration is O(1) per
-// sibling.
+// stack if this recursed, since recursion depth would track AST nesting
+// depth directly; and `Node::child(i)`/collecting children into a Vec per
+// node costs allocation + O(log i) lookups that a plain cursor walk
+// (goto_first_child / goto_next_sibling / goto_parent) avoids entirely.
 fn extract_bash_commands(
     root: Node<'_>,
     source: &[u8],
@@ -122,46 +122,69 @@ fn extract_bash_commands(
     seen: &mut HashSet<String>,
 ) {
     let mut cursor = root.walk();
-    let mut stack = vec![root];
-    while let Some(node) = stack.pop() {
-        let children: Vec<Node<'_>> = node.children(&mut cursor).collect();
+    let mut reached_root = false;
+    while !reached_root {
+        let node = cursor.node();
 
         if node.kind() == "command" {
             let mut cmd_name = String::new();
-            let mut args: Vec<String> = Vec::new();
+            // Only the first "word"-like child is ever used (matches a
+            // `source <first-arg>` invocation), so track just that instead
+            // of collecting every argument into a Vec.
+            let mut first_arg: Option<String> = None;
 
-            for child in &children {
+            let mut child_cursor = node.walk();
+            for child in node.children(&mut child_cursor) {
                 match child.kind() {
                     "command_name" => {
                         cmd_name = child.utf8_text(source).unwrap_or("").trim().to_string();
                     }
-                    "word" | "string" | "raw_string" | "ansi_c_string" | "concatenation" => {
+                    "word" | "string" | "raw_string" | "ansi_c_string" | "concatenation"
+                        if first_arg.is_none() =>
+                    {
                         let raw = child.utf8_text(source).unwrap_or("").trim();
-                        let stripped = raw.trim_matches('"').trim_matches('\'');
-                        args.push(stripped.to_string());
+                        first_arg = Some(raw.trim_matches('"').trim_matches('\'').to_string());
                     }
                     _ => {}
                 }
             }
 
-            if (cmd_name == "source" || cmd_name == ".") && !args.is_empty() {
-                let path = &args[0];
+            if (cmd_name == "source" || cmd_name == ".")
+                && let Some(path) = first_arg
+            {
                 // Only bare-name sources (`source common.sh`) are emitted as import
                 // edges, resolved by basename. Path-like sources
                 // (`source ../lib/common.sh`) are left to the reference extractor so
                 // they resolve correctly by path instead of via a spurious module
                 // suffix (the file extension) — see extract_reference_paths.
-                if !path.is_empty() && !path.contains('/') && !seen.contains(path) {
+                if !path.is_empty() && !path.contains('/') && !seen.contains(&path) {
                     seen.insert(path.clone());
-                    deps.push(path.clone());
+                    deps.push(path);
                 }
             }
         }
 
-        // Push children in reverse so they're popped left-to-right, matching
-        // the original recursive pre-order traversal (and so `deps` order is
-        // unchanged).
-        stack.extend(children.into_iter().rev());
+        if cursor.goto_first_child() {
+            continue;
+        }
+        if cursor.goto_next_sibling() {
+            continue;
+        }
+        // Backtrack until a next sibling is found, or we've climbed back to
+        // (not past) `root` — bounds the walk to root's own subtree.
+        loop {
+            if !cursor.goto_parent() {
+                reached_root = true;
+                break;
+            }
+            if cursor.node() == root {
+                reached_root = true;
+                break;
+            }
+            if cursor.goto_next_sibling() {
+                break;
+            }
+        }
     }
 }
 
