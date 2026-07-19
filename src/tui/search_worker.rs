@@ -178,20 +178,24 @@ fn run_search(api: &SearchApi, query: &str, limit: usize) -> Result<Vec<JsonRow>
 ///
 /// FTS5 has no implicit prefix matching, so a search-as-you-type box would
 /// otherwise only ever match once the current word is typed out in full.
-/// The last term is left untouched if it already ends in `*`, or if the
-/// user explicitly closed it in double quotes — quoting is the existing
-/// escape hatch for "match this exactly," and extending it with a `*`
-/// would silently break that guarantee.
+/// This applies uniformly whether the trailing term is a bare word or a
+/// quoted phrase — quoting controls word-adjacency semantics (keeping
+/// `"foo bar"` together as a phrase instead of two independent terms), not
+/// exact-vs-prefix matching, so it stays "starts with what's typed so far"
+/// either way.
+///
+/// An odd number of `"` means the last term is a quoted phrase still being
+/// typed (unterminated); the quote is closed here so the `*` lands after it
+/// as FTS5's phrase-prefix operator, rather than becoming a literal `*`
+/// inside the (still-open) quoted content. The term is left untouched if it
+/// already ends in `*`.
 fn auto_prefix_last_term(text: &str) -> String {
     let trimmed = text.trim_end();
     if trimmed.is_empty() || trimmed.ends_with('*') {
         return text.to_string();
     }
-    // An odd number of quotes means the last term is an unterminated quoted
-    // phrase (still being typed); an even count ending in `"` means it was
-    // explicitly closed. Either way, leave quoting semantics alone.
-    if trimmed.matches('"').count() % 2 == 1 || trimmed.ends_with('"') {
-        return text.to_string();
+    if trimmed.matches('"').count() % 2 == 1 {
+        return format!("{trimmed}\"*");
     }
     format!("{trimmed}*")
 }
@@ -351,12 +355,20 @@ mod tests {
     }
 
     #[test]
-    fn auto_prefix_last_term_leaves_explicit_prefix_and_quotes_alone() {
+    fn auto_prefix_last_term_leaves_already_starred_terms_alone() {
         assert_eq!(super::auto_prefix_last_term("consol*"), "consol*");
-        assert_eq!(super::auto_prefix_last_term("\"consol\""), "\"consol\"");
-        assert_eq!(super::auto_prefix_last_term("foo \"bar\""), "foo \"bar\"");
-        // Still-open quote (mid-typing a phrase): leave as-is too.
-        assert_eq!(super::auto_prefix_last_term("foo \"bar"), "foo \"bar");
+        assert_eq!(super::auto_prefix_last_term("\"consol\"*"), "\"consol\"*");
+    }
+
+    #[test]
+    fn auto_prefix_last_term_star_prefixes_quoted_phrases_too() {
+        // A closed quote gets `*` appended after it (FTS5 phrase-prefix
+        // syntax): quoting controls word-adjacency, not exact-vs-prefix.
+        assert_eq!(super::auto_prefix_last_term("\"consol\""), "\"consol\"*");
+        assert_eq!(super::auto_prefix_last_term("foo \"bar\""), "foo \"bar\"*");
+        // A still-open quote is auto-closed so the `*` lands outside it as
+        // the prefix operator, instead of becoming literal quoted content.
+        assert_eq!(super::auto_prefix_last_term("foo \"bar"), "foo \"bar\"*");
     }
 
     #[test]
@@ -391,11 +403,13 @@ mod tests {
     }
 
     #[test]
-    fn explicitly_quoted_partial_term_is_not_auto_prefixed() {
-        // Quoting is the escape hatch for "match exactly"; a quoted partial
-        // word must not match, unlike the bare equivalent above.
+    fn quoted_partial_term_is_also_prefix_matched() {
+        // Quoting doesn't opt out of live prefix matching, whether it's
+        // closed or the user hasn't typed the closing `"` yet — both should
+        // still find a.py's "needle alpha" content by "starts with alph".
         let db = make_db();
         let worker = SearchWorker::new(db.path()).unwrap();
+
         worker
             .send(SearchRequest {
                 id: 10,
@@ -405,7 +419,18 @@ mod tests {
             .unwrap();
         let response = recv_response(&worker);
         assert_eq!(response.id, 10);
-        assert_eq!(response.result.unwrap().len(), 0);
+        assert_eq!(response.result.unwrap().len(), 1);
+
+        worker
+            .send(SearchRequest {
+                id: 11,
+                query: "\"alph".to_string(),
+                limit: 200,
+            })
+            .unwrap();
+        let response = recv_response(&worker);
+        assert_eq!(response.id, 11);
+        assert_eq!(response.result.unwrap().len(), 1);
     }
 
     #[test]
