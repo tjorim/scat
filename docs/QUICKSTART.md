@@ -98,6 +98,7 @@ scat tui
 | `g` / `G` | Jump to top/bottom of results; `g` resets detail-pane scroll |
 | `Home` / `End` | Jump within results; `Home` resets focused detail-pane scroll |
 | `d` (in detail view) | Open a script diff against the most-recent checkout |
+| `Tab` (in detail view) | Browse the script's folder: `j`/`k` highlight a sibling, `Enter` jumps to it, `[` goes up a level, `Backspace` returns |
 | `Ctrl+L` | Focus the results list |
 | `Escape` / `Backspace` | Return from script detail view, or quit from browse mode |
 | `q` | Quit |
@@ -105,7 +106,7 @@ scat tui
 The details pane shows metadata, checkout state, source preview, and related
 or dependent scripts for the highlighted result. Press `Enter` on a result to
 open a full script detail view with tags, entry points, warnings, checkout
-rows, dependency summary, and source preview.
+rows, dependency summary, folder siblings, and source preview.
 
 ---
 
@@ -121,6 +122,15 @@ scat show /catalog/scripts/patch_check.py
 
 ```bash
 scat show /catalog/scripts/patch_check.py --output json
+```
+
+### Folder context
+
+Opt-in fields list the script's parent directory and the other scripts
+indexed in the same folder:
+
+```bash
+scat show /catalog/scripts/patch_check.py --fields folder,siblings
 ```
 
 ---
