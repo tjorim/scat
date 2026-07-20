@@ -15,9 +15,18 @@ use crate::error::Result;
 
 static CHECKOUT_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
 
+/// Matches vc version filenames: `<script>_<timestamp>[_<user>]`.
+///
+/// Observed timestamp precision varies (`YYYYMMDD`, `YYYYMMDD_HHMM`, or
+/// `YYYYMMDD_HHMMSS`), and only DEVELOP checkouts carry the trailing user —
+/// ARCHIVE entries and checked-in working-directory copies are
+/// `<script>_<timestamp>` with no user suffix. See docs/VC_CONTRACT.md.
 fn checkout_re() -> &'static regex::Regex {
     CHECKOUT_RE.get_or_init(|| {
-        regex::Regex::new(r"^(?P<script>.+)_(?P<timestamp>\d{8}_\d{4})_(?P<user>[^\\/]+)$").unwrap()
+        regex::Regex::new(
+            r"^(?P<script>.+)_(?P<timestamp>\d{8}(?:_\d{4}(?:\d{2})?)?)(?:_(?P<user>[^\\/]+))?$",
+        )
+        .unwrap()
     })
 }
 
@@ -131,9 +140,11 @@ pub struct CheckoutRecord {
     pub revision_type: String,
     /// OS flavor folder where the checkout was found.
     pub os_flavor: String,
-    /// Checkout owner parsed from filename.
+    /// Checkout owner parsed from filename. Empty for ARCHIVE entries and
+    /// other revision filenames that carry no user suffix.
     pub user: String,
-    /// Checkout timestamp parsed from filename (`YYYYMMDD_HHMM`).
+    /// Checkout timestamp parsed from filename (`YYYYMMDD`, `YYYYMMDD_HHMM`,
+    /// or `YYYYMMDD_HHMMSS`, as observed on disk).
     pub timestamp: String,
     /// Age in seconds based on file mtime, if available.
     pub age_seconds: Option<f64>,
@@ -255,13 +266,22 @@ pub fn load_vc_config(config_file: Option<&Path>) -> Result<VcConfig> {
 // Checkout scanning
 // ---------------------------------------------------------------------------
 
-/// Parse checkout filename into `(script, timestamp, user)`.
+/// Parse a vc version filename into `(script, timestamp, user)`.
+///
+/// Accepts every observed on-disk form: a DEVELOP checkout
+/// (`update_board_firmware.sh_20260720_103044_titd`), an ARCHIVE or
+/// checked-in working-directory copy without a user suffix
+/// (`update_board_firmware.sh_20240921_135312`), and timestamps at date,
+/// minute, or second precision. `user` is an empty string when the filename
+/// has no user suffix.
 pub fn parse_checkout_filename(filename: &str) -> Option<(String, String, String)> {
     let m = checkout_re().captures(filename)?;
     Some((
         m["script"].to_string(),
         m["timestamp"].to_string(),
-        m["user"].to_string(),
+        m.name("user")
+            .map(|u| u.as_str().to_string())
+            .unwrap_or_default(),
     ))
 }
 
@@ -598,10 +618,18 @@ pub fn infer_warnings(conn: &Connection) -> Result<Vec<VcWarning>> {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Parse a revision timestamp at any of the observed precisions: `YYYYMMDD`
+/// (treated as midnight), `YYYYMMDD_HHMM`, or `YYYYMMDD_HHMMSS`.
 fn parse_checkout_timestamp(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
-    chrono::NaiveDateTime::parse_from_str(value, "%Y%m%d_%H%M")
-        .ok()
-        .map(|ndt| ndt.and_utc())
+    let ndt = match value.len() {
+        8 => chrono::NaiveDate::parse_from_str(value, "%Y%m%d")
+            .ok()?
+            .and_hms_opt(0, 0, 0)?,
+        13 => chrono::NaiveDateTime::parse_from_str(value, "%Y%m%d_%H%M").ok()?,
+        15 => chrono::NaiveDateTime::parse_from_str(value, "%Y%m%d_%H%M%S").ok()?,
+        _ => return None,
+    };
+    Some(ndt.and_utc())
 }
 
 fn target_name_matches(logical_path: &str, target: &str) -> bool {
@@ -658,6 +686,73 @@ mod tests {
     fn parse_checkout_filename_invalid() {
         assert!(parse_checkout_filename("nodates").is_none());
         assert!(parse_checkout_filename("foo_baddate_user").is_none());
+        // Timestamp must be the last component (bar the optional user):
+        // an extension after it means this is not a vc version filename.
+        assert!(parse_checkout_filename("data_20240101.csv").is_none());
+    }
+
+    #[test]
+    fn parse_checkout_filename_seconds_precision_with_user() {
+        // Real-world DEVELOP checkout: HHMMSS timestamp plus user.
+        let r = parse_checkout_filename("update_board_firmware.sh_20260720_103044_titd");
+        assert_eq!(
+            r,
+            Some((
+                "update_board_firmware.sh".into(),
+                "20260720_103044".into(),
+                "titd".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_checkout_filename_without_user() {
+        // ARCHIVE entries and checked-in working-dir copies have no user suffix.
+        let r = parse_checkout_filename("update_board_firmware.sh_20240921_135312");
+        assert_eq!(
+            r,
+            Some((
+                "update_board_firmware.sh".into(),
+                "20240921_135312".into(),
+                String::new()
+            ))
+        );
+        let r = parse_checkout_filename("update_board_firmware.sh_20240921_1353");
+        assert_eq!(
+            r,
+            Some((
+                "update_board_firmware.sh".into(),
+                "20240921_1353".into(),
+                String::new()
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_checkout_filename_date_only_timestamp() {
+        let r = parse_checkout_filename("update_board_firmware.sh_20240921");
+        assert_eq!(
+            r,
+            Some((
+                "update_board_firmware.sh".into(),
+                "20240921".into(),
+                String::new()
+            ))
+        );
+        let r = parse_checkout_filename("foo.sh_20240921_titd");
+        assert_eq!(r, Some(("foo.sh".into(), "20240921".into(), "titd".into())));
+    }
+
+    #[test]
+    fn parse_checkout_timestamp_accepts_all_observed_precisions() {
+        let date_only = parse_checkout_timestamp("20240921").unwrap();
+        let minutes = parse_checkout_timestamp("20240921_1353").unwrap();
+        let seconds = parse_checkout_timestamp("20240921_135312").unwrap();
+        assert_eq!(date_only.to_rfc3339(), "2024-09-21T00:00:00+00:00");
+        assert_eq!(minutes.to_rfc3339(), "2024-09-21T13:53:00+00:00");
+        assert_eq!(seconds.to_rfc3339(), "2024-09-21T13:53:12+00:00");
+        assert!(parse_checkout_timestamp("garbage").is_none());
+        assert!(parse_checkout_timestamp("20240921_13").is_none());
     }
 
     #[test]

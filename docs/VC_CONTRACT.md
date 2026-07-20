@@ -94,13 +94,18 @@ myscript.py\_<TIMESTAMP>\_<USER>
 ```
 
 Where:
-- `<TIMESTAMP>` is in `YYYYMMDD_HHMM` format
+- `<TIMESTAMP>` is date-based, at varying precision — observed forms are
+  `YYYYMMDD_HHMMSS` (e.g. `20260720_103044`), `YYYYMMDD_HHMM`, and
+  occasionally date-only `YYYYMMDD`
 - `<USER>` is the username performing the checkout
 
 ### Invariants relied upon
 
 - Checked‑out files exist **only** under DEVELOP
-- Username and timestamp are encoded in the filename
+- Username and timestamp are encoded in DEVELOP filenames; ARCHIVE and
+  working‑directory version filenames encode **only the timestamp**
+- Timestamp precision varies and must be tolerated at date, minute, or
+  second granularity
 - Multiple checkouts of the same script may exist concurrently
 
 ---
@@ -117,8 +122,9 @@ A checkin:
 ### Observable behavior
 
 - The working directory contains:
-  - One symlink (logical script name)
-  - One or more versioned files
+  - One symlink (logical script name, e.g. `myscript.py`)
+  - One or more versioned files named `myscript.py_<TIMESTAMP>` —
+    **no user suffix** (observed retention: the two most recent versions)
 - The symlink points to the latest checked‑in version
 - Older versions are preserved (up to a configured limit)
 
@@ -131,6 +137,9 @@ A checkin:
 - A fixed number of historical versions are retained
 - When the limit is exceeded:
   - The oldest versions are moved to ARCHIVE
+- ARCHIVE entries are named `myscript.py_<TIMESTAMP>` — like
+  working‑directory versions, they carry **no user suffix**
+  (e.g. `update_board_firmware.sh_20240921_135312`)
 - ARCHIVE contents are treated as **immutable**
 
 > The retention count is an implementation detail but appears consistently enforced.
@@ -210,7 +219,8 @@ they are always present or complete.
 This repository **assumes only** the following invariants:
 
 - Checked‑out files live under DEVELOP
-- Filename encodes user and timestamp
+- DEVELOP filenames encode user and timestamp; ARCHIVE and
+  working‑directory version filenames encode timestamp only
 - ARCHIVE is append‑only
 - Symlinks represent the active version
 - No writes are performed by our tooling

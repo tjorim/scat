@@ -155,11 +155,11 @@ with the latest timestamp is used automatically.
 ### Compare against a specific checkout or archive file
 
 ```bash
-# DEVELOP checkout
-scat diff /catalog/foo/bar.py --against /path/to/DEVELOP/LINUX/bar.user.timestamp.py
+# DEVELOP checkout (filename carries timestamp and user)
+scat diff /catalog/foo/bar.py --against /path/to/DEVELOP/bar.py_20240510_103044_alice
 
-# ARCHIVE copy
-scat diff /catalog/foo/bar.py --against /path/to/ARCHIVE/LINUX/bar.20240510.py
+# ARCHIVE copy (filename carries timestamp only)
+scat diff /catalog/foo/bar.py --against /path/to/ARCHIVE/bar.py_20240510_103044
 ```
 
 `--against` points to a **file** on disk, unlike `scat catalog diff --against` which

@@ -409,7 +409,7 @@ fn render_revision_lines(mut revisions: Vec<scat_core::core::db::JsonRow>) -> Ve
                 .and_then(serde_json::Value::as_f64)
                 .map(relative_age);
             let age_suffix = age.map(|value| format!("   ({value})")).unwrap_or_default();
-            format!("  {revision_type:<7} {os:<7} {user:<12} {timestamp:<13}{age_suffix}")
+            format!("  {revision_type:<7} {os:<7} {user:<12} {timestamp:<15}{age_suffix}")
         })
         .collect()
 }
