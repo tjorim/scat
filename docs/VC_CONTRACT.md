@@ -52,20 +52,22 @@ Editing a script happens in DEVELOP, not in place.
 
 ## Base directory layout
 
-vc uses two base directories:
+DEVELOP and ARCHIVE are **per script folder**: every folder containing
+vc‑managed scripts — at any nesting depth — carries its own container
+subdirectories holding that folder's checkouts and archived versions:
 
 ```
 
-\<DEVELOP\_BASE>/
-\<ARCHIVE\_BASE>/
+\<script folder>/
+├── myscript.py            (symlink to the active version)
+├── myscript.py\_<TS>       (recent checked‑in versions, kept for rollback)
+├── DEVELOP/               (this folder's checkouts)
+└── ARCHIVE/               (this folder's older versions)
 
 ```
 
-Within both bases, files are further grouped by **OS flavor** subdirectories. The exact
-folder names are environment‑specific and configured via the vc config file.
-
-> ⚠️ The base paths and OS folder names are environment‑specific and **must be treated
-> as configurable** in consuming tools.
+> ⚠️ The container directory names are environment‑specific and **must be
+> treated as configurable** in consuming tools.
 
 ---
 
@@ -126,6 +128,8 @@ A checkin:
   - One or more versioned files named `myscript.py_<TIMESTAMP>` —
     **no user suffix** (observed retention: the two most recent versions)
 - The symlink points to the latest checked‑in version
+- The previous version is always kept alongside it, so a rollback needs
+  only a symlink re‑point — no ARCHIVE restore
 - Older versions are preserved (up to a configured limit)
 
 ---

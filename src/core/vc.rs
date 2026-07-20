@@ -291,10 +291,12 @@ pub fn parse_checkout_filename(filename: &str) -> Option<(String, String, String
 }
 
 /// Scan DEVELOP and ARCHIVE directories embedded within each scan_root and return
-/// discovered revision records. DEVELOP/ARCHIVE dirs are recognised at the scan_root
-/// level itself and one level deep (immediate subdirectories). Directories reached
-/// via symlinks are deduplicated by their canonicalised real path so that OS-variant
-/// symlinks (e.g. `alt/pse → linux/pse`) are not scanned twice.
+/// discovered revision records. Every script folder carries its own
+/// DEVELOP/ARCHIVE containers, at any nesting depth, so the walk recurses the
+/// whole tree under each scan_root. Directories reached via symlinks are
+/// deduplicated by their canonicalised real path so that OS-variant symlinks
+/// (e.g. `alt/pse → linux/pse`) are not scanned twice, and symlinks resolving
+/// outside all scan_roots are not followed.
 /// The `os_flavor` for each record is derived from the parent directory name of the
 /// scan_root (e.g. `linux` from `/catalog/linux/scripts`).
 pub fn scan_checkouts(config: &VcConfig, logical_prefix: &str) -> Vec<CheckoutRecord> {
@@ -306,6 +308,21 @@ pub fn scan_checkouts(config: &VcConfig, logical_prefix: &str) -> Vec<CheckoutRe
     let mut records = Vec::new();
     let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
 
+    // Bound symlinked-directory traversal to the configured roots, same as
+    // the script scanner: a symlink aliasing another location inside the
+    // roots is followed (and deduplicated below), one escaping to an
+    // unrelated tree is not.
+    let canonical_roots: Vec<PathBuf> = config
+        .scan_roots
+        .iter()
+        .filter_map(|r| std::fs::canonicalize(r).ok())
+        .collect();
+    // Directories already walked, by canonical path — global across
+    // scan_roots so an OS-variant symlink alias (`alt/pse → linux/pse`) is
+    // walked once, under the first scan_root that reaches it (keeping
+    // os_flavor derivation stable).
+    let mut visited: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+
     for scan_root in &config.scan_roots {
         let os_flavor = scan_root
             .parent()
@@ -314,16 +331,38 @@ pub fn scan_checkouts(config: &VcConfig, logical_prefix: &str) -> Vec<CheckoutRe
             .unwrap_or("")
             .to_string();
 
-        // Configured develop/archive dirs at the scan_root level
-        for (dirs, rev_type) in [
-            (config.develop_dirs.as_slice(), REVISION_TYPE_DEVELOP),
-            (config.archive_dirs.as_slice(), REVISION_TYPE_ARCHIVE),
-        ] {
-            for dir_name in dirs {
-                let dir = scan_root.join(dir_name);
-                if dir.is_dir() {
+        let mut queue = std::collections::VecDeque::from([scan_root.clone()]);
+        while let Some(dir) = queue.pop_front() {
+            let Ok(canon) = std::fs::canonicalize(&dir) else {
+                continue;
+            };
+            if !visited.insert(canon) {
+                continue;
+            }
+
+            let mut subdirs: Vec<PathBuf> = std::fs::read_dir(&dir)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.is_dir()) // follows symlinks; bounded + deduped below
+                .collect();
+            subdirs.sort();
+
+            for subdir in subdirs {
+                let name = subdir.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                let rev_type = if config.develop_dirs.iter().any(|d| d == name) {
+                    Some(REVISION_TYPE_DEVELOP)
+                } else if config.archive_dirs.iter().any(|d| d == name) {
+                    Some(REVISION_TYPE_ARCHIVE)
+                } else {
+                    None
+                };
+                if let Some(rev_type) = rev_type {
+                    // A container dir is scanned for revision files but not
+                    // descended into for further containers.
                     scan_revision_dir(
-                        &dir,
+                        &subdir,
                         rev_type,
                         &os_flavor,
                         scan_root,
@@ -332,45 +371,17 @@ pub fn scan_checkouts(config: &VcConfig, logical_prefix: &str) -> Vec<CheckoutRe
                         &mut records,
                         &mut seen,
                     );
-                }
-            }
-        }
-
-        // Configured develop/archive dirs one level deep in immediate subdirectories
-        let checkout_dir_names: std::collections::HashSet<&str> =
-            config.all_checkout_dirs().collect();
-        let mut subdirs: Vec<PathBuf> = std::fs::read_dir(scan_root)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.is_dir()) // follows symlinks; canonicalize+seen dedupes
-            .filter(|p| {
-                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                !checkout_dir_names.contains(name)
-            })
-            .collect();
-        subdirs.sort();
-
-        for subdir in subdirs {
-            for (dirs, rev_type) in [
-                (config.develop_dirs.as_slice(), REVISION_TYPE_DEVELOP),
-                (config.archive_dirs.as_slice(), REVISION_TYPE_ARCHIVE),
-            ] {
-                for dir_name in dirs {
-                    let dir = subdir.join(dir_name);
-                    if dir.is_dir() {
-                        scan_revision_dir(
-                            &dir,
-                            rev_type,
-                            &os_flavor,
-                            scan_root,
-                            logical_prefix,
-                            now,
-                            &mut records,
-                            &mut seen,
-                        );
-                    }
+                } else if subdir.is_symlink()
+                    && !std::fs::canonicalize(&subdir)
+                        .map(|c| canonical_roots.iter().any(|r| c.starts_with(r)))
+                        .unwrap_or(false)
+                {
+                    warn!(
+                        path = %subdir.display(),
+                        "symlinked directory resolves outside configured scan roots, skipping to avoid unbounded traversal"
+                    );
+                } else {
+                    queue.push_back(subdir);
                 }
             }
         }
