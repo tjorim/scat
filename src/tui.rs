@@ -129,6 +129,11 @@ struct TuiApp {
     next_query_id: u64,
     fullscreen: bool,
     tick: u64,
+    /// Set whenever visible state changes; the run loop only repaints when
+    /// this is set (or a spinner is animating), so an idle screen isn't
+    /// redrawn every poll tick — a constant repaint wipes the terminal's
+    /// own mouse text selection.
+    needs_redraw: bool,
     pending_view: Option<viewer::ViewTarget>,
     file_check_worker: FileCheckWorker,
     inflight_filecheck_id: Option<u64>,
@@ -195,6 +200,7 @@ impl TuiApp {
             next_query_id: 0,
             fullscreen: false,
             tick: 0,
+            needs_redraw: true,
             pending_view: None,
             file_check_worker: FileCheckWorker::new()?,
             inflight_filecheck_id: None,
@@ -342,12 +348,16 @@ impl TuiApp {
     fn drain_detail_channel(&mut self) {
         loop {
             match self.detail_worker.try_recv() {
-                Ok(Some(response)) => self.apply_detail_response(response),
+                Ok(Some(response)) => {
+                    self.apply_detail_response(response);
+                    self.needs_redraw = true;
+                }
                 Ok(None) => break,
                 Err(_) => {
                     self.inflight_detail_id = None;
                     self.detail_loading = false;
                     self.error = Some("Detail worker disconnected unexpectedly".to_string());
+                    self.needs_redraw = true;
                     break;
                 }
             }
@@ -813,12 +823,16 @@ impl TuiApp {
     fn drain_diff_channel(&mut self) {
         loop {
             match self.diff_worker.try_recv() {
-                Ok(Some(response)) => self.apply_diff_response(response),
+                Ok(Some(response)) => {
+                    self.apply_diff_response(response);
+                    self.needs_redraw = true;
+                }
                 Ok(None) => break,
                 Err(_) => {
                     self.inflight_diff_id = None;
                     self.detail_diff_loading = false;
                     self.detail_diff_output = "Diff worker disconnected unexpectedly.".to_string();
+                    self.needs_redraw = true;
                     break;
                 }
             }
@@ -837,11 +851,15 @@ impl TuiApp {
     fn drain_folder_channel(&mut self) {
         loop {
             match self.folder_worker.try_recv() {
-                Ok(Some(response)) => self.apply_folder_response(response),
+                Ok(Some(response)) => {
+                    self.apply_folder_response(response);
+                    self.needs_redraw = true;
+                }
                 Ok(None) => break,
                 Err(_) => {
                     self.inflight_folder_id = None;
                     self.error = Some("Folder worker disconnected unexpectedly".to_string());
+                    self.needs_redraw = true;
                     break;
                 }
             }
@@ -1074,11 +1092,15 @@ impl TuiApp {
     fn drain_file_check_channel(&mut self) {
         loop {
             match self.file_check_worker.try_recv() {
-                Ok(Some(response)) => self.apply_file_check_response(response),
+                Ok(Some(response)) => {
+                    self.apply_file_check_response(response);
+                    self.needs_redraw = true;
+                }
                 Ok(None) => break,
                 Err(_) => {
                     self.inflight_filecheck_id = None;
                     self.error = Some("File-check worker disconnected unexpectedly.".to_string());
+                    self.needs_redraw = true;
                     break;
                 }
             }
@@ -1144,6 +1166,15 @@ impl TuiApp {
         };
         apply_scroll_key(scroll, key)
     }
+
+    /// Whether a spinner is currently on screen and needs its frame advanced.
+    /// Only these states animate; when none hold, the screen is static and the
+    /// run loop can leave it untouched (preserving any mouse selection).
+    fn is_animating(&self) -> bool {
+        (self.search_in_flight && self.results.is_empty())
+            || self.detail_loading
+            || self.detail_diff_loading
+    }
 }
 
 pub fn run(db_path: &Path, resolver: PathResolver) -> Result<()> {
@@ -1175,25 +1206,45 @@ pub fn run(db_path: &Path, resolver: PathResolver) -> Result<()> {
         {
             app.last_keystroke_at = None;
             app.dispatch_query()?;
+            app.needs_redraw = true;
         }
         // A view target may be queued synchronously (catalog content) or
         // asynchronously once the file-check worker confirms the live source,
         // so open it from the loop body rather than only after a keystroke.
-        if let Some(target) = app.pending_view.take()
-            && let Err(err) = terminal.open_view(&target)
-        {
-            app.error = Some(format!("Failed to open viewer: {err}"));
-        }
-        terminal.draw(|frame| draw(frame, &mut app))?;
-        app.tick = app.tick.wrapping_add(1);
-        if event::poll(poll_tick)?
-            && let Event::Key(key) = event::read()?
-        {
-            if key.kind != KeyEventKind::Press {
-                continue;
+        // Opening suspends/resumes the terminal (clearing the screen), so a
+        // full repaint is always required afterward.
+        if let Some(target) = app.pending_view.take() {
+            if let Err(err) = terminal.open_view(&target) {
+                app.error = Some(format!("Failed to open viewer: {err}"));
             }
-            if app.handle_key(key)? {
-                break;
+            app.needs_redraw = true;
+        }
+
+        // Advance the spinner only while something is loading; a frozen tick
+        // when idle keeps the buffer identical so no repaint is emitted.
+        if app.is_animating() {
+            app.tick = app.tick.wrapping_add(1);
+            app.needs_redraw = true;
+        }
+
+        if app.needs_redraw {
+            terminal.draw(|frame| draw(frame, &mut app))?;
+            app.needs_redraw = false;
+        }
+
+        if event::poll(poll_tick)? {
+            match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    if app.handle_key(key)? {
+                        break;
+                    }
+                    // A handled keypress may change scroll, selection, or
+                    // mode; repaint once (user-paced, so never a flood).
+                    app.needs_redraw = true;
+                }
+                // ratatui resizes its buffers on the next draw; force one.
+                Event::Resize(_, _) => app.needs_redraw = true,
+                _ => {}
             }
         }
     }
@@ -1983,6 +2034,47 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
+    }
+
+    #[test]
+    fn is_animating_only_while_a_spinner_is_on_screen() {
+        let db = super::make_test_db();
+        let mut app = make_app(db.path());
+
+        // Fresh app dispatches the initial query, so a search is in flight
+        // with no results yet — the "Searching…" spinner animates.
+        assert!(app.is_animating());
+
+        // Once results and the detail load settle, nothing animates and the
+        // run loop can leave the screen (and any selection) untouched.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while app.search_in_flight {
+            app.apply_results().unwrap();
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for search worker"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        drain_until_detail_loaded(&mut app);
+        assert!(!app.results.is_empty());
+        assert!(!app.is_animating());
+
+        // A detail load in progress animates its "Loading…" spinners.
+        app.detail_loading = true;
+        assert!(app.is_animating());
+        app.detail_loading = false;
+
+        // A diff load animates the diff view spinner.
+        app.detail_diff_loading = true;
+        assert!(app.is_animating());
+        app.detail_diff_loading = false;
+
+        // An in-flight search with results already shown has no visible
+        // spinner, so it must not animate.
+        app.search_in_flight = true;
+        assert!(!app.results.is_empty());
+        assert!(!app.is_animating());
     }
 
     #[test]
