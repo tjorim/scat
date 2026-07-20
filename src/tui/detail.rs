@@ -62,20 +62,26 @@ pub(super) fn detail_lines(app: &TuiApp) -> Vec<Line<'static>> {
         lines.push(Line::from(""));
         lines.push(section("Folder"));
         lines.push(field_line("Directory", parent_dir.clone()));
-        if app.siblings.is_empty() {
-            lines.push(Line::from("  (no other scripts in this folder)"));
+        if app.sibling_dirs.is_empty() && app.siblings.is_empty() {
+            lines.push(Line::from("  (no other entries in this folder)"));
         } else {
-            for (idx, sibling) in app.siblings.iter().enumerate() {
+            let marker = |idx: usize| {
+                if app.folder_focused && idx == app.siblings_selected {
+                    "> "
+                } else {
+                    "  "
+                }
+            };
+            for (idx, dir_name) in app.sibling_dirs.iter().enumerate() {
+                lines.push(Line::from(format!("{}- {dir_name}/", marker(idx))));
+            }
+            for (offset, sibling) in app.siblings.iter().enumerate() {
                 let sibling_path = ScriptView::new(sibling).logical_path();
                 let name = sibling_path
                     .rsplit_once('/')
                     .map_or(sibling_path, |(_, name)| name);
-                let marker = if app.folder_focused && idx == app.siblings_selected {
-                    "> "
-                } else {
-                    "  "
-                };
-                lines.push(Line::from(format!("{marker}- {name}")));
+                let idx = app.sibling_dirs.len() + offset;
+                lines.push(Line::from(format!("{}- {name}", marker(idx))));
             }
         }
         lines.push(folder_hint_line(app.folder_focused, parent_dir == "/"));

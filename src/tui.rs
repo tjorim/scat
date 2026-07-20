@@ -33,7 +33,7 @@ use self::detail_worker::{
 };
 use self::diff_worker::{DiffRequest, DiffResponse, DiffWorker};
 use self::file_check_worker::{FileCheckRequest, FileCheckResponse, FileCheckWorker};
-use self::folder_worker::{FolderRequest, FolderResponse, FolderWorker};
+use self::folder_worker::{FolderListing, FolderRequest, FolderResponse, FolderWorker};
 use self::render::draw;
 use self::search_worker::{SearchRequest, SearchWorker};
 
@@ -89,6 +89,9 @@ struct TuiApp {
     dep_backstack: Vec<String>,
     checkouts: Vec<JsonRow>,
     siblings: Vec<JsonRow>,
+    /// Immediate subdirectory names of the folder shown in the Folder
+    /// section, listed before `siblings` in the browse list.
+    sibling_dirs: Vec<String>,
     /// Directory currently shown in the Folder section, when it differs from
     /// the selected script's own parent (set by "go up one folder level").
     /// `None` means "derive from the selected script's `parent_dir`".
@@ -161,6 +164,7 @@ impl TuiApp {
             dep_backstack: Vec::new(),
             checkouts: Vec::new(),
             siblings: Vec::new(),
+            sibling_dirs: Vec::new(),
             folder_dir: None,
             folder_focused: false,
             siblings_selected: 0,
@@ -254,6 +258,7 @@ impl TuiApp {
             self.dep_backstack.clear();
             self.checkouts.clear();
             self.siblings.clear();
+            self.sibling_dirs.clear();
             self.folder_dir = None;
             self.folder_focused = false;
             self.siblings_selected = 0;
@@ -301,6 +306,7 @@ impl TuiApp {
             self.function_xref = None;
             self.checkouts.clear();
             self.siblings.clear();
+            self.sibling_dirs.clear();
             self.folder_dir = None;
             self.folder_focused = false;
             self.siblings_selected = 0;
@@ -364,6 +370,7 @@ impl TuiApp {
             function_call_sites,
             checkouts,
             siblings,
+            sibling_dirs,
             cached_preview,
             preview_total_lines,
             error,
@@ -378,6 +385,7 @@ impl TuiApp {
         self.function_xref = None;
         self.checkouts = checkouts;
         self.siblings = siblings;
+        self.sibling_dirs = sibling_dirs;
         self.cached_preview = cached_preview;
         self.preview_total_lines = preview_total_lines;
         if error.is_some() {
@@ -714,7 +722,7 @@ impl TuiApp {
                 ..
             } => {
                 self.siblings_selected =
-                    move_selection(self.siblings_selected, self.siblings.len(), -1);
+                    move_selection(self.siblings_selected, self.folder_entry_count(), -1);
             }
             KeyEvent {
                 code: KeyCode::Down,
@@ -725,13 +733,13 @@ impl TuiApp {
                 ..
             } => {
                 self.siblings_selected =
-                    move_selection(self.siblings_selected, self.siblings.len(), 1);
+                    move_selection(self.siblings_selected, self.folder_entry_count(), 1);
             }
             KeyEvent {
                 code: KeyCode::Enter,
                 ..
             } => {
-                self.open_selected_sibling()?;
+                self.open_selected_folder_entry()?;
             }
             KeyEvent {
                 code: KeyCode::Char('['),
@@ -846,10 +854,11 @@ impl TuiApp {
         }
         self.inflight_folder_id = None;
         match response.result {
-            Ok(entries) => {
+            Ok(FolderListing { dirs, scripts }) => {
                 self.error = None;
                 self.folder_dir = Some(response.dir);
-                self.siblings = entries;
+                self.sibling_dirs = dirs;
+                self.siblings = scripts;
                 self.siblings_selected = 0;
             }
             Err(err) => self.error = Some(err),
@@ -892,12 +901,31 @@ impl TuiApp {
         self.dispatch_folder_request(up_dir)
     }
 
-    /// Jump the detail view to the currently highlighted sibling, pushing the
-    /// current script onto the folder backstack so it can be revisited.
-    fn open_selected_sibling(&mut self) -> Result<()> {
+    /// Total entries in the Folder browse list: subdirectories first, then
+    /// sibling scripts, sharing one selection index.
+    fn folder_entry_count(&self) -> usize {
+        self.sibling_dirs.len() + self.siblings.len()
+    }
+
+    /// Open the currently highlighted Folder entry: descend into it when it
+    /// is a subdirectory, otherwise jump the detail view to the sibling
+    /// script (pushing the current script onto the folder backstack so it
+    /// can be revisited).
+    fn open_selected_folder_entry(&mut self) -> Result<()> {
+        let idx = self.siblings_selected;
+        if let Some(name) = self.sibling_dirs.get(idx) {
+            let dir = self.folder_display_dir();
+            let child = if dir == "/" {
+                format!("/{name}")
+            } else {
+                format!("{dir}/{name}")
+            };
+            return self.dispatch_folder_request(child);
+        }
+
         let Some(target) = self
             .siblings
-            .get(self.siblings_selected)
+            .get(idx - self.sibling_dirs.len())
             .map(|row| ScriptView::new(row).logical_path().to_string())
             .filter(|path| !path.is_empty())
         else {
@@ -1381,9 +1409,9 @@ mod tests {
 
     use super::detail::native_path_for_row;
     use super::{
-        DetailPayload, DetailResponse, DetailWorker, DiffWorker, Focus, FolderResponse,
-        FolderWorker, SearchWorker, TuiApp, ViewMode, move_selection, next_focus, previous_focus,
-        scroll_by, search_title, viewer,
+        DetailPayload, DetailResponse, DetailWorker, DiffWorker, Focus, FolderListing,
+        FolderResponse, FolderWorker, SearchWorker, TuiApp, ViewMode, move_selection, next_focus,
+        previous_focus, scroll_by, search_title, viewer,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use scat_core::core::resolve::PathResolver;
@@ -1668,6 +1696,7 @@ mod tests {
                 function_call_sites: std::collections::BTreeMap::new(),
                 checkouts: vec![],
                 siblings: vec![],
+                sibling_dirs: vec![],
                 cached_preview: "x".to_string(),
                 preview_total_lines: 0,
                 error: None,
@@ -1714,6 +1743,7 @@ mod tests {
                     checkout_row("LINUX", "jdoe", "20240102_0900"),
                 ],
                 siblings: vec![],
+                sibling_dirs: vec![],
                 cached_preview: String::new(),
                 preview_total_lines: 0,
                 error: None,
@@ -2105,6 +2135,63 @@ mod tests {
     }
 
     #[test]
+    fn folder_enter_descends_into_selected_subdirectory() {
+        let db = super::make_test_db();
+        let conn = rusqlite::Connection::open(db.path()).unwrap();
+        conn.execute(
+            "INSERT INTO scripts (logical_path, language, content, owner, purpose)
+             VALUES ('/catalog/scripts/jobs/deep.py','python','print(2)\\n','bob','')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let mut app = make_app(db.path());
+        app.results = vec![
+            serde_json::json!({ "logical_path": "/catalog/scripts/a.py" })
+                .as_object()
+                .unwrap()
+                .clone(),
+        ];
+        app.selected = 0;
+        app.load_selected().unwrap();
+        drain_until_detail_loaded(&mut app);
+        // The initial detail load already lists the subdirectory.
+        assert_eq!(app.sibling_dirs, vec!["jobs"]);
+        assert!(app.siblings.is_empty());
+
+        app.mode = ViewMode::Detail;
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        // Selection starts on the "jobs/" directory entry; Enter descends
+        // into it instead of jumping to a script.
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        drain_until_folder_loaded(&mut app, None);
+
+        assert_eq!(app.folder_dir.as_deref(), Some("/catalog/scripts/jobs"));
+        assert!(app.sibling_dirs.is_empty());
+        let paths: Vec<String> = app
+            .siblings
+            .iter()
+            .map(|row| ScriptView::new(row).logical_path().to_string())
+            .collect();
+        assert_eq!(paths, vec!["/catalog/scripts/jobs/deep.py".to_string()]);
+        // Still browsing: descending must not leave folder-browse mode.
+        assert!(app.folder_focused);
+
+        // Enter on the script inside the subfolder jumps the detail view.
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        drain_until_detail_loaded(&mut app);
+        assert_eq!(
+            app.selected_logical_path().as_deref(),
+            Some("/catalog/scripts/jobs/deep.py")
+        );
+        assert!(!app.folder_focused);
+    }
+
+    #[test]
     fn switching_scripts_ignores_a_stale_folder_response() {
         let db = super::make_test_db();
         let conn = rusqlite::Connection::open(db.path()).unwrap();
@@ -2145,7 +2232,10 @@ mod tests {
         app.apply_folder_response(FolderResponse {
             id: stale_id,
             dir: "/catalog".to_string(),
-            result: Ok(vec![]),
+            result: Ok(FolderListing {
+                dirs: vec![],
+                scripts: vec![],
+            }),
         });
         assert_eq!(app.folder_dir, folder_dir_before);
         assert_eq!(app.siblings, siblings_before);

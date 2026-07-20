@@ -404,6 +404,46 @@ impl SearchApi {
         Ok(rows)
     }
 
+    /// Return the names (single path components, no separators) of the
+    /// immediate subdirectories of `dir` that contain at least one indexed
+    /// script, sorted and deduplicated. Directories only exist in the
+    /// catalog as path prefixes, so this derives them from `logical_path`
+    /// rows at least one level deeper than `dir`.
+    pub fn subdirs_of(&self, dir: &str) -> Result<Vec<String>> {
+        if dir.is_empty() {
+            return Ok(vec![]);
+        }
+        let escaped_dir = dir
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let (escaped_prefix, prefix) = if dir == "/" {
+            (escaped_dir, dir.to_string())
+        } else {
+            (format!("{escaped_dir}/"), format!("{dir}/"))
+        };
+        let pattern = format!("{escaped_prefix}%/%");
+        // SQLite substr is 1-indexed and counts characters for text, so the
+        // unescaped prefix's char count locates the first char after it.
+        let start = (prefix.chars().count() + 1) as i64;
+
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT substr(substr(logical_path, ?2), 1,
+                                    instr(substr(logical_path, ?2), '/') - 1) AS name
+             FROM scripts
+             WHERE logical_path LIKE ?1 ESCAPE '\\'
+             ORDER BY name",
+        )?;
+        let rows: Result<Vec<String>> = stmt
+            .query_map(
+                rusqlite::params![SqlValue::Text(pattern), SqlValue::Integer(start)],
+                |row| row.get(0),
+            )?
+            .map(|r| r.map_err(Error::from))
+            .collect();
+        rows
+    }
+
     // ------------------------------------------------------------------
     // Related scripts
     // ------------------------------------------------------------------

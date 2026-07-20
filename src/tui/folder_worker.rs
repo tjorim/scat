@@ -13,11 +13,19 @@ pub struct FolderRequest {
     pub dir: String,
 }
 
+/// A folder listing: immediate subdirectory names plus the scripts directly
+/// in the folder.
+#[derive(Debug)]
+pub struct FolderListing {
+    pub dirs: Vec<String>,
+    pub scripts: Vec<JsonRow>,
+}
+
 #[derive(Debug)]
 pub struct FolderResponse {
     pub id: u64,
     pub dir: String,
-    pub result: std::result::Result<Vec<JsonRow>, String>,
+    pub result: std::result::Result<FolderListing, String>,
 }
 
 pub struct FolderWorker {
@@ -81,6 +89,10 @@ fn worker_loop(
         let result = match &api {
             Ok(api) => api
                 .scripts_in_dir(&request.dir)
+                .and_then(|scripts| {
+                    api.subdirs_of(&request.dir)
+                        .map(|dirs| FolderListing { dirs, scripts })
+                })
                 .map_err(|err| err.to_string()),
             Err(err) => Err(err.clone()),
         };
@@ -118,8 +130,17 @@ mod tests {
     }
 
     #[test]
-    fn folder_request_lists_scripts_in_dir() {
+    fn folder_request_lists_scripts_and_subdirs() {
         let db = super::super::make_test_db();
+        let conn = rusqlite::Connection::open(db.path()).unwrap();
+        conn.execute(
+            "INSERT INTO scripts (logical_path, language, content, owner, purpose)
+             VALUES ('/catalog/scripts/jobs/b.py','python','print(2)','bob','')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
         let worker = FolderWorker::new(db.path()).unwrap();
         worker
             .send(FolderRequest {
@@ -130,10 +151,11 @@ mod tests {
         let response = recv_response(&worker);
         assert_eq!(response.id, 3);
         assert_eq!(response.dir, "/catalog/scripts");
-        let rows = response.result.unwrap();
-        assert_eq!(rows.len(), 1);
+        let listing = response.result.unwrap();
+        assert_eq!(listing.dirs, vec!["jobs"]);
+        assert_eq!(listing.scripts.len(), 1);
         assert_eq!(
-            rows[0]["logical_path"].as_str().unwrap(),
+            listing.scripts[0]["logical_path"].as_str().unwrap(),
             "/catalog/scripts/a.py"
         );
     }
@@ -150,6 +172,8 @@ mod tests {
             .unwrap();
         let response = recv_response(&worker);
         assert_eq!(response.id, 4);
-        assert!(response.result.unwrap().is_empty());
+        let listing = response.result.unwrap();
+        assert!(listing.dirs.is_empty());
+        assert!(listing.scripts.is_empty());
     }
 }

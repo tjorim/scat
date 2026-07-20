@@ -605,6 +605,55 @@ fn scripts_in_dir_empty_for_empty_dir() {
 }
 
 // ---------------------------------------------------------------------------
+// subdirs_of
+// ---------------------------------------------------------------------------
+
+#[test]
+fn subdirs_of_lists_immediate_child_directories_deduped() {
+    let (api, _f) = make_api();
+    insert(&api, "/catalog/scripts/a.py", "", "python", "", "");
+    insert(&api, "/catalog/scripts/jobs/b.py", "", "python", "", "");
+    insert(
+        &api,
+        "/catalog/scripts/jobs/nested/c.py",
+        "",
+        "python",
+        "",
+        "",
+    );
+    insert(&api, "/catalog/scripts/tools/d.py", "", "python", "", "");
+
+    // "jobs" appears once despite two scripts under it, and "nested" is not
+    // an immediate child of /catalog/scripts.
+    assert_eq!(
+        api.subdirs_of("/catalog/scripts").unwrap(),
+        vec!["jobs", "tools"]
+    );
+    assert_eq!(
+        api.subdirs_of("/catalog/scripts/jobs").unwrap(),
+        vec!["nested"]
+    );
+}
+
+#[test]
+fn subdirs_of_root() {
+    let (api, _f) = make_api();
+    insert(&api, "/a.py", "", "python", "", "");
+    insert(&api, "/catalog/scripts/b.py", "", "python", "", "");
+
+    assert_eq!(api.subdirs_of("/").unwrap(), vec!["catalog"]);
+}
+
+#[test]
+fn subdirs_of_empty_cases() {
+    let (api, _f) = make_api();
+    insert(&api, "/catalog/scripts/a.py", "", "python", "", "");
+
+    assert!(api.subdirs_of("").unwrap().is_empty());
+    assert!(api.subdirs_of("/catalog/scripts").unwrap().is_empty());
+}
+
+// ---------------------------------------------------------------------------
 // siblings
 // ---------------------------------------------------------------------------
 

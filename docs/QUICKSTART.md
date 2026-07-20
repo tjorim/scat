@@ -98,7 +98,7 @@ scat tui
 | `g` / `G` | Jump to top/bottom of results; `g` resets detail-pane scroll |
 | `Home` / `End` | Jump within results; `Home` resets focused detail-pane scroll |
 | `d` (in detail view) | Open a script diff against the most-recent checkout |
-| `Tab` (in detail view) | Browse the script's folder: `j`/`k` highlight a sibling, `Enter` jumps to it, `[` goes up a level, `Backspace` returns |
+| `Tab` (in detail view) | Browse the script's folder: `j`/`k` highlight an entry, `Enter` opens a sibling script or descends into a subfolder, `[` goes up a level, `Backspace` returns |
 | `Ctrl+L` | Focus the results list |
 | `Escape` / `Backspace` | Return from script detail view, or quit from browse mode |
 | `q` | Quit |
