@@ -8,7 +8,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 use scat_core::core::script_view::ScriptView;
 use scat_core::core::vc::relative_age;
 
-use super::{Focus, TuiApp, ViewMode, detail};
+use super::{Focus, RegionKind, TuiApp, ViewMode, detail};
 
 const SPINNER_FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
@@ -17,6 +17,9 @@ fn spinner_char(tick: u64) -> char {
 }
 
 pub(super) fn draw(frame: &mut Frame<'_>, app: &mut TuiApp) {
+    // Rebuilt every frame; the mouse handler hit-tests against the panes as
+    // they were last drawn.
+    app.click_regions.clear();
     match app.mode {
         ViewMode::Detail => {
             draw_detail_view(frame, app);
@@ -48,6 +51,11 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut TuiApp) {
     draw_search(frame, app, root[1]);
     draw_body(frame, app, root[2]);
     draw_footer(frame, app, root[3]);
+
+    // Header (borderless) and search box are clickable: copy the path / focus
+    // the search input respectively.
+    app.record_click_area(root[0], RegionKind::Header, 0);
+    app.record_click_area(root[1], RegionKind::Search, 0);
 }
 
 fn draw_browse_fullscreen(frame: &mut Frame<'_>, app: &mut TuiApp) {
@@ -61,13 +69,41 @@ fn draw_browse_fullscreen(frame: &mut Frame<'_>, app: &mut TuiApp) {
         .split(frame.area());
 
     draw_header(frame, app, root[0]);
+    app.record_click_area(root[0], RegionKind::Header, 0);
+    let pane = root[1];
     match app.focus {
-        Focus::Search => draw_search(frame, app, root[1]),
-        Focus::Results => draw_results(frame, app, root[1]),
-        Focus::Preview => draw_preview(frame, app, root[1]),
-        Focus::Deps => draw_deps(frame, app, root[1]),
-        Focus::Functions => draw_functions(frame, app, root[1]),
-        Focus::Revisions => draw_revisions(frame, app, root[1]),
+        Focus::Search => {
+            draw_search(frame, app, pane);
+            app.record_click_area(pane, RegionKind::Search, 0);
+        }
+        Focus::Results => {
+            draw_results(frame, app, pane);
+            app.record_region(pane, RegionKind::Results, app.results_state.offset());
+        }
+        Focus::Preview => {
+            draw_preview(frame, app, pane);
+            app.record_region(pane, RegionKind::Preview, usize::from(app.preview_scroll));
+        }
+        Focus::Deps => {
+            draw_deps(frame, app, pane);
+            app.record_region(pane, RegionKind::Deps, pane_scroll(app.deps_selected, pane));
+        }
+        Focus::Functions => {
+            draw_functions(frame, app, pane);
+            app.record_region(
+                pane,
+                RegionKind::Functions,
+                pane_scroll(app.functions_selected, pane),
+            );
+        }
+        Focus::Revisions => {
+            draw_revisions(frame, app, pane);
+            app.record_region(
+                pane,
+                RegionKind::Revisions,
+                usize::from(app.revisions_scroll),
+            );
+        }
     }
     draw_footer(frame, app, root[2]);
 }
@@ -147,8 +183,20 @@ fn draw_detail_view(frame: &mut Frame<'_>, app: &mut TuiApp) {
             ),
         root[0],
     );
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
+    app.record_region(
+        root[0],
+        RegionKind::DetailBody,
+        usize::from(app.detail_scroll),
+    );
+    let hint = if let Some(flash) = &app.flash {
+        Line::from(Span::styled(
+            flash.clone(),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ))
+    } else {
+        Line::from(vec![
             hint_key("d"),
             Span::raw(" diff  "),
             hint_key("v"),
@@ -157,19 +205,17 @@ fn draw_detail_view(frame: &mut Frame<'_>, app: &mut TuiApp) {
             Span::raw(" view source  "),
             hint_key("Tab"),
             Span::raw(" browse folder  "),
-            hint_key("Esc/Backspace"),
+            hint_key("click Path"),
+            Span::raw(" copy  "),
+            hint_key("Esc"),
             Span::raw(" back  "),
             hint_key("j/k"),
             Span::raw(" scroll  "),
-            hint_key("Ctrl+u/d"),
-            Span::raw(" half-page  "),
-            hint_key("g"),
-            Span::raw(" top  "),
             hint_key("q"),
             Span::raw(" quit"),
-        ])),
-        root[1],
-    );
+        ])
+    };
+    frame.render_widget(Paragraph::new(hint), root[1]);
 }
 
 fn draw_detail_diff_view(frame: &mut Frame<'_>, app: &mut TuiApp) {
@@ -224,6 +270,11 @@ fn draw_detail_diff_view(frame: &mut Frame<'_>, app: &mut TuiApp) {
                     ),
             ),
         root[0],
+    );
+    app.record_region(
+        root[0],
+        RegionKind::DetailDiffBody,
+        usize::from(app.detail_diff_scroll),
     );
     frame.render_widget(
         Paragraph::new(Line::from(vec![
@@ -290,6 +341,39 @@ fn draw_body(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
     draw_deps(frame, app, right[2]);
     draw_functions(frame, app, right[3]);
     draw_revisions(frame, app, right[4]);
+
+    // Record clickable regions (after drawing, so list scroll offsets are
+    // current) for the mouse handler to hit-test against.
+    app.record_region(columns[0], RegionKind::Results, app.results_state.offset());
+    app.record_region(right[0], RegionKind::Metadata, 0);
+    app.record_region(
+        right[1],
+        RegionKind::Preview,
+        usize::from(app.preview_scroll),
+    );
+    app.record_region(
+        right[2],
+        RegionKind::Deps,
+        pane_scroll(app.deps_selected, right[2]),
+    );
+    app.record_region(
+        right[3],
+        RegionKind::Functions,
+        pane_scroll(app.functions_selected, right[3]),
+    );
+    app.record_region(
+        right[4],
+        RegionKind::Revisions,
+        usize::from(app.revisions_scroll),
+    );
+}
+
+/// First visible row index for a selection-scrolled pane, matching the
+/// `scroll_y` computed in [`draw_deps`]/[`draw_functions`]: keep the selected
+/// entry within the pane's inner (bordered) height.
+fn pane_scroll(selected: usize, outer: Rect) -> usize {
+    let visible_rows = usize::from(outer.height.saturating_sub(2));
+    selected.saturating_sub(visible_rows.saturating_sub(1))
 }
 
 fn draw_results(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
@@ -741,6 +825,20 @@ fn format_revision_row(row: &super::JsonRow) -> String {
 }
 
 fn draw_footer(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
+    // A transient status (e.g. "Copied …") takes over the footer until the
+    // next input event.
+    if let Some(flash) = &app.flash {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                flash.clone(),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ))),
+            area,
+        );
+        return;
+    }
     let sep = Span::raw("  ");
     let mut spans = vec![
         hint_key("/"),

@@ -3,12 +3,16 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use ratatui::backend::CrosstermBackend;
+use ratatui::layout::Rect;
 use ratatui::widgets::ListState;
 use ratatui::{Frame, Terminal};
 use serde_json::Value;
@@ -18,6 +22,7 @@ use scat_core::core::resolve::PathResolver;
 use scat_core::core::script_view::{ScriptView, logical_parent_dir};
 use scat_core::core::vc::compare_revision_rows;
 
+mod clipboard;
 mod detail;
 mod detail_worker;
 mod diff_worker;
@@ -44,6 +49,8 @@ const POLL_TICK_MS: u64 = 50;
 const PAGE_SCROLL_LINES: i16 = 40;
 const HALF_PAGE_SCROLL_LINES: i16 = 20;
 const FULL_PAGE_SCROLL_LINES: i16 = 40;
+/// Two left-clicks within this window on the same row count as a double-click.
+const DOUBLE_CLICK_MS: u128 = 400;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Focus {
@@ -53,6 +60,52 @@ enum Focus {
     Deps,
     Functions,
     Revisions,
+}
+
+/// Kind of on-screen pane, recorded per frame so a mouse click can be
+/// hit-tested against the layout after rendering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RegionKind {
+    /// The top header line, which shows the selected script's path.
+    Header,
+    /// The search input box.
+    Search,
+    Results,
+    Metadata,
+    Preview,
+    Deps,
+    Functions,
+    Revisions,
+    /// The scrollable full-screen detail-view body.
+    DetailBody,
+    /// The scrollable full-screen script-diff body.
+    DetailDiffBody,
+}
+
+/// A clickable pane recorded during render.
+#[derive(Debug, Clone, Copy)]
+struct ClickRegion {
+    /// Inner content rect (inside the pane border).
+    area: Rect,
+    kind: RegionKind,
+    /// Index of the first row/line visible inside `area` (its scroll offset),
+    /// so a click at `area.y + n` maps to entry `scroll + n`.
+    scroll: usize,
+}
+
+/// Return the pane a click at `(col, row)` fell in, plus the row/line index
+/// within that pane's content (accounting for the pane's scroll offset).
+/// Regions are searched in recorded order; panes never overlap so the first
+/// hit is unambiguous.
+fn hit_test(regions: &[ClickRegion], col: u16, row: u16) -> Option<(RegionKind, usize)> {
+    regions.iter().find_map(|region| {
+        let a = region.area;
+        let inside = col >= a.x
+            && col < a.x.saturating_add(a.width)
+            && row >= a.y
+            && row < a.y.saturating_add(a.height);
+        inside.then(|| (region.kind, region.scroll + usize::from(row - a.y)))
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,6 +187,13 @@ struct TuiApp {
     /// redrawn every poll tick — a constant repaint wipes the terminal's
     /// own mouse text selection.
     needs_redraw: bool,
+    /// Clickable panes recorded during the last render, for mouse hit-testing.
+    click_regions: Vec<ClickRegion>,
+    /// Position and time of the last left-click, for double-click detection.
+    last_click: Option<(u16, u16, Instant)>,
+    /// Transient status message (e.g. "Copied …"), shown in the footer until
+    /// the next input event.
+    flash: Option<String>,
     pending_view: Option<viewer::ViewTarget>,
     file_check_worker: FileCheckWorker,
     inflight_filecheck_id: Option<u64>,
@@ -201,6 +261,9 @@ impl TuiApp {
             fullscreen: false,
             tick: 0,
             needs_redraw: true,
+            click_regions: Vec::new(),
+            last_click: None,
+            flash: None,
             pending_view: None,
             file_check_worker: FileCheckWorker::new()?,
             inflight_filecheck_id: None,
@@ -1175,6 +1238,218 @@ impl TuiApp {
             || self.detail_loading
             || self.detail_diff_loading
     }
+
+    /// Record a clickable pane for this frame. `outer` is the bordered rect;
+    /// the stored region is its inner content area. Called from `render`.
+    fn record_region(&mut self, outer: Rect, kind: RegionKind, scroll: usize) {
+        self.record_click_area(inner_rect(outer), kind, scroll);
+    }
+
+    /// Record a clickable region using `area` verbatim (no border inset), for
+    /// borderless surfaces like the header line.
+    fn record_click_area(&mut self, area: Rect, kind: RegionKind, scroll: usize) {
+        self.click_regions.push(ClickRegion { area, kind, scroll });
+    }
+
+    /// Handle a mouse event, returning whether it changed anything (and thus
+    /// needs a repaint). Bare moves/drags are ignored.
+    fn handle_mouse(&mut self, event: MouseEvent) -> Result<bool> {
+        match event.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.flash = None;
+                self.handle_left_click(event.column, event.row)
+            }
+            MouseEventKind::ScrollDown => self.handle_scroll(event.column, event.row, 1),
+            MouseEventKind::ScrollUp => self.handle_scroll(event.column, event.row, -1),
+            _ => Ok(false),
+        }
+    }
+
+    /// Record a click for double-click detection; return whether it completes
+    /// a double-click (two clicks on the same cell within [`DOUBLE_CLICK_MS`]).
+    fn register_click(&mut self, col: u16, row: u16) -> bool {
+        let now = Instant::now();
+        let is_double = self.last_click.is_some_and(|(c, r, at)| {
+            c == col && r == row && now.duration_since(at).as_millis() <= DOUBLE_CLICK_MS
+        });
+        // Reset after a double so a third click starts a fresh pair.
+        self.last_click = if is_double {
+            None
+        } else {
+            Some((col, row, now))
+        };
+        is_double
+    }
+
+    fn handle_left_click(&mut self, col: u16, row: u16) -> Result<bool> {
+        let double = self.register_click(col, row);
+        let Some((kind, index)) = hit_test(&self.click_regions, col, row) else {
+            return Ok(false);
+        };
+        match kind {
+            RegionKind::Header => {
+                // The header displays the selected script's path; clicking it
+                // copies the full path (handy in fullscreen, where the
+                // Metadata pane isn't shown).
+                self.copy_selected_path();
+                Ok(true)
+            }
+            RegionKind::Search => {
+                self.focus = Focus::Search;
+                Ok(true)
+            }
+            RegionKind::Results => {
+                if index >= self.results.len() {
+                    return Ok(false);
+                }
+                self.focus = Focus::Results;
+                if index != self.selected {
+                    self.selected = index;
+                    self.load_selected()?;
+                }
+                // Double-click opens the full detail view, mirroring Enter.
+                if double {
+                    self.mode = ViewMode::Detail;
+                }
+                Ok(true)
+            }
+            RegionKind::Metadata => {
+                self.copy_selected_path();
+                Ok(true)
+            }
+            RegionKind::Deps => {
+                self.focus = Focus::Deps;
+                if index < self.dependency_target_count() {
+                    // Click again (or double-click) on the highlighted dep to
+                    // navigate; first click just selects it.
+                    if double || index == self.deps_selected {
+                        self.deps_selected = index;
+                        self.open_selected_dependency()?;
+                    } else {
+                        self.deps_selected = index;
+                    }
+                }
+                Ok(true)
+            }
+            RegionKind::Functions => {
+                self.focus = Focus::Functions;
+                if index < self.functions.len() {
+                    if double || index == self.functions_selected {
+                        self.functions_selected = index;
+                        self.jump_to_selected_function();
+                    } else {
+                        self.functions_selected = index;
+                    }
+                }
+                Ok(true)
+            }
+            RegionKind::Preview => {
+                self.focus = Focus::Preview;
+                Ok(true)
+            }
+            RegionKind::Revisions => {
+                self.focus = Focus::Revisions;
+                Ok(true)
+            }
+            RegionKind::DetailBody => self.handle_detail_body_click(index),
+            // The header/search are handled above; the diff body has no
+            // click action (scroll only).
+            RegionKind::DetailDiffBody => Ok(false),
+        }
+    }
+
+    /// Handle a click on line `line` of the detail-view body: copy the path
+    /// field, or select/open a Folder entry.
+    fn handle_detail_body_click(&mut self, line: usize) -> Result<bool> {
+        match detail::detail_click_at(self, line) {
+            detail::DetailClick::CopyPath => {
+                self.copy_selected_path();
+                Ok(true)
+            }
+            detail::DetailClick::FolderEntry(index) => {
+                self.folder_focused = true;
+                if index == self.siblings_selected {
+                    self.open_selected_folder_entry()?;
+                } else {
+                    self.siblings_selected = index;
+                }
+                Ok(true)
+            }
+            detail::DetailClick::None => Ok(false),
+        }
+    }
+
+    fn handle_scroll(&mut self, col: u16, row: u16, delta: i16) -> Result<bool> {
+        let Some((kind, _)) = hit_test(&self.click_regions, col, row) else {
+            return Ok(false);
+        };
+        match kind {
+            RegionKind::Results => {
+                let next = move_selection(self.selected, self.results.len(), delta as isize);
+                if next != self.selected {
+                    self.selected = next;
+                    self.load_selected()?;
+                    return Ok(true);
+                }
+                Ok(false)
+            }
+            RegionKind::Preview => {
+                self.preview_scroll = scroll_by(self.preview_scroll, delta);
+                Ok(true)
+            }
+            RegionKind::Revisions => {
+                self.revisions_scroll = scroll_by(self.revisions_scroll, delta);
+                Ok(true)
+            }
+            RegionKind::DetailBody => {
+                self.detail_scroll = scroll_by(self.detail_scroll, delta);
+                Ok(true)
+            }
+            RegionKind::DetailDiffBody => {
+                self.detail_diff_scroll = scroll_by(self.detail_diff_scroll, delta);
+                Ok(true)
+            }
+            RegionKind::Deps => {
+                self.deps_selected = move_selection(
+                    self.deps_selected,
+                    self.dependency_target_count(),
+                    delta as isize,
+                );
+                Ok(true)
+            }
+            RegionKind::Functions => {
+                self.functions_selected = move_selection(
+                    self.functions_selected,
+                    self.functions.len(),
+                    delta as isize,
+                );
+                Ok(true)
+            }
+            // No scroll behaviour for these single-purpose regions.
+            RegionKind::Header | RegionKind::Search | RegionKind::Metadata => Ok(false),
+        }
+    }
+
+    /// Copy the selected script's full logical path to the clipboard.
+    fn copy_selected_path(&mut self) {
+        let Some(path) = self.selected_logical_path() else {
+            return;
+        };
+        match clipboard::copy_to_clipboard(&path) {
+            Ok(()) => self.flash = Some(format!("Copied {path}")),
+            Err(err) => self.error = Some(format!("Copy failed: {err}")),
+        }
+    }
+}
+
+/// Inner content rect of a bordered pane (one cell in on every side).
+fn inner_rect(outer: Rect) -> Rect {
+    Rect {
+        x: outer.x.saturating_add(1),
+        y: outer.y.saturating_add(1),
+        width: outer.width.saturating_sub(2),
+        height: outer.height.saturating_sub(2),
+    }
 }
 
 pub fn run(db_path: &Path, resolver: PathResolver) -> Result<()> {
@@ -1235,12 +1510,18 @@ pub fn run(db_path: &Path, resolver: PathResolver) -> Result<()> {
         if event::poll(poll_tick)? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    app.flash = None;
                     if app.handle_key(key)? {
                         break;
                     }
                     // A handled keypress may change scroll, selection, or
                     // mode; repaint once (user-paced, so never a flood).
                     app.needs_redraw = true;
+                }
+                Event::Mouse(mouse) => {
+                    // Only acted-on events repaint; bare moves/drags leave the
+                    // screen (and any Shift+drag selection) untouched.
+                    app.needs_redraw |= app.handle_mouse(mouse)?;
                 }
                 // ratatui resizes its buffers on the next draw; force one.
                 Event::Resize(_, _) => app.needs_redraw = true,
@@ -1380,7 +1661,9 @@ impl TerminalGuard {
     fn enter() -> Result<Self> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen)?;
+        // Mouse capture lets the app respond to clicks/scroll; native text
+        // selection is still available via Shift+drag in common terminals.
+        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
         let backend = CrosstermBackend::new(stdout);
         let terminal = Terminal::new(backend)?;
         Ok(Self { terminal })
@@ -1414,14 +1697,22 @@ impl TerminalGuard {
 
     fn suspend(&mut self) -> io::Result<()> {
         disable_raw_mode()?;
-        execute!(self.terminal.backend_mut(), LeaveAlternateScreen)?;
+        execute!(
+            self.terminal.backend_mut(),
+            DisableMouseCapture,
+            LeaveAlternateScreen
+        )?;
         self.terminal.show_cursor()?;
         Ok(())
     }
 
     fn resume(&mut self) -> io::Result<()> {
         enable_raw_mode()?;
-        execute!(self.terminal.backend_mut(), EnterAlternateScreen)?;
+        execute!(
+            self.terminal.backend_mut(),
+            EnterAlternateScreen,
+            EnableMouseCapture
+        )?;
         self.terminal.clear()?;
         Ok(())
     }
@@ -1430,7 +1721,11 @@ impl TerminalGuard {
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
+        let _ = execute!(
+            self.terminal.backend_mut(),
+            DisableMouseCapture,
+            LeaveAlternateScreen
+        );
         let _ = self.terminal.show_cursor();
     }
 }
@@ -1460,11 +1755,12 @@ mod tests {
 
     use super::detail::native_path_for_row;
     use super::{
-        DetailPayload, DetailResponse, DetailWorker, DiffWorker, Focus, FolderListing,
-        FolderResponse, FolderWorker, SearchWorker, TuiApp, ViewMode, move_selection, next_focus,
-        previous_focus, scroll_by, search_title, viewer,
+        ClickRegion, DetailPayload, DetailResponse, DetailWorker, DiffWorker, Focus, FolderListing,
+        FolderResponse, FolderWorker, RegionKind, SearchWorker, TuiApp, ViewMode, hit_test,
+        move_selection, next_focus, previous_focus, scroll_by, search_title, viewer,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::layout::Rect;
     use scat_core::core::resolve::PathResolver;
     use scat_core::core::script_view::ScriptView;
     use serde_json::{Map, Value};
@@ -1493,6 +1789,33 @@ mod tests {
         assert_eq!(move_selection(0, 3, 1), 1);
         assert_eq!(move_selection(2, 3, 1), 2);
         assert_eq!(move_selection(2, 3, -2), 0);
+    }
+
+    #[test]
+    fn hit_test_maps_click_to_pane_and_scrolled_index() {
+        let regions = vec![
+            ClickRegion {
+                area: Rect::new(0, 1, 30, 10),
+                kind: RegionKind::Results,
+                scroll: 5,
+            },
+            ClickRegion {
+                area: Rect::new(31, 1, 40, 6),
+                kind: RegionKind::Deps,
+                scroll: 0,
+            },
+        ];
+
+        // First row of the results pane maps to its scroll offset (5).
+        assert_eq!(hit_test(&regions, 2, 1), Some((RegionKind::Results, 5)));
+        // Three rows down → offset 5 + 3.
+        assert_eq!(hit_test(&regions, 2, 4), Some((RegionKind::Results, 8)));
+        // A click in the deps pane, second row, scroll 0 → index 1.
+        assert_eq!(hit_test(&regions, 40, 2), Some((RegionKind::Deps, 1)));
+        // Outside every region.
+        assert_eq!(hit_test(&regions, 100, 100), None);
+        // On a pane's border (row 0, above inner area) → miss.
+        assert_eq!(hit_test(&regions, 2, 0), None);
     }
 
     #[test]
