@@ -87,10 +87,12 @@ pub(super) fn populate(
         shutdown,
     )?;
     let records = scan_result.scripts;
+    let working_revisions = scan_result.revisions;
     let total = records.len();
     debug!(
         phase = "scan_paths",
         script_count = total,
+        working_revision_count = working_revisions.len(),
         "completed build phase"
     );
 
@@ -309,7 +311,9 @@ pub(super) fn populate(
     // simpler than diffing — and correct either way, since a stale
     // checkout revision must not survive after its DEVELOP/ARCHIVE entry is
     // gone (a no-op on the always-fresh-db path, where this table starts
-    // empty anyway).
+    // empty anyway). WORKING revisions (checked-in copies observed in the
+    // working directories during the phase-1 scan) are likewise a complete
+    // fresh set, so they are inserted in the same pass.
     tx.execute("DELETE FROM revisions", [])?;
     {
         let mut stmt = tx.prepare(
@@ -317,7 +321,7 @@ pub(super) fn populate(
              (logical_path, physical_path, revision_type, os_flavor, user, timestamp, age_seconds)
              VALUES (?1,?2,?3,?4,?5,?6,?7)",
         )?;
-        for c in &checkouts {
+        for c in checkouts.iter().chain(working_revisions.iter()) {
             stmt.execute(rusqlite::params![
                 c.logical_path,
                 c.physical_path,

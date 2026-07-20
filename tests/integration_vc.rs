@@ -2,9 +2,10 @@
 /// `infer_warnings`.
 ///
 /// Tests create temporary scan_root trees with embedded DEVELOP / ARCHIVE
-/// directories, seed them with files whose names match the checkout naming
-/// convention (`<script>_<YYYYMMDD_HHMM>_<user>`), then assert that
-/// `scan_checkouts` discovers them correctly. Warning inference tests seed the
+/// directories, seed them with files whose names match the vc version naming
+/// convention (`<script>_<timestamp>[_<user>]`, timestamp at date, minute,
+/// or second precision; the user suffix only on DEVELOP checkouts), then
+/// assert that `scan_checkouts` discovers them correctly. Warning inference tests seed the
 /// DB directly and assert that `infer_warnings` emits the expected warning
 /// kinds from indexed revision rows.
 use scat_core::core::db::create_db;
@@ -147,6 +148,46 @@ fn scan_checkouts_records_user_timestamp_and_os_flavor() {
     assert_eq!(records[0].revision_type, REVISION_TYPE_DEVELOP);
     // os_flavor is derived from the parent directory of the scan_root
     assert_eq!(records[0].os_flavor, "linux");
+}
+
+#[test]
+fn scan_checkouts_handles_seconds_and_userless_archive_names() {
+    // Real-world layout: DEVELOP checkouts carry seconds-precision timestamps
+    // and a user; ARCHIVE entries have a timestamp only (sometimes date-only).
+    let dir = tempfile::TempDir::new().unwrap();
+    let scan_root = dir.path().join("linux").join("scripts");
+    let develop = scan_root.join("DEVELOP");
+    let archive = scan_root.join("ARCHIVE");
+    std::fs::create_dir_all(&develop).unwrap();
+    std::fs::create_dir_all(&archive).unwrap();
+
+    touch_checkout(&develop, "update_board_firmware.sh_20260720_103044_titd");
+    touch_checkout(&archive, "update_board_firmware.sh_20240921_135312");
+    touch_checkout(&archive, "update_board_firmware.sh_20240610");
+
+    let config = make_config(&scan_root);
+    let mut records = scan_checkouts(&config, "/catalog/linux/scripts");
+    records.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+
+    assert_eq!(records.len(), 3);
+    for record in &records {
+        assert_eq!(
+            record.logical_path,
+            "/catalog/linux/scripts/update_board_firmware.sh"
+        );
+    }
+
+    assert_eq!(records[0].timestamp, "20240610");
+    assert_eq!(records[0].revision_type, REVISION_TYPE_ARCHIVE);
+    assert_eq!(records[0].user, "");
+
+    assert_eq!(records[1].timestamp, "20240921_135312");
+    assert_eq!(records[1].revision_type, REVISION_TYPE_ARCHIVE);
+    assert_eq!(records[1].user, "");
+
+    assert_eq!(records[2].timestamp, "20260720_103044");
+    assert_eq!(records[2].revision_type, REVISION_TYPE_DEVELOP);
+    assert_eq!(records[2].user, "titd");
 }
 
 #[test]
@@ -316,21 +357,39 @@ fn scan_checkouts_deduplicates_symlinked_scan_roots() {
 }
 
 #[test]
-fn scan_checkouts_ignores_deeply_nested_develop() {
-    // Two-levels-deep DEVELOP dirs are beyond the one-deep scan limit.
+fn scan_checkouts_finds_deeply_nested_develop_and_archive() {
+    // Script folders can be many subfolders deep, each with its own
+    // DEVELOP/ARCHIVE containers; all of them must be discovered.
     let dir = tempfile::TempDir::new().unwrap();
     let scan_root = dir.path().join("linux").join("scripts");
     let deep_develop = scan_root.join("level1").join("level2").join("DEVELOP");
+    let deep_archive = scan_root
+        .join("level1")
+        .join("level2")
+        .join("level3")
+        .join("ARCHIVE");
     std::fs::create_dir_all(&deep_develop).unwrap();
-    touch_checkout(&deep_develop, "tool_20240315_1430_jdoe");
+    std::fs::create_dir_all(&deep_archive).unwrap();
+    touch_checkout(&deep_develop, "tool.py_20240315_143044_jdoe");
+    touch_checkout(&deep_archive, "old.py_20240101_1000");
 
     let config = make_config(&scan_root);
-    let records = scan_checkouts(&config, "/catalog/linux/scripts");
+    let mut records = scan_checkouts(&config, "/catalog/linux/scripts");
+    records.sort_by(|a, b| a.logical_path.cmp(&b.logical_path));
 
-    assert!(
-        records.is_empty(),
-        "DEVELOP directories more than one level deep should not be scanned"
+    assert_eq!(records.len(), 2);
+    assert_eq!(
+        records[0].logical_path,
+        "/catalog/linux/scripts/level1/level2/level3/old.py"
     );
+    assert_eq!(records[0].revision_type, REVISION_TYPE_ARCHIVE);
+    assert_eq!(records[0].user, "");
+    assert_eq!(
+        records[1].logical_path,
+        "/catalog/linux/scripts/level1/level2/tool.py"
+    );
+    assert_eq!(records[1].revision_type, REVISION_TYPE_DEVELOP);
+    assert_eq!(records[1].user, "jdoe");
 }
 
 // ---------------------------------------------------------------------------

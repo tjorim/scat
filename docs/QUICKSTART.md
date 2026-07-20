@@ -21,6 +21,21 @@ export SCAT_DB=/catalog/scat/scripts.sqlite
 $env:SCAT_DB = "C:\catalog\scat\scripts.sqlite"
 ```
 
+### Optional: config file
+
+Instead of (or in addition to) `SCAT_DB`, you can point scat at a config
+file with `--config <path>` or `SCAT_CONFIG` for the database path, scan
+roots, ignore patterns, vc settings, and search bookmarks (`scat search
+@name`). See **[scat.example.yaml](scat.example.yaml)** for an annotated
+example. CLI flags and env vars always override config-file values.
+
+### Optional: path-mapping file (TUI only)
+
+`scat tui --mapping <path>` / `SCAT_MAPPING` points at a separate file that
+maps logical catalog paths to real Windows/Linux filesystem paths, used by
+the `V` key to open a script's live source. See
+**[scat-mapping.example.yaml](scat-mapping.example.yaml)**.
+
 ---
 
 ## 1 – Search
@@ -140,11 +155,11 @@ with the latest timestamp is used automatically.
 ### Compare against a specific checkout or archive file
 
 ```bash
-# DEVELOP checkout
-scat diff /catalog/foo/bar.py --against /path/to/DEVELOP/LINUX/bar.user.timestamp.py
+# DEVELOP checkout (filename carries timestamp and user)
+scat diff /catalog/foo/bar.py --against /catalog/foo/DEVELOP/bar.py_20240510_103044_alice
 
-# ARCHIVE copy
-scat diff /catalog/foo/bar.py --against /path/to/ARCHIVE/LINUX/bar.20240510.py
+# ARCHIVE copy (filename carries timestamp only)
+scat diff /catalog/foo/bar.py --against /catalog/foo/ARCHIVE/bar.py_20240510_103044
 ```
 
 `--against` points to a **file** on disk, unlike `scat catalog diff --against` which

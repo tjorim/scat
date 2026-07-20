@@ -15,9 +15,18 @@ use crate::error::Result;
 
 static CHECKOUT_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
 
+/// Matches vc version filenames: `<script>_<timestamp>[_<user>]`.
+///
+/// Observed timestamp precision varies (`YYYYMMDD`, `YYYYMMDD_HHMM`, or
+/// `YYYYMMDD_HHMMSS`), and only DEVELOP checkouts carry the trailing user —
+/// ARCHIVE entries and checked-in working-directory copies are
+/// `<script>_<timestamp>` with no user suffix. See docs/VC_CONTRACT.md.
 fn checkout_re() -> &'static regex::Regex {
     CHECKOUT_RE.get_or_init(|| {
-        regex::Regex::new(r"^(?P<script>.+)_(?P<timestamp>\d{8}_\d{4})_(?P<user>[^\\/]+)$").unwrap()
+        regex::Regex::new(
+            r"^(?P<script>.+)_(?P<timestamp>\d{8}(?:_\d{4}(?:\d{2})?)?)(?:_(?P<user>[^\\/]+))?$",
+        )
+        .unwrap()
     })
 }
 
@@ -131,9 +140,11 @@ pub struct CheckoutRecord {
     pub revision_type: String,
     /// OS flavor folder where the checkout was found.
     pub os_flavor: String,
-    /// Checkout owner parsed from filename.
+    /// Checkout owner parsed from filename. Empty for ARCHIVE entries and
+    /// other revision filenames that carry no user suffix.
     pub user: String,
-    /// Checkout timestamp parsed from filename (`YYYYMMDD_HHMM`).
+    /// Checkout timestamp parsed from filename (`YYYYMMDD`, `YYYYMMDD_HHMM`,
+    /// or `YYYYMMDD_HHMMSS`, as observed on disk).
     pub timestamp: String,
     /// Age in seconds based on file mtime, if available.
     pub age_seconds: Option<f64>,
@@ -170,6 +181,9 @@ pub struct ProcessedScript {
 pub const REVISION_TYPE_DEVELOP: &str = "DEVELOP";
 /// Revision type stored in the catalog.
 pub const REVISION_TYPE_ARCHIVE: &str = "ARCHIVE";
+/// Revision type stored in the catalog: a checked-in version copy kept in the
+/// working directory next to the active symlink (`<script>_<timestamp>`).
+pub const REVISION_TYPE_WORKING: &str = "WORKING";
 
 /// Render a revision age in compact human-readable form.
 pub fn relative_age(age_seconds: f64) -> String {
@@ -185,8 +199,9 @@ pub fn relative_age(age_seconds: f64) -> String {
 
 /// Compare revision rows by the display order used by CLI and TUI.
 ///
-/// DEVELOP rows sort first, then rows are grouped by OS flavor, newest
-/// timestamp first, and finally user name.
+/// DEVELOP rows sort first, then WORKING (checked-in copies in the working
+/// directory), then ARCHIVE; within a type, rows are grouped by OS flavor,
+/// newest timestamp first, and finally user name.
 pub fn compare_revision_rows(a: &JsonRow, b: &JsonRow) -> Ordering {
     revision_type_rank(row_str(a, "revision_type"))
         .cmp(&revision_type_rank(row_str(b, "revision_type")))
@@ -198,8 +213,9 @@ pub fn compare_revision_rows(a: &JsonRow, b: &JsonRow) -> Ordering {
 fn revision_type_rank(revision_type: &str) -> u8 {
     match revision_type {
         REVISION_TYPE_DEVELOP | "" => 0,
-        REVISION_TYPE_ARCHIVE => 1,
-        _ => 2,
+        REVISION_TYPE_WORKING => 1,
+        REVISION_TYPE_ARCHIVE => 2,
+        _ => 3,
     }
 }
 
@@ -255,21 +271,32 @@ pub fn load_vc_config(config_file: Option<&Path>) -> Result<VcConfig> {
 // Checkout scanning
 // ---------------------------------------------------------------------------
 
-/// Parse checkout filename into `(script, timestamp, user)`.
+/// Parse a vc version filename into `(script, timestamp, user)`.
+///
+/// Accepts every observed on-disk form: a DEVELOP checkout
+/// (`update_board_firmware.sh_20260720_103044_titd`), an ARCHIVE or
+/// checked-in working-directory copy without a user suffix
+/// (`update_board_firmware.sh_20240921_135312`), and timestamps at date,
+/// minute, or second precision. `user` is an empty string when the filename
+/// has no user suffix.
 pub fn parse_checkout_filename(filename: &str) -> Option<(String, String, String)> {
     let m = checkout_re().captures(filename)?;
     Some((
         m["script"].to_string(),
         m["timestamp"].to_string(),
-        m["user"].to_string(),
+        m.name("user")
+            .map(|u| u.as_str().to_string())
+            .unwrap_or_default(),
     ))
 }
 
 /// Scan DEVELOP and ARCHIVE directories embedded within each scan_root and return
-/// discovered revision records. DEVELOP/ARCHIVE dirs are recognised at the scan_root
-/// level itself and one level deep (immediate subdirectories). Directories reached
-/// via symlinks are deduplicated by their canonicalised real path so that OS-variant
-/// symlinks (e.g. `alt/pse → linux/pse`) are not scanned twice.
+/// discovered revision records. Every script folder carries its own
+/// DEVELOP/ARCHIVE containers, at any nesting depth, so the walk recurses the
+/// whole tree under each scan_root. Directories reached via symlinks are
+/// deduplicated by their canonicalised real path so that OS-variant symlinks
+/// (e.g. `alt/pse → linux/pse`) are not scanned twice, and symlinks resolving
+/// outside all scan_roots are not followed.
 /// The `os_flavor` for each record is derived from the parent directory name of the
 /// scan_root (e.g. `linux` from `/catalog/linux/scripts`).
 pub fn scan_checkouts(config: &VcConfig, logical_prefix: &str) -> Vec<CheckoutRecord> {
@@ -281,6 +308,21 @@ pub fn scan_checkouts(config: &VcConfig, logical_prefix: &str) -> Vec<CheckoutRe
     let mut records = Vec::new();
     let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
 
+    // Bound symlinked-directory traversal to the configured roots, same as
+    // the script scanner: a symlink aliasing another location inside the
+    // roots is followed (and deduplicated below), one escaping to an
+    // unrelated tree is not.
+    let canonical_roots: Vec<PathBuf> = config
+        .scan_roots
+        .iter()
+        .filter_map(|r| std::fs::canonicalize(r).ok())
+        .collect();
+    // Directories already walked, by canonical path — global across
+    // scan_roots so an OS-variant symlink alias (`alt/pse → linux/pse`) is
+    // walked once, under the first scan_root that reaches it (keeping
+    // os_flavor derivation stable).
+    let mut visited: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+
     for scan_root in &config.scan_roots {
         let os_flavor = scan_root
             .parent()
@@ -289,16 +331,46 @@ pub fn scan_checkouts(config: &VcConfig, logical_prefix: &str) -> Vec<CheckoutRe
             .unwrap_or("")
             .to_string();
 
-        // Configured develop/archive dirs at the scan_root level
-        for (dirs, rev_type) in [
-            (config.develop_dirs.as_slice(), REVISION_TYPE_DEVELOP),
-            (config.archive_dirs.as_slice(), REVISION_TYPE_ARCHIVE),
-        ] {
-            for dir_name in dirs {
-                let dir = scan_root.join(dir_name);
-                if dir.is_dir() {
+        let mut queue = std::collections::VecDeque::from([scan_root.clone()]);
+        while let Some(dir) = queue.pop_front() {
+            let Ok(canon) = std::fs::canonicalize(&dir) else {
+                continue;
+            };
+            if !visited.insert(canon) {
+                continue;
+            }
+
+            let mut subdirs: Vec<PathBuf> = match std::fs::read_dir(&dir) {
+                Ok(entries) => entries
+                    .flatten()
+                    .map(|e| e.path())
+                    .filter(|p| p.is_dir()) // follows symlinks; bounded + deduped below
+                    .collect(),
+                Err(err) => {
+                    warn!(
+                        path = %dir.display(),
+                        error = %err,
+                        "failed to read directory during checkout scan, skipping"
+                    );
+                    continue;
+                }
+            };
+            subdirs.sort();
+
+            for subdir in subdirs {
+                let name = subdir.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                let rev_type = if config.develop_dirs.iter().any(|d| d == name) {
+                    Some(REVISION_TYPE_DEVELOP)
+                } else if config.archive_dirs.iter().any(|d| d == name) {
+                    Some(REVISION_TYPE_ARCHIVE)
+                } else {
+                    None
+                };
+                if let Some(rev_type) = rev_type {
+                    // A container dir is scanned for revision files but not
+                    // descended into for further containers.
                     scan_revision_dir(
-                        &dir,
+                        &subdir,
                         rev_type,
                         &os_flavor,
                         scan_root,
@@ -307,45 +379,17 @@ pub fn scan_checkouts(config: &VcConfig, logical_prefix: &str) -> Vec<CheckoutRe
                         &mut records,
                         &mut seen,
                     );
-                }
-            }
-        }
-
-        // Configured develop/archive dirs one level deep in immediate subdirectories
-        let checkout_dir_names: std::collections::HashSet<&str> =
-            config.all_checkout_dirs().collect();
-        let mut subdirs: Vec<PathBuf> = std::fs::read_dir(scan_root)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.is_dir()) // follows symlinks; canonicalize+seen dedupes
-            .filter(|p| {
-                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                !checkout_dir_names.contains(name)
-            })
-            .collect();
-        subdirs.sort();
-
-        for subdir in subdirs {
-            for (dirs, rev_type) in [
-                (config.develop_dirs.as_slice(), REVISION_TYPE_DEVELOP),
-                (config.archive_dirs.as_slice(), REVISION_TYPE_ARCHIVE),
-            ] {
-                for dir_name in dirs {
-                    let dir = subdir.join(dir_name);
-                    if dir.is_dir() {
-                        scan_revision_dir(
-                            &dir,
-                            rev_type,
-                            &os_flavor,
-                            scan_root,
-                            logical_prefix,
-                            now,
-                            &mut records,
-                            &mut seen,
-                        );
-                    }
+                } else if subdir.is_symlink()
+                    && !std::fs::canonicalize(&subdir)
+                        .map(|c| canonical_roots.iter().any(|r| c.starts_with(r)))
+                        .unwrap_or(false)
+                {
+                    warn!(
+                        path = %subdir.display(),
+                        "symlinked directory resolves outside configured scan roots, skipping to avoid unbounded traversal"
+                    );
+                } else {
+                    queue.push_back(subdir);
                 }
             }
         }
@@ -598,10 +642,18 @@ pub fn infer_warnings(conn: &Connection) -> Result<Vec<VcWarning>> {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Parse a revision timestamp at any of the observed precisions: `YYYYMMDD`
+/// (treated as midnight), `YYYYMMDD_HHMM`, or `YYYYMMDD_HHMMSS`.
 fn parse_checkout_timestamp(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
-    chrono::NaiveDateTime::parse_from_str(value, "%Y%m%d_%H%M")
-        .ok()
-        .map(|ndt| ndt.and_utc())
+    let ndt = match value.len() {
+        8 => chrono::NaiveDate::parse_from_str(value, "%Y%m%d")
+            .ok()?
+            .and_hms_opt(0, 0, 0)?,
+        13 => chrono::NaiveDateTime::parse_from_str(value, "%Y%m%d_%H%M").ok()?,
+        15 => chrono::NaiveDateTime::parse_from_str(value, "%Y%m%d_%H%M%S").ok()?,
+        _ => return None,
+    };
+    Some(ndt.and_utc())
 }
 
 fn target_name_matches(logical_path: &str, target: &str) -> bool {
@@ -658,6 +710,73 @@ mod tests {
     fn parse_checkout_filename_invalid() {
         assert!(parse_checkout_filename("nodates").is_none());
         assert!(parse_checkout_filename("foo_baddate_user").is_none());
+        // Timestamp must be the last component (bar the optional user):
+        // an extension after it means this is not a vc version filename.
+        assert!(parse_checkout_filename("data_20240101.csv").is_none());
+    }
+
+    #[test]
+    fn parse_checkout_filename_seconds_precision_with_user() {
+        // Real-world DEVELOP checkout: HHMMSS timestamp plus user.
+        let r = parse_checkout_filename("update_board_firmware.sh_20260720_103044_titd");
+        assert_eq!(
+            r,
+            Some((
+                "update_board_firmware.sh".into(),
+                "20260720_103044".into(),
+                "titd".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_checkout_filename_without_user() {
+        // ARCHIVE entries and checked-in working-dir copies have no user suffix.
+        let r = parse_checkout_filename("update_board_firmware.sh_20240921_135312");
+        assert_eq!(
+            r,
+            Some((
+                "update_board_firmware.sh".into(),
+                "20240921_135312".into(),
+                String::new()
+            ))
+        );
+        let r = parse_checkout_filename("update_board_firmware.sh_20240921_1353");
+        assert_eq!(
+            r,
+            Some((
+                "update_board_firmware.sh".into(),
+                "20240921_1353".into(),
+                String::new()
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_checkout_filename_date_only_timestamp() {
+        let r = parse_checkout_filename("update_board_firmware.sh_20240921");
+        assert_eq!(
+            r,
+            Some((
+                "update_board_firmware.sh".into(),
+                "20240921".into(),
+                String::new()
+            ))
+        );
+        let r = parse_checkout_filename("foo.sh_20240921_titd");
+        assert_eq!(r, Some(("foo.sh".into(), "20240921".into(), "titd".into())));
+    }
+
+    #[test]
+    fn parse_checkout_timestamp_accepts_all_observed_precisions() {
+        let date_only = parse_checkout_timestamp("20240921").unwrap();
+        let minutes = parse_checkout_timestamp("20240921_1353").unwrap();
+        let seconds = parse_checkout_timestamp("20240921_135312").unwrap();
+        assert_eq!(date_only.to_rfc3339(), "2024-09-21T00:00:00+00:00");
+        assert_eq!(minutes.to_rfc3339(), "2024-09-21T13:53:00+00:00");
+        assert_eq!(seconds.to_rfc3339(), "2024-09-21T13:53:12+00:00");
+        assert!(parse_checkout_timestamp("garbage").is_none());
+        assert!(parse_checkout_timestamp("20240921_13").is_none());
     }
 
     #[test]
