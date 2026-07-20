@@ -258,6 +258,7 @@ impl TuiApp {
             self.folder_focused = false;
             self.siblings_selected = 0;
             self.folder_backstack.clear();
+            self.inflight_folder_id = None;
             return Ok(());
         }
         if self.selected >= self.results.len() {
@@ -303,6 +304,7 @@ impl TuiApp {
             self.folder_dir = None;
             self.folder_focused = false;
             self.siblings_selected = 0;
+            self.inflight_folder_id = None;
             self.cached_preview.clear();
             self.preview_total_lines = 0;
             return Ok(());
@@ -321,6 +323,7 @@ impl TuiApp {
         self.folder_dir = None;
         self.folder_focused = false;
         self.siblings_selected = 0;
+        self.inflight_folder_id = None;
         self.inflight_detail_id = Some(id);
         self.detail_worker.send(DetailRequest {
             id,
@@ -1378,9 +1381,9 @@ mod tests {
 
     use super::detail::native_path_for_row;
     use super::{
-        DetailPayload, DetailResponse, DetailWorker, DiffWorker, Focus, FolderWorker, SearchWorker,
-        TuiApp, ViewMode, move_selection, next_focus, previous_focus, scroll_by, search_title,
-        viewer,
+        DetailPayload, DetailResponse, DetailWorker, DiffWorker, Focus, FolderResponse,
+        FolderWorker, SearchWorker, TuiApp, ViewMode, move_selection, next_focus, previous_focus,
+        scroll_by, search_title, viewer,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use scat_core::core::resolve::PathResolver;
@@ -2099,6 +2102,53 @@ mod tests {
             .unwrap();
         assert_eq!(app.next_folder_id, next_id_before);
         assert_eq!(app.folder_dir.as_deref(), Some("/"));
+    }
+
+    #[test]
+    fn switching_scripts_ignores_a_stale_folder_response() {
+        let db = super::make_test_db();
+        let conn = rusqlite::Connection::open(db.path()).unwrap();
+        conn.execute(
+            "INSERT INTO scripts (logical_path, language, content, owner, purpose)
+             VALUES ('/catalog/scripts/b.py','python','print(2)\\n','bob','')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let mut app = make_app(db.path());
+        app.results = vec![
+            serde_json::json!({ "logical_path": "/catalog/scripts/a.py" })
+                .as_object()
+                .unwrap()
+                .clone(),
+        ];
+        app.selected = 0;
+        app.load_selected().unwrap();
+        drain_until_detail_loaded(&mut app);
+
+        // Simulate a folder-browse request still in flight (e.g. "go up")
+        // from the script that was selected a moment ago.
+        app.dispatch_folder_request("/catalog".to_string()).unwrap();
+        let stale_id = app.inflight_folder_id.unwrap();
+
+        // The user switches to a different script before that request resolves.
+        app.selected = 0;
+        app.load_selected().unwrap();
+        drain_until_detail_loaded(&mut app);
+        assert_ne!(app.inflight_folder_id, Some(stale_id));
+        let siblings_before = app.siblings.clone();
+        let folder_dir_before = app.folder_dir.clone();
+
+        // The stale response now arrives; it must be ignored rather than
+        // overwriting the newly selected script's folder state.
+        app.apply_folder_response(FolderResponse {
+            id: stale_id,
+            dir: "/catalog".to_string(),
+            result: Ok(vec![]),
+        });
+        assert_eq!(app.folder_dir, folder_dir_before);
+        assert_eq!(app.siblings, siblings_before);
     }
 
     #[test]
