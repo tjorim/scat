@@ -34,15 +34,16 @@ impl ScanTreeView {
     /// Update the tree to reflect the walk currently visiting `entry_path`
     /// (a file or directory) under scan `root`.
     pub(crate) fn update(&mut self, root: &Path, entry_path: &Path) {
+        // Already bounded to the last MAX_VISIBLE_LEVELS — tree_rows only
+        // reads the directories that actually get displayed.
         let rows = tree_rows(root, entry_path);
-        let visible = &rows[rows.len().saturating_sub(MAX_VISIBLE_LEVELS)..];
 
-        while self.levels.len() > visible.len() {
+        while self.levels.len() > rows.len() {
             if let Some(pb) = self.levels.pop() {
                 self.multi.remove(&pb);
             }
         }
-        while self.levels.len() < visible.len() {
+        while self.levels.len() < rows.len() {
             let pb = ProgressBar::new_spinner();
             pb.set_style(
                 ProgressStyle::with_template("{msg}")
@@ -51,7 +52,7 @@ impl ScanTreeView {
             self.levels.push(self.multi.add(pb));
         }
 
-        for (pb, (depth, line)) in self.levels.iter().zip(visible.iter()) {
+        for (pb, (depth, line)) in self.levels.iter().zip(rows.iter()) {
             pb.set_message(format!("{}{line}", "  ".repeat(*depth)));
         }
     }
@@ -66,10 +67,16 @@ impl ScanTreeView {
     }
 }
 
-/// One display row per ancestor level from `root` down to the directory
-/// containing `entry_path`, each listing that directory's sibling entries
-/// with the active child bracketed. Empty when `entry_path` isn't under
-/// `root` (for example the root entry itself, which has nothing to show yet).
+/// One display row per *visible* ancestor level (the deepest
+/// [`MAX_VISIBLE_LEVELS`]) from `root` down to the directory containing
+/// `entry_path`, each listing that directory's sibling entries with the
+/// active child bracketed. Empty when `entry_path` isn't under `root` (for
+/// example the root entry itself, which has nothing to show yet).
+///
+/// Each row costs a `std::fs::read_dir` call ([`sibling_line`]), so only the
+/// levels that actually get displayed are computed — a naive walk depth of,
+/// say, 20 would otherwise do 20 blocking reads per update just to show the
+/// last 6.
 fn tree_rows(root: &Path, entry_path: &Path) -> Vec<(usize, String)> {
     if entry_path == root {
         return Vec::new();
@@ -89,8 +96,9 @@ fn tree_rows(root: &Path, entry_path: &Path) -> Vec<(usize, String)> {
         ancestors.push(cur.clone());
     }
 
-    let mut rows = Vec::with_capacity(ancestors.len());
-    for depth in 0..ancestors.len() {
+    let start_depth = ancestors.len().saturating_sub(MAX_VISIBLE_LEVELS);
+    let mut rows = Vec::with_capacity(ancestors.len() - start_depth);
+    for depth in start_depth..ancestors.len() {
         let active_name = if depth + 1 < ancestors.len() {
             ancestors[depth + 1].file_name()
         } else {
@@ -187,6 +195,23 @@ mod tests {
         let rows = tree_rows(root, entry);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].0, 0);
+    }
+
+    #[test]
+    fn tree_rows_bounds_to_visible_levels_on_deep_paths() {
+        // 10 ancestor levels deep (root + a..i), well past MAX_VISIBLE_LEVELS
+        // (6) — only the deepest 6 are computed (each row costs a
+        // std::fs::read_dir call via sibling_line, so producing one per
+        // ancestor instead would mean 10 reads per update just to show 6).
+        let root = Path::new("/scan");
+        let entry = Path::new("/scan/a/b/c/d/e/f/g/h/i/file.py");
+        let rows = tree_rows(root, entry);
+
+        assert_eq!(rows.len(), 6);
+        // Depths are the deepest 6 (4..=9 out of ancestors 0..=9) — the
+        // levels nearest the active entry, not the shallowest.
+        let depths: Vec<usize> = rows.iter().map(|(d, _)| *d).collect();
+        assert_eq!(depths, vec![4, 5, 6, 7, 8, 9]);
     }
 
     #[test]
