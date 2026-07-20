@@ -14,17 +14,28 @@
 db_path: /catalog/scat/scripts.sqlite
 
 # Root directories scanned recursively by `scat catalog build` when
-# --scan-root is not passed on the command line.
+# --scan-root is not passed on the command line. Each root's *parent*
+# directory name becomes the vc "os_flavor" for any DEVELOP/ARCHIVE
+# checkouts found under it (e.g. "linux" from /catalog/linux/scripts) —
+# so the OS-specific directory must be the parent, not a child, of the
+# scripts directory itself.
 scan_roots:
-  - /catalog/scripts/linux
-  - /catalog/scripts/windows
+  - /catalog/linux/scripts
+  - /catalog/windows/scripts
 
 # Gitignore-style patterns applied during catalog scanning, in addition to
-# any --ignore-file passed on the command line.
+# any --ignore-file / .catignore file. The scanner does NOT read
+# .gitignore or .ignore files, so anything you don't want indexed —
+# notably Python virtualenvs and vendored dependencies — must be listed
+# here explicitly.
 ignore_patterns:
   - "*.pyc"
   - "__pycache__/"
   - "*.tmp"
+  - ".venv/"
+  - "venv/"
+  - "site-packages/"
+  - "node_modules/"
 
 # vc (version-control checkout tool) integration settings.
 vc:
