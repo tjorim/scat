@@ -284,6 +284,23 @@ pub fn scan_paths_with_revisions(
                 }
             };
 
+            // Every walked entry lands here (directories included), so this
+            // reflects where the walk currently is rather than only the rare
+            // entry that both survives every filter below and happens to land
+            // on a throttle boundary — showing the directory a file lives in
+            // (or the directory itself) is what makes a stalled scan visibly
+            // "stuck in" a particular folder instead of just frozen.
+            if let Some(pb) = progress
+                && pb.position() % 20 == 0
+            {
+                let display_path = if entry.file_type().is_some_and(|t| t.is_dir()) {
+                    entry.path()
+                } else {
+                    entry.path().parent().unwrap_or_else(|| entry.path())
+                };
+                pb.set_message(display_path.display().to_string());
+            }
+
             let file_type = match entry.file_type() {
                 Some(file_type) => file_type,
                 None => {
@@ -372,16 +389,6 @@ pub fn scan_paths_with_revisions(
                 None
             };
 
-            if let Some(pb) = progress
-                && pb.position() % 100 == 0
-            {
-                pb.set_message(
-                    filepath
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_default(),
-                );
-            }
             records.push(ScriptRecord {
                 logical_path,
                 physical_path: filepath.to_string_lossy().into_owned(),
