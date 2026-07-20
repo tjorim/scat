@@ -156,10 +156,10 @@ with the latest timestamp is used automatically.
 
 ```bash
 # DEVELOP checkout (filename carries timestamp and user)
-scat diff /catalog/foo/bar.py --against /path/to/DEVELOP/bar.py_20240510_103044_alice
+scat diff /catalog/foo/bar.py --against /catalog/foo/DEVELOP/bar.py_20240510_103044_alice
 
 # ARCHIVE copy (filename carries timestamp only)
-scat diff /catalog/foo/bar.py --against /path/to/ARCHIVE/bar.py_20240510_103044
+scat diff /catalog/foo/bar.py --against /catalog/foo/ARCHIVE/bar.py_20240510_103044
 ```
 
 `--against` points to a **file** on disk, unlike `scat catalog diff --against` which
