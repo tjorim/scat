@@ -180,6 +180,12 @@ precedence over config-file values.
 See **[docs/scat.example.yaml](docs/scat.example.yaml)** for an annotated
 example covering every field.
 
+Separately, `scat tui` accepts an optional **path-mapping file** (`--mapping
+<path>` / `SCAT_MAPPING`) that resolves a script's logical catalog path to
+its real Windows/Linux filesystem path, used by the `V` (view live
+filesystem source) key. See
+**[docs/scat-mapping.example.yaml](docs/scat-mapping.example.yaml)**.
+
 ***
 
 ## Database

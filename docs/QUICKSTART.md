@@ -29,6 +29,13 @@ roots, ignore patterns, vc settings, and search bookmarks (`scat search
 @name`). See **[scat.example.yaml](scat.example.yaml)** for an annotated
 example. CLI flags and env vars always override config-file values.
 
+### Optional: path-mapping file (TUI only)
+
+`scat tui --mapping <path>` / `SCAT_MAPPING` points at a separate file that
+maps logical catalog paths to real Windows/Linux filesystem paths, used by
+the `V` key to open a script's live source. See
+**[scat-mapping.example.yaml](scat-mapping.example.yaml)**.
+
 ---
 
 ## 1 – Search
