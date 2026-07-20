@@ -37,7 +37,12 @@ vc:
   archive_dirs:
     - ARCHIVE
 
-# Named search aliases. `scat search @name` expands to the mapped query.
+# Named search aliases. `scat search @name` expands to the mapped free-text
+# query. Note: this only expands the free-text search argument, not CLI
+# flags — `lang:`/`owner:`/`tag:` filter tokens are a TUI search-box-only
+# feature (see README) and are searched as literal text here, not applied
+# as filters. Use `scat search @name --lang python` etc. to combine a
+# bookmark with a flag-based filter instead.
 bookmarks:
-  my-scripts: "owner:alice@example.com"
-  patch-tools: "patch freeze lang:python"
+  patch-tools: "patch freeze"
+  nightly-jobs: "nightly backup"
