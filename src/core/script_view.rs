@@ -17,6 +17,18 @@ use serde_json::Value;
 
 use crate::core::db::{JsonRow, row_str};
 
+/// Directory portion of a logical path (everything before the last `/`).
+///
+/// A top-level path like `/foo.py` yields `/`; a bare name with no `/` yields
+/// `""`.
+pub fn logical_parent_dir(logical_path: &str) -> &str {
+    match logical_path.rfind('/') {
+        Some(0) => "/",
+        Some(idx) => &logical_path[..idx],
+        None => "",
+    }
+}
+
 /// JSON-encoded list columns of the `scripts` table.
 ///
 /// Each stores a JSON array string (for example `["ops","nightly"]`) that the
@@ -89,6 +101,11 @@ impl<'a> ScriptView<'a> {
     /// The `symlink_target` column.
     pub fn symlink_target(&self) -> &'a str {
         row_str(self.row, "symlink_target")
+    }
+
+    /// The directory portion of `logical_path` (see [`logical_parent_dir`]).
+    pub fn parent_dir(&self) -> &'a str {
+        logical_parent_dir(self.logical_path())
     }
 
     /// The `indexed_at` column.
@@ -320,6 +337,22 @@ mod tests {
         assert_eq!(view.size(), Some(1536));
         assert_eq!(view.string_list(ListField::Tags), vec!["ops", "nightly"]);
         assert_eq!(view.string_list(ListField::EntryPoints), vec!["main"]);
+    }
+
+    #[test]
+    fn logical_parent_dir_cases() {
+        assert_eq!(
+            logical_parent_dir("/catalog/scripts/jobs/x.sh"),
+            "/catalog/scripts/jobs"
+        );
+        assert_eq!(logical_parent_dir("/foo.py"), "/");
+        assert_eq!(logical_parent_dir("bare.py"), "");
+    }
+
+    #[test]
+    fn parent_dir_reads_from_row() {
+        let row = sample_row();
+        assert_eq!(ScriptView::new(&row).parent_dir(), "/catalog/scripts");
     }
 
     #[test]

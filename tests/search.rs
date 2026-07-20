@@ -576,6 +576,56 @@ fn list_scripts_owner_filter() {
 }
 
 // ---------------------------------------------------------------------------
+// siblings
+// ---------------------------------------------------------------------------
+
+#[test]
+fn siblings_lists_same_folder_excluding_self_and_subfolders() {
+    let (api, _f) = make_api();
+    insert(&api, "/catalog/scripts/a.py", "", "python", "", "");
+    insert(&api, "/catalog/scripts/b.py", "", "python", "", "");
+    insert(&api, "/catalog/scripts/jobs/c.py", "", "python", "", "");
+
+    let sib = api.siblings("/catalog/scripts/a.py").unwrap();
+    let paths: Vec<&str> = sib
+        .iter()
+        .map(|r| r["logical_path"].as_str().unwrap())
+        .collect();
+    assert_eq!(paths, vec!["/catalog/scripts/b.py"]);
+}
+
+#[test]
+fn siblings_at_root() {
+    let (api, _f) = make_api();
+    insert(&api, "/a.py", "", "python", "", "");
+    insert(&api, "/b.py", "", "python", "", "");
+    insert(&api, "/catalog/scripts/nested.py", "", "python", "", "");
+
+    let sib = api.siblings("/a.py").unwrap();
+    let paths: Vec<&str> = sib
+        .iter()
+        .map(|r| r["logical_path"].as_str().unwrap())
+        .collect();
+    assert_eq!(paths, vec!["/b.py"]);
+}
+
+#[test]
+fn siblings_empty_for_bare_path() {
+    let (api, _f) = make_api();
+    insert(&api, "bare.py", "", "python", "", "");
+    let sib = api.siblings("bare.py").unwrap();
+    assert!(sib.is_empty());
+}
+
+#[test]
+fn siblings_empty_when_alone_in_folder() {
+    let (api, _f) = make_api();
+    insert(&api, "/catalog/scripts/alone.py", "", "python", "", "");
+    let sib = api.siblings("/catalog/scripts/alone.py").unwrap();
+    assert!(sib.is_empty());
+}
+
+// ---------------------------------------------------------------------------
 // related_scripts
 // ---------------------------------------------------------------------------
 

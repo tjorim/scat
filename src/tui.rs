@@ -85,6 +85,7 @@ struct TuiApp {
     function_xref: Option<String>,
     dep_backstack: Vec<String>,
     checkouts: Vec<JsonRow>,
+    siblings: Vec<JsonRow>,
     error: Option<String>,
     preview_scroll: u16,
     revisions_scroll: u16,
@@ -143,6 +144,7 @@ impl TuiApp {
             function_xref: None,
             dep_backstack: Vec::new(),
             checkouts: Vec::new(),
+            siblings: Vec::new(),
             error: None,
             preview_scroll: 0,
             revisions_scroll: 0,
@@ -229,6 +231,7 @@ impl TuiApp {
             self.function_xref = None;
             self.dep_backstack.clear();
             self.checkouts.clear();
+            self.siblings.clear();
             return Ok(());
         }
         if self.selected >= self.results.len() {
@@ -270,6 +273,7 @@ impl TuiApp {
             self.function_call_sites.clear();
             self.function_xref = None;
             self.checkouts.clear();
+            self.siblings.clear();
             self.cached_preview.clear();
             self.preview_total_lines = 0;
             return Ok(());
@@ -324,6 +328,7 @@ impl TuiApp {
             functions,
             function_call_sites,
             checkouts,
+            siblings,
             cached_preview,
             preview_total_lines,
             error,
@@ -337,6 +342,7 @@ impl TuiApp {
         self.functions_selected = 0;
         self.function_xref = None;
         self.checkouts = checkouts;
+        self.siblings = siblings;
         self.cached_preview = cached_preview;
         self.preview_total_lines = preview_total_lines;
         if error.is_some() {
@@ -1430,6 +1436,7 @@ mod tests {
                 functions: vec![],
                 function_call_sites: std::collections::BTreeMap::new(),
                 checkouts: vec![],
+                siblings: vec![],
                 cached_preview: "x".to_string(),
                 preview_total_lines: 0,
                 error: None,
@@ -1475,6 +1482,7 @@ mod tests {
                     checkout_row("LINUX", "bob", "20240101_0900"),
                     checkout_row("LINUX", "jdoe", "20240102_0900"),
                 ],
+                siblings: vec![],
                 cached_preview: String::new(),
                 preview_total_lines: 0,
                 error: None,

@@ -54,6 +54,24 @@ pub(super) fn detail_lines(app: &TuiApp) -> Vec<Line<'static>> {
         }
     }
 
+    let parent_dir = view.parent_dir();
+    if !parent_dir.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(section("Folder"));
+        lines.push(field_line("Directory", parent_dir.to_string()));
+        if app.siblings.is_empty() {
+            lines.push(Line::from("  (no other scripts in this folder)"));
+        } else {
+            for sibling in &app.siblings {
+                let sibling_path = ScriptView::new(sibling).logical_path();
+                let name = sibling_path
+                    .rsplit_once('/')
+                    .map_or(sibling_path, |(_, name)| name);
+                lines.push(bullet_line(name.to_string()));
+            }
+        }
+    }
+
     if !app.deps.is_empty() {
         lines.push(Line::from(""));
         lines.push(section("Dependencies"));

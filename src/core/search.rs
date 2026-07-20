@@ -9,7 +9,7 @@ use crate::core::db::{
     JsonRow, SCHEMA_VERSION, append_script_filters, fts_query_filtered, query_rows, row_string,
     row_to_map,
 };
-use crate::core::script_view::{ListField, ScriptView};
+use crate::core::script_view::{ListField, ScriptView, logical_parent_dir};
 use crate::core::vc::{REVISION_TYPE_ARCHIVE, REVISION_TYPE_DEVELOP};
 use crate::error::{Error, Result};
 
@@ -356,6 +356,50 @@ impl SearchApi {
             &[&logical_path],
         )?;
         Ok(rows.into_iter().next())
+    }
+
+    // ------------------------------------------------------------------
+    // Folder siblings
+    // ------------------------------------------------------------------
+
+    /// Return the other indexed scripts that live directly in the same
+    /// parent folder as `logical_path` (one level deep, excluding
+    /// `logical_path` itself).
+    ///
+    /// Returns an empty list for a bare logical path with no folder
+    /// (`logical_parent_dir` yields `""`).
+    pub fn siblings(&self, logical_path: &str) -> Result<Vec<JsonRow>> {
+        let parent = logical_parent_dir(logical_path);
+        if parent.is_empty() {
+            return Ok(vec![]);
+        }
+        // Escape LIKE metacharacters in the folder path so a literal `%`/`_`
+        // in a directory name can't widen the match.
+        let escaped_parent = parent
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let prefix = if parent == "/" {
+            escaped_parent
+        } else {
+            format!("{escaped_parent}/")
+        };
+        let one_level = format!("{prefix}%");
+        let two_level = format!("{prefix}%/%");
+
+        query_script_rows(
+            &self.conn,
+            "SELECT * FROM scripts
+             WHERE logical_path LIKE ?1 ESCAPE '\\'
+               AND logical_path NOT LIKE ?2 ESCAPE '\\'
+               AND logical_path != ?3
+             ORDER BY logical_path",
+            vec![
+                SqlValue::Text(one_level),
+                SqlValue::Text(two_level),
+                SqlValue::Text(logical_path.to_string()),
+            ],
+        )
     }
 
     // ------------------------------------------------------------------
