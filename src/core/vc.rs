@@ -340,13 +340,21 @@ pub fn scan_checkouts(config: &VcConfig, logical_prefix: &str) -> Vec<CheckoutRe
                 continue;
             }
 
-            let mut subdirs: Vec<PathBuf> = std::fs::read_dir(&dir)
-                .into_iter()
-                .flatten()
-                .flatten()
-                .map(|e| e.path())
-                .filter(|p| p.is_dir()) // follows symlinks; bounded + deduped below
-                .collect();
+            let mut subdirs: Vec<PathBuf> = match std::fs::read_dir(&dir) {
+                Ok(entries) => entries
+                    .flatten()
+                    .map(|e| e.path())
+                    .filter(|p| p.is_dir()) // follows symlinks; bounded + deduped below
+                    .collect(),
+                Err(err) => {
+                    warn!(
+                        path = %dir.display(),
+                        error = %err,
+                        "failed to read directory during checkout scan, skipping"
+                    );
+                    continue;
+                }
+            };
             subdirs.sort();
 
             for subdir in subdirs {
