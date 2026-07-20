@@ -179,6 +179,20 @@ fn bullet_line(value: String) -> Line<'static> {
     Line::from(format!("  - {value}"))
 }
 
+/// Absolute line index (within `lines` as produced by [`detail_lines`]) of
+/// the Folder entry currently selected in browse mode, so the render loop
+/// can keep it scrolled into view. Layout inside the section: the "Folder"
+/// header, then the Directory line, then one line per entry.
+pub(super) fn folder_selected_line(app: &TuiApp, lines: &[Line<'static>]) -> Option<u16> {
+    let section_idx = lines.iter().position(|line| {
+        line.spans
+            .first()
+            .is_some_and(|span| span.content == "Folder")
+    })?;
+    let line = section_idx + 2 + app.siblings_selected;
+    Some(u16::try_from(line).unwrap_or(u16::MAX))
+}
+
 /// Hint line shown under the Folder section's sibling list, reflecting
 /// whether browse mode is active and whether "go up" has anywhere to go.
 fn folder_hint_line(focused: bool, at_root: bool) -> Line<'static> {

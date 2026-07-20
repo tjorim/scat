@@ -2135,6 +2135,41 @@ mod tests {
     }
 
     #[test]
+    fn folder_selected_line_tracks_marker_position() {
+        let db = super::make_test_db();
+        let conn = rusqlite::Connection::open(db.path()).unwrap();
+        conn.execute(
+            "INSERT INTO scripts (logical_path, language, content, owner, purpose)
+             VALUES ('/catalog/scripts/b.py','python','print(2)\\n','bob','')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let mut app = make_app(db.path());
+        app.results = vec![
+            serde_json::json!({ "logical_path": "/catalog/scripts/a.py" })
+                .as_object()
+                .unwrap()
+                .clone(),
+        ];
+        app.selected = 0;
+        app.load_selected().unwrap();
+        drain_until_detail_loaded(&mut app);
+        app.folder_focused = true;
+        app.siblings_selected = 0;
+
+        let lines = super::detail::detail_lines(&app);
+        let selected = super::detail::folder_selected_line(&app, &lines).unwrap();
+        let text: String = lines[selected as usize]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(text.starts_with("> "), "selected line: {text:?}");
+    }
+
+    #[test]
     fn folder_enter_descends_into_selected_subdirectory() {
         let db = super::make_test_db();
         let conn = rusqlite::Connection::open(db.path()).unwrap();

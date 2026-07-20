@@ -115,6 +115,18 @@ fn draw_detail_view(frame: &mut Frame<'_>, app: &mut TuiApp) {
         .split(frame.area());
 
     let lines = detail::detail_lines(app);
+    // While folder-browse mode is active, keep the selected Folder entry
+    // scrolled into view so j/k selection never moves invisibly off-screen.
+    if app.folder_focused
+        && let Some(selected_line) = detail::folder_selected_line(app, &lines)
+    {
+        let viewport = root[0].height.saturating_sub(2).max(1);
+        if selected_line < app.detail_scroll {
+            app.detail_scroll = selected_line;
+        } else if selected_line >= app.detail_scroll.saturating_add(viewport) {
+            app.detail_scroll = selected_line.saturating_sub(viewport - 1);
+        }
+    }
     clamp_scroll_offset(&mut app.detail_scroll, lines.len(), root[0]);
     frame.render_widget(
         Paragraph::new(lines)
