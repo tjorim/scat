@@ -75,7 +75,8 @@ pub(crate) enum Commands {
         path: String,
         /// Comma-separated list of fields to display (default: all).
         /// Available: language, owner, purpose, checkout, size, indexed,
-        ///            uses, used_by, symlink, mtime, tags, entry_points, related, contributors
+        ///            uses, used_by, folder, siblings, symlink, mtime, tags,
+        ///            entry_points, related, contributors
         #[arg(long, value_delimiter = ',')]
         fields: Vec<String>,
         /// Output format.

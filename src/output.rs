@@ -435,6 +435,17 @@ pub(crate) fn used_by_row_to_json(row: &scat_core::core::db::JsonRow) -> serde_j
     })
 }
 
+/// Serialize a folder-sibling row as a compact JSON object using canonical field names.
+pub(crate) fn sibling_row_to_json(row: &scat_core::core::db::JsonRow) -> serde_json::Value {
+    let view = ScriptView::new(row);
+    serde_json::json!({
+        "path": view.logical_path_value(),
+        "language": view.language_value(),
+        "owner": view.owner_value(),
+        "purpose": view.purpose_value(),
+    })
+}
+
 pub(crate) fn size_field(view: ScriptView) -> String {
     match view.size() {
         Some(n) if n >= 0 => format_size(n as u64),
@@ -509,6 +520,15 @@ mod tests {
             csv,
             "path,owner,purpose\n/catalog/scripts/checkmc.py,\"Alice, Inc.\",\"Checks \"\"mc\"\"\nquickly\"\n"
         );
+    }
+
+    #[test]
+    fn sibling_row_to_json_uses_canonical_keys() {
+        let value = sibling_row_to_json(&sample_row());
+        assert_eq!(value["path"], json!("/catalog/scripts/checkmc.py"));
+        assert_eq!(value["language"], json!("python"));
+        assert_eq!(value["owner"], json!("Alice, Inc."));
+        assert!(value.get("kind").is_none(), "siblings have no dep kind");
     }
 
     #[test]
