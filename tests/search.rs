@@ -576,6 +576,35 @@ fn list_scripts_owner_filter() {
 }
 
 // ---------------------------------------------------------------------------
+// scripts_in_dir
+// ---------------------------------------------------------------------------
+
+#[test]
+fn scripts_in_dir_lists_one_level_deep() {
+    let (api, _f) = make_api();
+    insert(&api, "/catalog/scripts/a.py", "", "python", "", "");
+    insert(&api, "/catalog/scripts/b.py", "", "python", "", "");
+    insert(&api, "/catalog/scripts/jobs/c.py", "", "python", "", "");
+
+    let entries = api.scripts_in_dir("/catalog/scripts").unwrap();
+    let paths: Vec<&str> = entries
+        .iter()
+        .map(|r| r["logical_path"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        paths,
+        vec!["/catalog/scripts/a.py", "/catalog/scripts/b.py"]
+    );
+}
+
+#[test]
+fn scripts_in_dir_empty_for_empty_dir() {
+    let (api, _f) = make_api();
+    insert(&api, "/catalog/scripts/a.py", "", "python", "", "");
+    assert!(api.scripts_in_dir("").unwrap().is_empty());
+}
+
+// ---------------------------------------------------------------------------
 // siblings
 // ---------------------------------------------------------------------------
 

@@ -143,6 +143,8 @@ fn draw_detail_view(frame: &mut Frame<'_>, app: &mut TuiApp) {
             Span::raw(" view catalog  "),
             hint_key("V"),
             Span::raw(" view source  "),
+            hint_key("Tab"),
+            Span::raw(" browse folder  "),
             hint_key("Esc/Backspace"),
             Span::raw(" back  "),
             hint_key("j/k"),

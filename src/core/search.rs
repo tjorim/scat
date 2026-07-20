@@ -362,27 +362,25 @@ impl SearchApi {
     // Folder siblings
     // ------------------------------------------------------------------
 
-    /// Return the other indexed scripts that live directly in the same
-    /// parent folder as `logical_path` (one level deep, excluding
-    /// `logical_path` itself).
-    ///
-    /// Returns an empty list for a bare logical path with no folder
-    /// (`logical_parent_dir` yields `""`).
-    pub fn siblings(&self, logical_path: &str) -> Result<Vec<JsonRow>> {
-        let parent = logical_parent_dir(logical_path);
-        if parent.is_empty() {
+    /// Return the indexed scripts that live directly in `dir` (one level
+    /// deep). `dir` should be a directory path as returned by
+    /// [`logical_parent_dir`] (for example `/catalog/scripts`, or `/` for
+    /// the root). Returns an empty list for an empty `dir` (a bare,
+    /// non-absolute logical path has no folder to list).
+    pub fn scripts_in_dir(&self, dir: &str) -> Result<Vec<JsonRow>> {
+        if dir.is_empty() {
             return Ok(vec![]);
         }
         // Escape LIKE metacharacters in the folder path so a literal `%`/`_`
         // in a directory name can't widen the match.
-        let escaped_parent = parent
+        let escaped_dir = dir
             .replace('\\', "\\\\")
             .replace('%', "\\%")
             .replace('_', "\\_");
-        let prefix = if parent == "/" {
-            escaped_parent
+        let prefix = if dir == "/" {
+            escaped_dir
         } else {
-            format!("{escaped_parent}/")
+            format!("{escaped_dir}/")
         };
         let one_level = format!("{prefix}%");
         let two_level = format!("{prefix}%/%");
@@ -392,14 +390,18 @@ impl SearchApi {
             "SELECT * FROM scripts
              WHERE logical_path LIKE ?1 ESCAPE '\\'
                AND logical_path NOT LIKE ?2 ESCAPE '\\'
-               AND logical_path != ?3
              ORDER BY logical_path",
-            vec![
-                SqlValue::Text(one_level),
-                SqlValue::Text(two_level),
-                SqlValue::Text(logical_path.to_string()),
-            ],
+            vec![SqlValue::Text(one_level), SqlValue::Text(two_level)],
         )
+    }
+
+    /// Return the other indexed scripts that live directly in the same
+    /// parent folder as `logical_path` (one level deep, excluding
+    /// `logical_path` itself).
+    pub fn siblings(&self, logical_path: &str) -> Result<Vec<JsonRow>> {
+        let mut rows = self.scripts_in_dir(logical_parent_dir(logical_path))?;
+        rows.retain(|row| row_string(row, "logical_path") != logical_path);
+        Ok(rows)
     }
 
     // ------------------------------------------------------------------
