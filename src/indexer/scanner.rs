@@ -7,6 +7,7 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use tracing::{debug, warn};
 
+use crate::core::vc::{CheckoutRecord, REVISION_TYPE_WORKING, parse_checkout_filename};
 use crate::error::{Error, Result};
 
 // ---------------------------------------------------------------------------
@@ -50,6 +51,11 @@ pub struct ScriptRecord {
 pub struct ScanResult {
     /// Active scripts to index into `scripts`.
     pub scripts: Vec<ScriptRecord>,
+    /// Checked-in version copies observed in working directories
+    /// (`<script>_<timestamp>` files next to the active symlink), recorded
+    /// as `WORKING` revisions. DEVELOP/ARCHIVE revisions are discovered
+    /// separately by `scan_checkouts`.
+    pub revisions: Vec<CheckoutRecord>,
 }
 
 // ---------------------------------------------------------------------------
@@ -181,11 +187,16 @@ fn is_within_roots(path: &Path, canonical_roots: &[PathBuf]) -> bool {
 // Scanner
 // ---------------------------------------------------------------------------
 
-/// Scan roots recursively and return indexable scripts.
+/// Scan roots recursively and return indexable scripts plus WORKING revisions.
 ///
 /// Files inside any directory component named in `checkout_dirs` are skipped;
 /// those are handled by the vc checkout scanner, not indexed as scripts.
 /// Pass an empty slice to fall back to the default names (`DEVELOP`, `ARCHIVE`).
+///
+/// Version-named files in the working directories themselves
+/// (`<script>_<timestamp>`, the checked-in copies vc keeps next to the active
+/// symlink) are returned as `WORKING` revisions rather than indexed as
+/// scripts.
 pub fn scan_paths_with_revisions(
     roots: &[PathBuf],
     logical_prefix: &str,
@@ -207,8 +218,13 @@ pub fn scan_paths_with_revisions(
         checkout_dirs
     };
     let mut records = Vec::new();
+    let mut revisions = Vec::new();
     let mut total_skipped = 0usize;
     let external_ignore_paths = get_external_ignore_paths(ignore_files)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64();
 
     // Build an Arc'd set of checkout dir names for use in per-root filter_entry
     // closures, which require 'static + Send + Sync.
@@ -226,6 +242,14 @@ pub fn scan_paths_with_revisions(
     for root in roots {
         let mut found_in_root = 0usize;
         let mut skipped_in_root = 0usize;
+        // Same os_flavor derivation as `scan_checkouts`: the scan_root's
+        // parent directory name (e.g. `linux` from /catalog/linux/scripts).
+        let os_flavor = root
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string();
         let cds = checkout_dirs_set.clone();
         let croots = canonical_roots.clone();
         let mut walk = WalkBuilder::new(root);
@@ -322,6 +346,46 @@ pub fn scan_paths_with_revisions(
 
             let filepath = entry.path();
 
+            // vc keeps recent checked-in copies (`<script>_<timestamp>`, no
+            // user suffix) in the working directory next to the active
+            // symlink. Record those as WORKING revisions instead of dropping
+            // them as unknown extensions — but only when the embedded script
+            // name itself has a script extension, so a genuine extensionless
+            // script whose name merely ends in digits still falls through to
+            // shebang sniffing below.
+            if let Some(filename) = filepath.file_name().and_then(|n| n.to_str())
+                && let Some((script_name, timestamp, user)) = parse_checkout_filename(filename)
+            {
+                let script_ext = Path::new(&script_name)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| format!(".{}", e.to_lowercase()))
+                    .unwrap_or_default();
+                if SCRIPT_EXTENSIONS.contains(&script_ext.as_str()) {
+                    let logical_path = make_logical_path(
+                        &filepath.with_file_name(&script_name),
+                        root,
+                        logical_prefix,
+                    );
+                    let age_seconds = filepath
+                        .metadata()
+                        .ok()
+                        .and_then(|m| m.modified().ok())
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| (now - d.as_secs_f64()).max(0.0));
+                    revisions.push(CheckoutRecord {
+                        logical_path,
+                        physical_path: filepath.to_string_lossy().into_owned(),
+                        revision_type: REVISION_TYPE_WORKING.to_string(),
+                        os_flavor: os_flavor.clone(),
+                        user,
+                        timestamp,
+                        age_seconds,
+                    });
+                    continue;
+                }
+            }
+
             let ext = filepath
                 .extension()
                 .and_then(|e| e.to_str())
@@ -414,7 +478,10 @@ pub fn scan_paths_with_revisions(
         "completed file scan"
     );
 
-    Ok(ScanResult { scripts: records })
+    Ok(ScanResult {
+        scripts: records,
+        revisions,
+    })
 }
 
 /// Scan roots recursively and return indexable active script records.
@@ -600,6 +667,72 @@ mod tests {
     fn shebang_unknown() {
         assert_eq!(shebang_language("#!/usr/bin/env ruby"), None);
         assert_eq!(shebang_language("not a shebang"), None);
+    }
+
+    #[test]
+    fn scan_records_working_dir_version_copies_as_revisions() {
+        // Layout mirrors a vc working directory: the active script name plus
+        // the two most recent checked-in copies (`<script>_<timestamp>`).
+        let dir = tempfile::TempDir::new().unwrap();
+        let scan_root = dir.path().join("linux").join("scripts");
+        std::fs::create_dir_all(&scan_root).unwrap();
+        std::fs::write(scan_root.join("bar.py"), "# python").unwrap();
+        std::fs::write(scan_root.join("bar.py_20260720_090000"), "# python").unwrap();
+        std::fs::write(scan_root.join("bar.py_20260610_151550"), "# python").unwrap();
+
+        let shutdown = AtomicBool::new(false);
+        let result = scan_paths_with_revisions(
+            std::slice::from_ref(&scan_root),
+            "/catalog/linux/scripts",
+            5,
+            &[],
+            &[],
+            None,
+            &shutdown,
+        )
+        .unwrap();
+
+        assert_eq!(result.scripts.len(), 1, "only the active script indexes");
+        assert!(result.scripts[0].physical_path.ends_with("bar.py"));
+
+        assert_eq!(result.revisions.len(), 2);
+        for revision in &result.revisions {
+            assert_eq!(revision.logical_path, "/catalog/linux/scripts/bar.py");
+            assert_eq!(revision.revision_type, REVISION_TYPE_WORKING);
+            assert_eq!(revision.user, "");
+            assert_eq!(revision.os_flavor, "linux");
+        }
+        let mut timestamps: Vec<&str> = result
+            .revisions
+            .iter()
+            .map(|r| r.timestamp.as_str())
+            .collect();
+        timestamps.sort();
+        assert_eq!(timestamps, vec!["20260610_151550", "20260720_090000"]);
+    }
+
+    #[test]
+    fn extensionless_date_suffixed_file_stays_a_script() {
+        // A shebang script whose name merely ends in digits must not be
+        // swallowed as a WORKING revision — only version names whose script
+        // part has a script extension qualify.
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("backup_20240101"), "#!/bin/bash\n").unwrap();
+
+        let shutdown = AtomicBool::new(false);
+        let result = scan_paths_with_revisions(
+            &[dir.path().to_path_buf()],
+            "/catalog/scripts",
+            5,
+            &[],
+            &[],
+            None,
+            &shutdown,
+        )
+        .unwrap();
+
+        assert_eq!(result.scripts.len(), 1);
+        assert!(result.revisions.is_empty());
     }
 
     #[test]

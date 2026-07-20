@@ -181,6 +181,9 @@ pub struct ProcessedScript {
 pub const REVISION_TYPE_DEVELOP: &str = "DEVELOP";
 /// Revision type stored in the catalog.
 pub const REVISION_TYPE_ARCHIVE: &str = "ARCHIVE";
+/// Revision type stored in the catalog: a checked-in version copy kept in the
+/// working directory next to the active symlink (`<script>_<timestamp>`).
+pub const REVISION_TYPE_WORKING: &str = "WORKING";
 
 /// Render a revision age in compact human-readable form.
 pub fn relative_age(age_seconds: f64) -> String {
@@ -196,8 +199,9 @@ pub fn relative_age(age_seconds: f64) -> String {
 
 /// Compare revision rows by the display order used by CLI and TUI.
 ///
-/// DEVELOP rows sort first, then rows are grouped by OS flavor, newest
-/// timestamp first, and finally user name.
+/// DEVELOP rows sort first, then WORKING (checked-in copies in the working
+/// directory), then ARCHIVE; within a type, rows are grouped by OS flavor,
+/// newest timestamp first, and finally user name.
 pub fn compare_revision_rows(a: &JsonRow, b: &JsonRow) -> Ordering {
     revision_type_rank(row_str(a, "revision_type"))
         .cmp(&revision_type_rank(row_str(b, "revision_type")))
@@ -209,8 +213,9 @@ pub fn compare_revision_rows(a: &JsonRow, b: &JsonRow) -> Ordering {
 fn revision_type_rank(revision_type: &str) -> u8 {
     match revision_type {
         REVISION_TYPE_DEVELOP | "" => 0,
-        REVISION_TYPE_ARCHIVE => 1,
-        _ => 2,
+        REVISION_TYPE_WORKING => 1,
+        REVISION_TYPE_ARCHIVE => 2,
+        _ => 3,
     }
 }
 
