@@ -3,25 +3,31 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use ratatui::backend::CrosstermBackend;
+use ratatui::layout::Rect;
 use ratatui::widgets::ListState;
 use ratatui::{Frame, Terminal};
 use serde_json::Value;
 
 use scat_core::core::db::{JsonRow, row_string as str_field};
 use scat_core::core::resolve::PathResolver;
-use scat_core::core::script_view::ScriptView;
+use scat_core::core::script_view::{ScriptView, logical_parent_dir};
 use scat_core::core::vc::compare_revision_rows;
 
+mod clipboard;
 mod detail;
 mod detail_worker;
 mod diff_worker;
 mod file_check_worker;
+mod folder_worker;
 mod render;
 mod search_worker;
 mod viewer;
@@ -32,6 +38,7 @@ use self::detail_worker::{
 };
 use self::diff_worker::{DiffRequest, DiffResponse, DiffWorker};
 use self::file_check_worker::{FileCheckRequest, FileCheckResponse, FileCheckWorker};
+use self::folder_worker::{FolderListing, FolderRequest, FolderResponse, FolderWorker};
 use self::render::draw;
 use self::search_worker::{SearchRequest, SearchWorker};
 
@@ -42,6 +49,8 @@ const POLL_TICK_MS: u64 = 50;
 const PAGE_SCROLL_LINES: i16 = 40;
 const HALF_PAGE_SCROLL_LINES: i16 = 20;
 const FULL_PAGE_SCROLL_LINES: i16 = 40;
+/// Two left-clicks within this window on the same row count as a double-click.
+const DOUBLE_CLICK_MS: u128 = 400;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Focus {
@@ -51,6 +60,52 @@ enum Focus {
     Deps,
     Functions,
     Revisions,
+}
+
+/// Kind of on-screen pane, recorded per frame so a mouse click can be
+/// hit-tested against the layout after rendering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RegionKind {
+    /// The top header line, which shows the selected script's path.
+    Header,
+    /// The search input box.
+    Search,
+    Results,
+    Metadata,
+    Preview,
+    Deps,
+    Functions,
+    Revisions,
+    /// The scrollable full-screen detail-view body.
+    DetailBody,
+    /// The scrollable full-screen script-diff body.
+    DetailDiffBody,
+}
+
+/// A clickable pane recorded during render.
+#[derive(Debug, Clone, Copy)]
+struct ClickRegion {
+    /// Inner content rect (inside the pane border).
+    area: Rect,
+    kind: RegionKind,
+    /// Index of the first row/line visible inside `area` (its scroll offset),
+    /// so a click at `area.y + n` maps to entry `scroll + n`.
+    scroll: usize,
+}
+
+/// Return the pane a click at `(col, row)` fell in, plus the row/line index
+/// within that pane's content (accounting for the pane's scroll offset).
+/// Regions are searched in recorded order; panes never overlap so the first
+/// hit is unambiguous.
+fn hit_test(regions: &[ClickRegion], col: u16, row: u16) -> Option<(RegionKind, usize)> {
+    regions.iter().find_map(|region| {
+        let a = region.area;
+        let inside = col >= a.x
+            && col < a.x.saturating_add(a.width)
+            && row >= a.y
+            && row < a.y.saturating_add(a.height);
+        inside.then(|| (region.kind, region.scroll + usize::from(row - a.y)))
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,6 +125,7 @@ struct TuiApp {
     search_worker: SearchWorker,
     detail_worker: DetailWorker,
     diff_worker: DiffWorker,
+    folder_worker: FolderWorker,
     resolver: PathResolver,
     query: String,
     results: Vec<JsonRow>,
@@ -85,6 +141,21 @@ struct TuiApp {
     function_xref: Option<String>,
     dep_backstack: Vec<String>,
     checkouts: Vec<JsonRow>,
+    siblings: Vec<JsonRow>,
+    /// Immediate subdirectory names of the folder shown in the Folder
+    /// section, listed before `siblings` in the browse list.
+    sibling_dirs: Vec<String>,
+    /// Directory currently shown in the Folder section, when it differs from
+    /// the selected script's own parent (set by "go up one folder level").
+    /// `None` means "derive from the selected script's `parent_dir`".
+    folder_dir: Option<String>,
+    /// Whether the Folder section's sibling list is receiving Up/Down/Enter
+    /// (toggled with Tab in the fullscreen detail view).
+    folder_focused: bool,
+    siblings_selected: usize,
+    folder_backstack: Vec<String>,
+    inflight_folder_id: Option<u64>,
+    next_folder_id: u64,
     error: Option<String>,
     preview_scroll: u16,
     revisions_scroll: u16,
@@ -111,6 +182,18 @@ struct TuiApp {
     next_query_id: u64,
     fullscreen: bool,
     tick: u64,
+    /// Set whenever visible state changes; the run loop only repaints when
+    /// this is set (or a spinner is animating), so an idle screen isn't
+    /// redrawn every poll tick — a constant repaint wipes the terminal's
+    /// own mouse text selection.
+    needs_redraw: bool,
+    /// Clickable panes recorded during the last render, for mouse hit-testing.
+    click_regions: Vec<ClickRegion>,
+    /// Position and time of the last left-click, for double-click detection.
+    last_click: Option<(u16, u16, Instant)>,
+    /// Transient status message (e.g. "Copied …"), shown in the footer until
+    /// the next input event.
+    flash: Option<String>,
     pending_view: Option<viewer::ViewTarget>,
     file_check_worker: FileCheckWorker,
     inflight_filecheck_id: Option<u64>,
@@ -122,12 +205,14 @@ impl TuiApp {
         search_worker: SearchWorker,
         detail_worker: DetailWorker,
         diff_worker: DiffWorker,
+        folder_worker: FolderWorker,
         resolver: PathResolver,
     ) -> Result<Self> {
         let mut app = Self {
             search_worker,
             detail_worker,
             diff_worker,
+            folder_worker,
             resolver,
             query: String::new(),
             results: Vec::new(),
@@ -143,6 +228,14 @@ impl TuiApp {
             function_xref: None,
             dep_backstack: Vec::new(),
             checkouts: Vec::new(),
+            siblings: Vec::new(),
+            sibling_dirs: Vec::new(),
+            folder_dir: None,
+            folder_focused: false,
+            siblings_selected: 0,
+            folder_backstack: Vec::new(),
+            inflight_folder_id: None,
+            next_folder_id: 0,
             error: None,
             preview_scroll: 0,
             revisions_scroll: 0,
@@ -167,6 +260,10 @@ impl TuiApp {
             next_query_id: 0,
             fullscreen: false,
             tick: 0,
+            needs_redraw: true,
+            click_regions: Vec::new(),
+            last_click: None,
+            flash: None,
             pending_view: None,
             file_check_worker: FileCheckWorker::new()?,
             inflight_filecheck_id: None,
@@ -229,6 +326,13 @@ impl TuiApp {
             self.function_xref = None;
             self.dep_backstack.clear();
             self.checkouts.clear();
+            self.siblings.clear();
+            self.sibling_dirs.clear();
+            self.folder_dir = None;
+            self.folder_focused = false;
+            self.siblings_selected = 0;
+            self.folder_backstack.clear();
+            self.inflight_folder_id = None;
             return Ok(());
         }
         if self.selected >= self.results.len() {
@@ -270,6 +374,12 @@ impl TuiApp {
             self.function_call_sites.clear();
             self.function_xref = None;
             self.checkouts.clear();
+            self.siblings.clear();
+            self.sibling_dirs.clear();
+            self.folder_dir = None;
+            self.folder_focused = false;
+            self.siblings_selected = 0;
+            self.inflight_folder_id = None;
             self.cached_preview.clear();
             self.preview_total_lines = 0;
             return Ok(());
@@ -285,6 +395,10 @@ impl TuiApp {
         self.deps_selected = 0;
         self.functions_selected = 0;
         self.function_xref = None;
+        self.folder_dir = None;
+        self.folder_focused = false;
+        self.siblings_selected = 0;
+        self.inflight_folder_id = None;
         self.inflight_detail_id = Some(id);
         self.detail_worker.send(DetailRequest {
             id,
@@ -297,12 +411,16 @@ impl TuiApp {
     fn drain_detail_channel(&mut self) {
         loop {
             match self.detail_worker.try_recv() {
-                Ok(Some(response)) => self.apply_detail_response(response),
+                Ok(Some(response)) => {
+                    self.apply_detail_response(response);
+                    self.needs_redraw = true;
+                }
                 Ok(None) => break,
                 Err(_) => {
                     self.inflight_detail_id = None;
                     self.detail_loading = false;
                     self.error = Some("Detail worker disconnected unexpectedly".to_string());
+                    self.needs_redraw = true;
                     break;
                 }
             }
@@ -324,6 +442,8 @@ impl TuiApp {
             functions,
             function_call_sites,
             checkouts,
+            siblings,
+            sibling_dirs,
             cached_preview,
             preview_total_lines,
             error,
@@ -337,6 +457,8 @@ impl TuiApp {
         self.functions_selected = 0;
         self.function_xref = None;
         self.checkouts = checkouts;
+        self.siblings = siblings;
+        self.sibling_dirs = sibling_dirs;
         self.cached_preview = cached_preview;
         self.preview_total_lines = preview_total_lines;
         if error.is_some() {
@@ -580,6 +702,10 @@ impl TuiApp {
     }
 
     fn handle_detail_key(&mut self, key: KeyEvent) -> Result<bool> {
+        if self.folder_focused {
+            return self.handle_folder_browse_key(key);
+        }
+
         match key {
             KeyEvent {
                 code: KeyCode::Char('q'),
@@ -622,9 +748,90 @@ impl TuiApp {
             } => {
                 self.queue_live_source_view();
             }
+            KeyEvent {
+                code: KeyCode::Tab, ..
+            } => {
+                if self.can_focus_folder() {
+                    self.folder_focused = true;
+                    self.siblings_selected = 0;
+                }
+            }
             _ => {
                 apply_scroll_key(&mut self.detail_scroll, key);
             }
+        }
+        Ok(false)
+    }
+
+    /// Key handling for the Folder section's sibling-browse sub-mode, active
+    /// while [`TuiApp::folder_focused`] is set. Up/Down move the highlighted
+    /// sibling, Enter jumps to it, `[` browses up one folder level, and
+    /// Backspace pops the folder backstack (or exits browse mode if empty).
+    fn handle_folder_browse_key(&mut self, key: KeyEvent) -> Result<bool> {
+        match key {
+            KeyEvent {
+                code: KeyCode::Char('q'),
+                modifiers: KeyModifiers::NONE,
+                ..
+            } => return Ok(true),
+            KeyEvent {
+                code: KeyCode::Char('c'),
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            } => return Ok(true),
+            KeyEvent {
+                code: KeyCode::Tab, ..
+            }
+            | KeyEvent {
+                code: KeyCode::Esc, ..
+            } => {
+                self.folder_focused = false;
+            }
+            KeyEvent {
+                code: KeyCode::Up, ..
+            }
+            | KeyEvent {
+                code: KeyCode::Char('k'),
+                ..
+            } => {
+                self.siblings_selected =
+                    move_selection(self.siblings_selected, self.folder_entry_count(), -1);
+            }
+            KeyEvent {
+                code: KeyCode::Down,
+                ..
+            }
+            | KeyEvent {
+                code: KeyCode::Char('j'),
+                ..
+            } => {
+                self.siblings_selected =
+                    move_selection(self.siblings_selected, self.folder_entry_count(), 1);
+            }
+            KeyEvent {
+                code: KeyCode::Enter,
+                ..
+            } => {
+                self.open_selected_folder_entry()?;
+            }
+            KeyEvent {
+                code: KeyCode::Char('['),
+                modifiers: KeyModifiers::NONE,
+                ..
+            } => {
+                self.folder_go_up()?;
+            }
+            KeyEvent {
+                code: KeyCode::Backspace,
+                ..
+            } => {
+                if let Some(previous) = self.folder_backstack.pop() {
+                    self.navigate_to_path(&previous)?;
+                } else {
+                    self.folder_focused = false;
+                }
+            }
+            _ => {}
         }
         Ok(false)
     }
@@ -679,12 +886,16 @@ impl TuiApp {
     fn drain_diff_channel(&mut self) {
         loop {
             match self.diff_worker.try_recv() {
-                Ok(Some(response)) => self.apply_diff_response(response),
+                Ok(Some(response)) => {
+                    self.apply_diff_response(response);
+                    self.needs_redraw = true;
+                }
                 Ok(None) => break,
                 Err(_) => {
                     self.inflight_diff_id = None;
                     self.detail_diff_loading = false;
                     self.detail_diff_output = "Diff worker disconnected unexpectedly.".to_string();
+                    self.needs_redraw = true;
                     break;
                 }
             }
@@ -698,6 +909,114 @@ impl TuiApp {
         self.inflight_diff_id = None;
         self.detail_diff_loading = false;
         self.detail_diff_output = response.output;
+    }
+
+    fn drain_folder_channel(&mut self) {
+        loop {
+            match self.folder_worker.try_recv() {
+                Ok(Some(response)) => {
+                    self.apply_folder_response(response);
+                    self.needs_redraw = true;
+                }
+                Ok(None) => break,
+                Err(_) => {
+                    self.inflight_folder_id = None;
+                    self.error = Some("Folder worker disconnected unexpectedly".to_string());
+                    self.needs_redraw = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    fn apply_folder_response(&mut self, response: FolderResponse) {
+        if Some(response.id) != self.inflight_folder_id {
+            return;
+        }
+        self.inflight_folder_id = None;
+        match response.result {
+            Ok(FolderListing { dirs, scripts }) => {
+                self.error = None;
+                self.folder_dir = Some(response.dir);
+                self.sibling_dirs = dirs;
+                self.siblings = scripts;
+                self.siblings_selected = 0;
+            }
+            Err(err) => self.error = Some(err),
+        }
+    }
+
+    /// The Folder section's currently displayed directory: the browsed
+    /// override when set, otherwise the selected script's own parent.
+    fn folder_display_dir(&self) -> String {
+        self.folder_dir.clone().unwrap_or_else(|| {
+            self.detail
+                .as_ref()
+                .map(|row| ScriptView::new(row).parent_dir().to_string())
+                .unwrap_or_default()
+        })
+    }
+
+    /// Whether the Folder section has anything to browse (Tab only takes
+    /// effect when the selected script has a parent directory).
+    fn can_focus_folder(&self) -> bool {
+        !self.folder_display_dir().is_empty()
+    }
+
+    fn dispatch_folder_request(&mut self, dir: String) -> Result<()> {
+        let id = self.next_folder_id;
+        self.next_folder_id = self.next_folder_id.saturating_add(1);
+        self.inflight_folder_id = Some(id);
+        self.folder_worker.send(FolderRequest { id, dir })?;
+        Ok(())
+    }
+
+    /// Browse up to the parent of the currently displayed folder. A no-op at
+    /// the root (`/`), which has no parent to browse into.
+    fn folder_go_up(&mut self) -> Result<()> {
+        let current = self.folder_display_dir();
+        if current.is_empty() || current == "/" {
+            return Ok(());
+        }
+        let up_dir = logical_parent_dir(&current).to_string();
+        self.dispatch_folder_request(up_dir)
+    }
+
+    /// Total entries in the Folder browse list: subdirectories first, then
+    /// sibling scripts, sharing one selection index.
+    fn folder_entry_count(&self) -> usize {
+        self.sibling_dirs.len() + self.siblings.len()
+    }
+
+    /// Open the currently highlighted Folder entry: descend into it when it
+    /// is a subdirectory, otherwise jump the detail view to the sibling
+    /// script (pushing the current script onto the folder backstack so it
+    /// can be revisited).
+    fn open_selected_folder_entry(&mut self) -> Result<()> {
+        let idx = self.siblings_selected;
+        if let Some(name) = self.sibling_dirs.get(idx) {
+            let dir = self.folder_display_dir();
+            let child = if dir == "/" {
+                format!("/{name}")
+            } else {
+                format!("{dir}/{name}")
+            };
+            return self.dispatch_folder_request(child);
+        }
+
+        let Some(target) = self
+            .siblings
+            .get(idx - self.sibling_dirs.len())
+            .map(|row| ScriptView::new(row).logical_path().to_string())
+            .filter(|path| !path.is_empty())
+        else {
+            return Ok(());
+        };
+        if let Some(current_path) = self.selected_logical_path() {
+            self.folder_backstack.push(current_path);
+        }
+        self.folder_focused = false;
+        self.navigate_to_path(&target)
     }
 
     fn xref_call_sites(&self) -> Option<&[FunctionCallSite]> {
@@ -836,11 +1155,15 @@ impl TuiApp {
     fn drain_file_check_channel(&mut self) {
         loop {
             match self.file_check_worker.try_recv() {
-                Ok(Some(response)) => self.apply_file_check_response(response),
+                Ok(Some(response)) => {
+                    self.apply_file_check_response(response);
+                    self.needs_redraw = true;
+                }
                 Ok(None) => break,
                 Err(_) => {
                     self.inflight_filecheck_id = None;
                     self.error = Some("File-check worker disconnected unexpectedly.".to_string());
+                    self.needs_redraw = true;
                     break;
                 }
             }
@@ -906,13 +1229,241 @@ impl TuiApp {
         };
         apply_scroll_key(scroll, key)
     }
+
+    /// Whether a spinner is currently on screen and needs its frame advanced.
+    /// Only these states animate; when none hold, the screen is static and the
+    /// run loop can leave it untouched (preserving any mouse selection).
+    fn is_animating(&self) -> bool {
+        (self.search_in_flight && self.results.is_empty())
+            || self.detail_loading
+            || self.detail_diff_loading
+    }
+
+    /// Record a clickable pane for this frame. `outer` is the bordered rect;
+    /// the stored region is its inner content area. Called from `render`.
+    fn record_region(&mut self, outer: Rect, kind: RegionKind, scroll: usize) {
+        self.record_click_area(inner_rect(outer), kind, scroll);
+    }
+
+    /// Record a clickable region using `area` verbatim (no border inset), for
+    /// borderless surfaces like the header line.
+    fn record_click_area(&mut self, area: Rect, kind: RegionKind, scroll: usize) {
+        self.click_regions.push(ClickRegion { area, kind, scroll });
+    }
+
+    /// Handle a mouse event, returning whether it changed anything (and thus
+    /// needs a repaint). Bare moves/drags are ignored.
+    fn handle_mouse(&mut self, event: MouseEvent) -> Result<bool> {
+        match event.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.flash = None;
+                self.handle_left_click(event.column, event.row)
+            }
+            MouseEventKind::ScrollDown => self.handle_scroll(event.column, event.row, 1),
+            MouseEventKind::ScrollUp => self.handle_scroll(event.column, event.row, -1),
+            _ => Ok(false),
+        }
+    }
+
+    /// Record a click for double-click detection; return whether it completes
+    /// a double-click (two clicks on the same cell within [`DOUBLE_CLICK_MS`]).
+    fn register_click(&mut self, col: u16, row: u16) -> bool {
+        let now = Instant::now();
+        let is_double = self.last_click.is_some_and(|(c, r, at)| {
+            c == col && r == row && now.duration_since(at).as_millis() <= DOUBLE_CLICK_MS
+        });
+        // Reset after a double so a third click starts a fresh pair.
+        self.last_click = if is_double {
+            None
+        } else {
+            Some((col, row, now))
+        };
+        is_double
+    }
+
+    fn handle_left_click(&mut self, col: u16, row: u16) -> Result<bool> {
+        let double = self.register_click(col, row);
+        let Some((kind, index)) = hit_test(&self.click_regions, col, row) else {
+            return Ok(false);
+        };
+        match kind {
+            RegionKind::Header => {
+                // The header displays the selected script's path; clicking it
+                // copies the full path (handy in fullscreen, where the
+                // Metadata pane isn't shown).
+                self.copy_selected_path();
+                Ok(true)
+            }
+            RegionKind::Search => {
+                self.focus = Focus::Search;
+                Ok(true)
+            }
+            RegionKind::Results => {
+                if index >= self.results.len() {
+                    return Ok(false);
+                }
+                self.focus = Focus::Results;
+                if index != self.selected {
+                    self.selected = index;
+                    self.load_selected()?;
+                }
+                // Double-click opens the full detail view, mirroring Enter.
+                if double {
+                    self.mode = ViewMode::Detail;
+                }
+                Ok(true)
+            }
+            RegionKind::Metadata => {
+                self.copy_selected_path();
+                Ok(true)
+            }
+            RegionKind::Deps => {
+                self.focus = Focus::Deps;
+                if index < self.dependency_target_count() {
+                    // Click again (or double-click) on the highlighted dep to
+                    // navigate; first click just selects it.
+                    if double || index == self.deps_selected {
+                        self.deps_selected = index;
+                        self.open_selected_dependency()?;
+                    } else {
+                        self.deps_selected = index;
+                    }
+                }
+                Ok(true)
+            }
+            RegionKind::Functions => {
+                self.focus = Focus::Functions;
+                if index < self.functions.len() {
+                    if double || index == self.functions_selected {
+                        self.functions_selected = index;
+                        self.jump_to_selected_function();
+                    } else {
+                        self.functions_selected = index;
+                    }
+                }
+                Ok(true)
+            }
+            RegionKind::Preview => {
+                self.focus = Focus::Preview;
+                Ok(true)
+            }
+            RegionKind::Revisions => {
+                self.focus = Focus::Revisions;
+                Ok(true)
+            }
+            RegionKind::DetailBody => self.handle_detail_body_click(index),
+            // The header/search are handled above; the diff body has no
+            // click action (scroll only).
+            RegionKind::DetailDiffBody => Ok(false),
+        }
+    }
+
+    /// Handle a click on line `line` of the detail-view body: copy the path
+    /// field, or select/open a Folder entry.
+    fn handle_detail_body_click(&mut self, line: usize) -> Result<bool> {
+        match detail::detail_click_at(self, line) {
+            detail::DetailClick::CopyPath => {
+                self.copy_selected_path();
+                Ok(true)
+            }
+            detail::DetailClick::FolderEntry(index) => {
+                self.folder_focused = true;
+                if index == self.siblings_selected {
+                    self.open_selected_folder_entry()?;
+                } else {
+                    self.siblings_selected = index;
+                }
+                Ok(true)
+            }
+            detail::DetailClick::None => Ok(false),
+        }
+    }
+
+    fn handle_scroll(&mut self, col: u16, row: u16, delta: i16) -> Result<bool> {
+        let Some((kind, _)) = hit_test(&self.click_regions, col, row) else {
+            return Ok(false);
+        };
+        match kind {
+            RegionKind::Results => {
+                let next = move_selection(self.selected, self.results.len(), delta as isize);
+                if next != self.selected {
+                    self.selected = next;
+                    self.load_selected()?;
+                    return Ok(true);
+                }
+                Ok(false)
+            }
+            RegionKind::Preview => {
+                self.preview_scroll = scroll_by(self.preview_scroll, delta);
+                Ok(true)
+            }
+            RegionKind::Revisions => {
+                self.revisions_scroll = scroll_by(self.revisions_scroll, delta);
+                Ok(true)
+            }
+            RegionKind::DetailBody => {
+                self.detail_scroll = scroll_by(self.detail_scroll, delta);
+                Ok(true)
+            }
+            RegionKind::DetailDiffBody => {
+                self.detail_diff_scroll = scroll_by(self.detail_diff_scroll, delta);
+                Ok(true)
+            }
+            RegionKind::Deps => {
+                self.deps_selected = move_selection(
+                    self.deps_selected,
+                    self.dependency_target_count(),
+                    delta as isize,
+                );
+                Ok(true)
+            }
+            RegionKind::Functions => {
+                self.functions_selected = move_selection(
+                    self.functions_selected,
+                    self.functions.len(),
+                    delta as isize,
+                );
+                Ok(true)
+            }
+            // No scroll behaviour for these single-purpose regions.
+            RegionKind::Header | RegionKind::Search | RegionKind::Metadata => Ok(false),
+        }
+    }
+
+    /// Copy the selected script's full logical path to the clipboard.
+    fn copy_selected_path(&mut self) {
+        let Some(path) = self.selected_logical_path() else {
+            return;
+        };
+        match clipboard::copy_to_clipboard(&path) {
+            Ok(()) => self.flash = Some(format!("Copied {path}")),
+            Err(err) => self.error = Some(format!("Copy failed: {err}")),
+        }
+    }
+}
+
+/// Inner content rect of a bordered pane (one cell in on every side).
+fn inner_rect(outer: Rect) -> Rect {
+    Rect {
+        x: outer.x.saturating_add(1),
+        y: outer.y.saturating_add(1),
+        width: outer.width.saturating_sub(2),
+        height: outer.height.saturating_sub(2),
+    }
 }
 
 pub fn run(db_path: &Path, resolver: PathResolver) -> Result<()> {
     let search_worker = SearchWorker::new(db_path)?;
     let detail_worker = DetailWorker::new(db_path)?;
     let diff_worker = DiffWorker::new(db_path)?;
-    let mut app = TuiApp::new(search_worker, detail_worker, diff_worker, resolver)?;
+    let folder_worker = FolderWorker::new(db_path)?;
+    let mut app = TuiApp::new(
+        search_worker,
+        detail_worker,
+        diff_worker,
+        folder_worker,
+        resolver,
+    )?;
     let mut terminal = TerminalGuard::enter()?;
     let debounce = Duration::from_millis(DEBOUNCE_MS);
     let poll_tick = Duration::from_millis(POLL_TICK_MS);
@@ -922,6 +1473,7 @@ pub fn run(db_path: &Path, resolver: PathResolver) -> Result<()> {
         app.drain_detail_channel();
         app.drain_diff_channel();
         app.drain_file_check_channel();
+        app.drain_folder_channel();
         if app
             .last_keystroke_at
             .is_some_and(|keystroke| keystroke.elapsed() >= debounce)
@@ -929,25 +1481,51 @@ pub fn run(db_path: &Path, resolver: PathResolver) -> Result<()> {
         {
             app.last_keystroke_at = None;
             app.dispatch_query()?;
+            app.needs_redraw = true;
         }
         // A view target may be queued synchronously (catalog content) or
         // asynchronously once the file-check worker confirms the live source,
         // so open it from the loop body rather than only after a keystroke.
-        if let Some(target) = app.pending_view.take()
-            && let Err(err) = terminal.open_view(&target)
-        {
-            app.error = Some(format!("Failed to open viewer: {err}"));
-        }
-        terminal.draw(|frame| draw(frame, &mut app))?;
-        app.tick = app.tick.wrapping_add(1);
-        if event::poll(poll_tick)?
-            && let Event::Key(key) = event::read()?
-        {
-            if key.kind != KeyEventKind::Press {
-                continue;
+        // Opening suspends/resumes the terminal (clearing the screen), so a
+        // full repaint is always required afterward.
+        if let Some(target) = app.pending_view.take() {
+            if let Err(err) = terminal.open_view(&target) {
+                app.error = Some(format!("Failed to open viewer: {err}"));
             }
-            if app.handle_key(key)? {
-                break;
+            app.needs_redraw = true;
+        }
+
+        // Advance the spinner only while something is loading; a frozen tick
+        // when idle keeps the buffer identical so no repaint is emitted.
+        if app.is_animating() {
+            app.tick = app.tick.wrapping_add(1);
+            app.needs_redraw = true;
+        }
+
+        if app.needs_redraw {
+            terminal.draw(|frame| draw(frame, &mut app))?;
+            app.needs_redraw = false;
+        }
+
+        if event::poll(poll_tick)? {
+            match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    app.flash = None;
+                    if app.handle_key(key)? {
+                        break;
+                    }
+                    // A handled keypress may change scroll, selection, or
+                    // mode; repaint once (user-paced, so never a flood).
+                    app.needs_redraw = true;
+                }
+                Event::Mouse(mouse) => {
+                    // Only acted-on events repaint; bare moves/drags leave the
+                    // screen (and any Shift+drag selection) untouched.
+                    app.needs_redraw |= app.handle_mouse(mouse)?;
+                }
+                // ratatui resizes its buffers on the next draw; force one.
+                Event::Resize(_, _) => app.needs_redraw = true,
+                _ => {}
             }
         }
     }
@@ -1083,7 +1661,9 @@ impl TerminalGuard {
     fn enter() -> Result<Self> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen)?;
+        // Mouse capture lets the app respond to clicks/scroll; native text
+        // selection is still available via Shift+drag in common terminals.
+        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
         let backend = CrosstermBackend::new(stdout);
         let terminal = Terminal::new(backend)?;
         Ok(Self { terminal })
@@ -1117,14 +1697,22 @@ impl TerminalGuard {
 
     fn suspend(&mut self) -> io::Result<()> {
         disable_raw_mode()?;
-        execute!(self.terminal.backend_mut(), LeaveAlternateScreen)?;
+        execute!(
+            self.terminal.backend_mut(),
+            DisableMouseCapture,
+            LeaveAlternateScreen
+        )?;
         self.terminal.show_cursor()?;
         Ok(())
     }
 
     fn resume(&mut self) -> io::Result<()> {
         enable_raw_mode()?;
-        execute!(self.terminal.backend_mut(), EnterAlternateScreen)?;
+        execute!(
+            self.terminal.backend_mut(),
+            EnterAlternateScreen,
+            EnableMouseCapture
+        )?;
         self.terminal.clear()?;
         Ok(())
     }
@@ -1133,7 +1721,11 @@ impl TerminalGuard {
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
+        let _ = execute!(
+            self.terminal.backend_mut(),
+            DisableMouseCapture,
+            LeaveAlternateScreen
+        );
         let _ = self.terminal.show_cursor();
     }
 }
@@ -1163,11 +1755,14 @@ mod tests {
 
     use super::detail::native_path_for_row;
     use super::{
-        DetailPayload, DetailResponse, DetailWorker, DiffWorker, Focus, SearchWorker, TuiApp,
-        ViewMode, move_selection, next_focus, previous_focus, scroll_by, search_title, viewer,
+        ClickRegion, DetailPayload, DetailResponse, DetailWorker, DiffWorker, Focus, FolderListing,
+        FolderResponse, FolderWorker, RegionKind, SearchWorker, TuiApp, ViewMode, hit_test,
+        move_selection, next_focus, previous_focus, scroll_by, search_title, viewer,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::layout::Rect;
     use scat_core::core::resolve::PathResolver;
+    use scat_core::core::script_view::ScriptView;
     use serde_json::{Map, Value};
 
     #[test]
@@ -1194,6 +1789,33 @@ mod tests {
         assert_eq!(move_selection(0, 3, 1), 1);
         assert_eq!(move_selection(2, 3, 1), 2);
         assert_eq!(move_selection(2, 3, -2), 0);
+    }
+
+    #[test]
+    fn hit_test_maps_click_to_pane_and_scrolled_index() {
+        let regions = vec![
+            ClickRegion {
+                area: Rect::new(0, 1, 30, 10),
+                kind: RegionKind::Results,
+                scroll: 5,
+            },
+            ClickRegion {
+                area: Rect::new(31, 1, 40, 6),
+                kind: RegionKind::Deps,
+                scroll: 0,
+            },
+        ];
+
+        // First row of the results pane maps to its scroll offset (5).
+        assert_eq!(hit_test(&regions, 2, 1), Some((RegionKind::Results, 5)));
+        // Three rows down → offset 5 + 3.
+        assert_eq!(hit_test(&regions, 2, 4), Some((RegionKind::Results, 8)));
+        // A click in the deps pane, second row, scroll 0 → index 1.
+        assert_eq!(hit_test(&regions, 40, 2), Some((RegionKind::Deps, 1)));
+        // Outside every region.
+        assert_eq!(hit_test(&regions, 100, 100), None);
+        // On a pane's border (row 0, above inner area) → miss.
+        assert_eq!(hit_test(&regions, 2, 0), None);
     }
 
     #[test]
@@ -1389,13 +2011,30 @@ mod tests {
         let search_worker = SearchWorker::new(db_path).unwrap();
         let detail_worker = DetailWorker::new(db_path).unwrap();
         let diff_worker = DiffWorker::new(db_path).unwrap();
+        let folder_worker = FolderWorker::new(db_path).unwrap();
         TuiApp::new(
             search_worker,
             detail_worker,
             diff_worker,
+            folder_worker,
             PathResolver::new(),
         )
         .unwrap()
+    }
+
+    fn drain_until_folder_loaded(app: &mut TuiApp, previous_dir: Option<&str>) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            app.drain_folder_channel();
+            if app.folder_dir.as_deref() != previous_dir {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for folder worker"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
     }
 
     fn drain_until_diff_loaded(app: &mut TuiApp) {
@@ -1430,6 +2069,8 @@ mod tests {
                 functions: vec![],
                 function_call_sites: std::collections::BTreeMap::new(),
                 checkouts: vec![],
+                siblings: vec![],
+                sibling_dirs: vec![],
                 cached_preview: "x".to_string(),
                 preview_total_lines: 0,
                 error: None,
@@ -1475,6 +2116,8 @@ mod tests {
                     checkout_row("LINUX", "bob", "20240101_0900"),
                     checkout_row("LINUX", "jdoe", "20240102_0900"),
                 ],
+                siblings: vec![],
+                sibling_dirs: vec![],
                 cached_preview: String::new(),
                 preview_total_lines: 0,
                 error: None,
@@ -1699,6 +2342,353 @@ mod tests {
             app.selected_logical_path().as_deref(),
             Some("/catalog/scripts/a.py")
         );
+    }
+
+    fn drain_until_detail_loaded(app: &mut TuiApp) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            app.drain_detail_channel();
+            if !app.detail_loading {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for detail worker"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn is_animating_only_while_a_spinner_is_on_screen() {
+        let db = super::make_test_db();
+        let mut app = make_app(db.path());
+
+        // Fresh app dispatches the initial query, so a search is in flight
+        // with no results yet — the "Searching…" spinner animates.
+        assert!(app.is_animating());
+
+        // Once results and the detail load settle, nothing animates and the
+        // run loop can leave the screen (and any selection) untouched.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while app.search_in_flight {
+            app.apply_results().unwrap();
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for search worker"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        drain_until_detail_loaded(&mut app);
+        assert!(!app.results.is_empty());
+        assert!(!app.is_animating());
+
+        // A detail load in progress animates its "Loading…" spinners.
+        app.detail_loading = true;
+        assert!(app.is_animating());
+        app.detail_loading = false;
+
+        // A diff load animates the diff view spinner.
+        app.detail_diff_loading = true;
+        assert!(app.is_animating());
+        app.detail_diff_loading = false;
+
+        // An in-flight search with results already shown has no visible
+        // spinner, so it must not animate.
+        app.search_in_flight = true;
+        assert!(!app.results.is_empty());
+        assert!(!app.is_animating());
+    }
+
+    #[test]
+    fn folder_tab_toggles_browse_focus() {
+        let db = super::make_test_db();
+        let mut app = make_app(db.path());
+        app.results = vec![
+            serde_json::json!({ "logical_path": "/catalog/scripts/a.py" })
+                .as_object()
+                .unwrap()
+                .clone(),
+        ];
+        app.selected = 0;
+        app.load_selected().unwrap();
+        drain_until_detail_loaded(&mut app);
+
+        app.mode = ViewMode::Detail;
+        assert!(!app.folder_focused);
+
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.folder_focused);
+
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert!(!app.folder_focused);
+        // Esc while folder-focused only exits browse mode, not the detail view.
+        assert_eq!(app.mode, ViewMode::Detail);
+    }
+
+    #[test]
+    fn folder_enter_jumps_to_selected_sibling_and_backspace_returns() {
+        let db = super::make_test_db();
+        let conn = rusqlite::Connection::open(db.path()).unwrap();
+        conn.execute(
+            "INSERT INTO scripts (logical_path, language, content, owner, purpose)
+             VALUES ('/catalog/scripts/b.py','python','print(2)\\n','bob','')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let mut app = make_app(db.path());
+        app.results = vec![
+            serde_json::json!({ "logical_path": "/catalog/scripts/a.py" })
+                .as_object()
+                .unwrap()
+                .clone(),
+        ];
+        app.selected = 0;
+        app.load_selected().unwrap();
+        drain_until_detail_loaded(&mut app);
+        assert_eq!(app.siblings.len(), 1);
+
+        app.mode = ViewMode::Detail;
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.folder_focused);
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        drain_until_detail_loaded(&mut app);
+        assert_eq!(
+            app.selected_logical_path().as_deref(),
+            Some("/catalog/scripts/b.py")
+        );
+        assert!(!app.folder_focused);
+        assert_eq!(
+            app.folder_backstack.last().map(String::as_str),
+            Some("/catalog/scripts/a.py")
+        );
+
+        app.mode = ViewMode::Detail;
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
+            .unwrap();
+        drain_until_detail_loaded(&mut app);
+        assert_eq!(
+            app.selected_logical_path().as_deref(),
+            Some("/catalog/scripts/a.py")
+        );
+        assert!(app.folder_backstack.is_empty());
+    }
+
+    #[test]
+    fn folder_up_browses_parent_directory() {
+        let db = super::make_test_db();
+        let conn = rusqlite::Connection::open(db.path()).unwrap();
+        conn.execute(
+            "UPDATE scripts SET logical_path = '/catalog/scripts/jobs/deep.py'
+             WHERE logical_path = '/catalog/scripts/a.py'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO scripts (logical_path, language, content, owner, purpose)
+             VALUES ('/catalog/scripts/other.py','python','print(2)\\n','bob','')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let mut app = make_app(db.path());
+        app.results = vec![
+            serde_json::json!({ "logical_path": "/catalog/scripts/jobs/deep.py" })
+                .as_object()
+                .unwrap()
+                .clone(),
+        ];
+        app.selected = 0;
+        app.load_selected().unwrap();
+        drain_until_detail_loaded(&mut app);
+        assert!(app.siblings.is_empty());
+        assert_eq!(app.folder_display_dir(), "/catalog/scripts/jobs");
+
+        app.mode = ViewMode::Detail;
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Char('['), KeyModifiers::NONE))
+            .unwrap();
+        drain_until_folder_loaded(&mut app, None);
+
+        assert_eq!(app.folder_dir.as_deref(), Some("/catalog/scripts"));
+        let paths: Vec<String> = app
+            .siblings
+            .iter()
+            .map(|row| ScriptView::new(row).logical_path().to_string())
+            .collect();
+        assert_eq!(paths, vec!["/catalog/scripts/other.py".to_string()]);
+
+        // "/catalog/scripts" -> "/catalog".
+        app.handle_key(KeyEvent::new(KeyCode::Char('['), KeyModifiers::NONE))
+            .unwrap();
+        drain_until_folder_loaded(&mut app, Some("/catalog/scripts"));
+        assert_eq!(app.folder_dir.as_deref(), Some("/catalog"));
+
+        // "/catalog" -> "/" (root).
+        app.handle_key(KeyEvent::new(KeyCode::Char('['), KeyModifiers::NONE))
+            .unwrap();
+        drain_until_folder_loaded(&mut app, Some("/catalog"));
+        assert_eq!(app.folder_dir.as_deref(), Some("/"));
+
+        // "[" at the root has nowhere to go, so it must not dispatch another request.
+        let next_id_before = app.next_folder_id;
+        app.handle_key(KeyEvent::new(KeyCode::Char('['), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.next_folder_id, next_id_before);
+        assert_eq!(app.folder_dir.as_deref(), Some("/"));
+    }
+
+    #[test]
+    fn folder_selected_line_tracks_marker_position() {
+        let db = super::make_test_db();
+        let conn = rusqlite::Connection::open(db.path()).unwrap();
+        conn.execute(
+            "INSERT INTO scripts (logical_path, language, content, owner, purpose)
+             VALUES ('/catalog/scripts/b.py','python','print(2)\\n','bob','')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let mut app = make_app(db.path());
+        app.results = vec![
+            serde_json::json!({ "logical_path": "/catalog/scripts/a.py" })
+                .as_object()
+                .unwrap()
+                .clone(),
+        ];
+        app.selected = 0;
+        app.load_selected().unwrap();
+        drain_until_detail_loaded(&mut app);
+        app.folder_focused = true;
+        app.siblings_selected = 0;
+
+        let lines = super::detail::detail_lines(&app);
+        let selected = super::detail::folder_selected_line(&app, &lines).unwrap();
+        let text: String = lines[selected as usize]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(text.starts_with("> "), "selected line: {text:?}");
+    }
+
+    #[test]
+    fn folder_enter_descends_into_selected_subdirectory() {
+        let db = super::make_test_db();
+        let conn = rusqlite::Connection::open(db.path()).unwrap();
+        conn.execute(
+            "INSERT INTO scripts (logical_path, language, content, owner, purpose)
+             VALUES ('/catalog/scripts/jobs/deep.py','python','print(2)\\n','bob','')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let mut app = make_app(db.path());
+        app.results = vec![
+            serde_json::json!({ "logical_path": "/catalog/scripts/a.py" })
+                .as_object()
+                .unwrap()
+                .clone(),
+        ];
+        app.selected = 0;
+        app.load_selected().unwrap();
+        drain_until_detail_loaded(&mut app);
+        // The initial detail load already lists the subdirectory.
+        assert_eq!(app.sibling_dirs, vec!["jobs"]);
+        assert!(app.siblings.is_empty());
+
+        app.mode = ViewMode::Detail;
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        // Selection starts on the "jobs/" directory entry; Enter descends
+        // into it instead of jumping to a script.
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        drain_until_folder_loaded(&mut app, None);
+
+        assert_eq!(app.folder_dir.as_deref(), Some("/catalog/scripts/jobs"));
+        assert!(app.sibling_dirs.is_empty());
+        let paths: Vec<String> = app
+            .siblings
+            .iter()
+            .map(|row| ScriptView::new(row).logical_path().to_string())
+            .collect();
+        assert_eq!(paths, vec!["/catalog/scripts/jobs/deep.py".to_string()]);
+        // Still browsing: descending must not leave folder-browse mode.
+        assert!(app.folder_focused);
+
+        // Enter on the script inside the subfolder jumps the detail view.
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        drain_until_detail_loaded(&mut app);
+        assert_eq!(
+            app.selected_logical_path().as_deref(),
+            Some("/catalog/scripts/jobs/deep.py")
+        );
+        assert!(!app.folder_focused);
+    }
+
+    #[test]
+    fn switching_scripts_ignores_a_stale_folder_response() {
+        let db = super::make_test_db();
+        let conn = rusqlite::Connection::open(db.path()).unwrap();
+        conn.execute(
+            "INSERT INTO scripts (logical_path, language, content, owner, purpose)
+             VALUES ('/catalog/scripts/b.py','python','print(2)\\n','bob','')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let mut app = make_app(db.path());
+        app.results = vec![
+            serde_json::json!({ "logical_path": "/catalog/scripts/a.py" })
+                .as_object()
+                .unwrap()
+                .clone(),
+        ];
+        app.selected = 0;
+        app.load_selected().unwrap();
+        drain_until_detail_loaded(&mut app);
+
+        // Simulate a folder-browse request still in flight (e.g. "go up")
+        // from the script that was selected a moment ago.
+        app.dispatch_folder_request("/catalog".to_string()).unwrap();
+        let stale_id = app.inflight_folder_id.unwrap();
+
+        // The user switches to a different script before that request resolves.
+        app.selected = 0;
+        app.load_selected().unwrap();
+        drain_until_detail_loaded(&mut app);
+        assert_ne!(app.inflight_folder_id, Some(stale_id));
+        let siblings_before = app.siblings.clone();
+        let folder_dir_before = app.folder_dir.clone();
+
+        // The stale response now arrives; it must be ignored rather than
+        // overwriting the newly selected script's folder state.
+        app.apply_folder_response(FolderResponse {
+            id: stale_id,
+            dir: "/catalog".to_string(),
+            result: Ok(FolderListing {
+                dirs: vec![],
+                scripts: vec![],
+            }),
+        });
+        assert_eq!(app.folder_dir, folder_dir_before);
+        assert_eq!(app.siblings, siblings_before);
     }
 
     #[test]

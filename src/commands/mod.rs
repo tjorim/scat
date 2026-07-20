@@ -16,8 +16,8 @@ use crate::cli::{OutputFormat, SearchOutput};
 use crate::output::{
     canonicalize_row_keys, dash_or_empty, dep_entry_to_json, json_script_field, list_field_display,
     mtime_field, print_json, print_script_table, print_script_table_with_fields, render_script_csv,
-    render_table, script_rows_to_json, selected_script_fields, size_field, str_field,
-    used_by_row_to_json, warning_kinds,
+    render_table, script_rows_to_json, selected_script_fields, sibling_row_to_json, size_field,
+    str_field, used_by_row_to_json, warning_kinds,
 };
 use crate::runtime::audit_exit_code;
 
@@ -293,6 +293,10 @@ pub(crate) fn cmd_show(
         } else {
             None
         };
+        let needs_siblings = effective.contains(&"siblings");
+        let siblings = needs_siblings
+            .then(|| api.siblings(resolved_path))
+            .transpose()?;
 
         let mut out = scat_core::core::db::JsonRow::new();
         // Always include path as the record identifier, mirroring how the table
@@ -313,6 +317,22 @@ pub(crate) fn cmd_show(
                         .map(|g| g.used_by.iter().map(used_by_row_to_json).collect())
                         .unwrap_or_default();
                     out.insert("used_by".to_string(), serde_json::json!(used_by));
+                }
+                "folder" => {
+                    let folder = view.parent_dir();
+                    let value = if folder.is_empty() {
+                        serde_json::Value::Null
+                    } else {
+                        serde_json::Value::String(folder.to_string())
+                    };
+                    out.insert("folder".to_string(), value);
+                }
+                "siblings" => {
+                    let rows: Vec<serde_json::Value> = siblings
+                        .as_ref()
+                        .map(|s| s.iter().map(sibling_row_to_json).collect())
+                        .unwrap_or_default();
+                    out.insert("siblings".to_string(), serde_json::json!(rows));
                 }
                 "contributors" => {
                     let contribs = view.contributors();
@@ -342,6 +362,10 @@ pub(crate) fn cmd_show(
     let graph = needs_deps
         .then(|| api.dependency_graph(resolved_path))
         .transpose()?;
+    let needs_siblings = effective.contains(&"siblings");
+    let siblings = needs_siblings
+        .then(|| api.siblings(resolved_path))
+        .transpose()?;
 
     for field in &effective {
         match *field {
@@ -360,6 +384,12 @@ pub(crate) fn cmd_show(
             "used_by" => {
                 if let Some(g) = &graph {
                     println!("  Used by      : {}", g.used_by.len());
+                }
+            }
+            "folder" => println!("  Folder       : {}", dash_or_empty(view.parent_dir())),
+            "siblings" => {
+                if let Some(s) = &siblings {
+                    println!("  Siblings     : {}", s.len());
                 }
             }
             "mtime" => println!("  Modified     : {}", mtime_field(view)),
@@ -1152,6 +1182,15 @@ mod tests {
         (SearchApi::new(conn), file)
     }
 
+    fn insert_script(api: &SearchApi, path: &str) {
+        api.conn
+            .execute(
+                "INSERT INTO scripts (logical_path, language, owner, purpose) VALUES (?1,'python','alice','')",
+                rusqlite::params![path],
+            )
+            .unwrap();
+    }
+
     fn revision_row(
         os_flavor: &str,
         user: &str,
@@ -1243,6 +1282,25 @@ mod tests {
             err.to_string(),
             "script '/catalog/scripts/missing.py' not found in catalog"
         );
+    }
+
+    #[test]
+    fn cmd_show_accepts_folder_and_siblings_fields() {
+        let (api, _file) = make_api();
+        insert_script(&api, "/catalog/scripts/a.py");
+        insert_script(&api, "/catalog/scripts/b.py");
+
+        for output in [super::OutputFormat::Table, super::OutputFormat::Json] {
+            cmd_show(
+                &api,
+                "/catalog/scripts/a.py",
+                &["folder".to_string(), "siblings".to_string()],
+                output,
+                false,
+                false,
+            )
+            .unwrap();
+        }
     }
 
     #[test]

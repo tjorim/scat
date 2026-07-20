@@ -54,6 +54,39 @@ pub(super) fn detail_lines(app: &TuiApp) -> Vec<Line<'static>> {
         }
     }
 
+    let parent_dir = app
+        .folder_dir
+        .clone()
+        .unwrap_or_else(|| view.parent_dir().to_string());
+    if !parent_dir.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(section("Folder"));
+        lines.push(field_line("Directory", parent_dir.clone()));
+        if app.sibling_dirs.is_empty() && app.siblings.is_empty() {
+            lines.push(Line::from("  (no other entries in this folder)"));
+        } else {
+            let marker = |idx: usize| {
+                if app.folder_focused && idx == app.siblings_selected {
+                    "> "
+                } else {
+                    "  "
+                }
+            };
+            for (idx, dir_name) in app.sibling_dirs.iter().enumerate() {
+                lines.push(Line::from(format!("{}- {dir_name}/", marker(idx))));
+            }
+            for (offset, sibling) in app.siblings.iter().enumerate() {
+                let sibling_path = ScriptView::new(sibling).logical_path();
+                let name = sibling_path
+                    .rsplit_once('/')
+                    .map_or(sibling_path, |(_, name)| name);
+                let idx = app.sibling_dirs.len() + offset;
+                lines.push(Line::from(format!("{}- {name}", marker(idx))));
+            }
+        }
+        lines.push(folder_hint_line(app.folder_focused, parent_dir == "/"));
+    }
+
     if !app.deps.is_empty() {
         lines.push(Line::from(""));
         lines.push(section("Dependencies"));
@@ -144,6 +177,75 @@ fn field_line(label: &'static str, value: String) -> Line<'static> {
 
 fn bullet_line(value: String) -> Line<'static> {
     Line::from(format!("  - {value}"))
+}
+
+/// Absolute line index (within `lines` as produced by [`detail_lines`]) of
+/// the Folder entry currently selected in browse mode, so the render loop
+/// can keep it scrolled into view. Layout inside the section: the "Folder"
+/// header, then the Directory line, then one line per entry.
+pub(super) fn folder_selected_line(app: &TuiApp, lines: &[Line<'static>]) -> Option<u16> {
+    let section_idx = folder_section_index(lines)?;
+    let line = section_idx + 2 + app.siblings_selected;
+    Some(u16::try_from(line).unwrap_or(u16::MAX))
+}
+
+fn folder_section_index(lines: &[Line<'static>]) -> Option<usize> {
+    lines.iter().position(|line| {
+        line.spans
+            .first()
+            .is_some_and(|span| span.content == "Folder")
+    })
+}
+
+/// What a click on a given line of the detail body maps to.
+pub(super) enum DetailClick {
+    /// The script's `Path` field — copy it.
+    CopyPath,
+    /// A Folder-section entry (subdir or sibling), by its index in the list.
+    FolderEntry(usize),
+    /// A non-interactive line.
+    None,
+}
+
+/// Resolve a click on absolute line `line` of the rendered detail body.
+///
+/// Recomputes [`detail_lines`] to locate the `Path` field and the Folder
+/// section, so the mapping stays in sync with what was drawn.
+pub(super) fn detail_click_at(app: &TuiApp, line: usize) -> DetailClick {
+    let lines = detail_lines(app);
+    if line >= lines.len() {
+        return DetailClick::None;
+    }
+    // The `Path` field is a labelled line whose label (padded) trims to "Path".
+    let path_line = lines.iter().position(|l| {
+        l.spans
+            .first()
+            .is_some_and(|s| s.content.trim_end() == "Path")
+    });
+    if path_line == Some(line) {
+        return DetailClick::CopyPath;
+    }
+    if let Some(section_idx) = folder_section_index(&lines) {
+        let start = section_idx + 2;
+        let count = app.sibling_dirs.len() + app.siblings.len();
+        if line >= start && line < start + count {
+            return DetailClick::FolderEntry(line - start);
+        }
+    }
+    DetailClick::None
+}
+
+/// Hint line shown under the Folder section's sibling list, reflecting
+/// whether browse mode is active and whether "go up" has anywhere to go.
+fn folder_hint_line(focused: bool, at_root: bool) -> Line<'static> {
+    let hint = if !focused {
+        "  [Tab] browse folder".to_string()
+    } else if at_root {
+        "  [Tab] exit browse  [j/k] move  [Enter] open  [Backspace] back  (at root)".to_string()
+    } else {
+        "  [Tab] exit browse  [j/k] move  [Enter] open  [[] up  [Backspace] back".to_string()
+    };
+    Line::from(Span::styled(hint, Style::default().fg(Color::DarkGray)))
 }
 
 #[cfg(test)]

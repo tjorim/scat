@@ -576,6 +576,134 @@ fn list_scripts_owner_filter() {
 }
 
 // ---------------------------------------------------------------------------
+// scripts_in_dir
+// ---------------------------------------------------------------------------
+
+#[test]
+fn scripts_in_dir_lists_one_level_deep() {
+    let (api, _f) = make_api();
+    insert(&api, "/catalog/scripts/a.py", "", "python", "", "");
+    insert(&api, "/catalog/scripts/b.py", "", "python", "", "");
+    insert(&api, "/catalog/scripts/jobs/c.py", "", "python", "", "");
+
+    let entries = api.scripts_in_dir("/catalog/scripts").unwrap();
+    let paths: Vec<&str> = entries
+        .iter()
+        .map(|r| r["logical_path"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        paths,
+        vec!["/catalog/scripts/a.py", "/catalog/scripts/b.py"]
+    );
+}
+
+#[test]
+fn scripts_in_dir_empty_for_empty_dir() {
+    let (api, _f) = make_api();
+    insert(&api, "/catalog/scripts/a.py", "", "python", "", "");
+    assert!(api.scripts_in_dir("").unwrap().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// subdirs_of
+// ---------------------------------------------------------------------------
+
+#[test]
+fn subdirs_of_lists_immediate_child_directories_deduped() {
+    let (api, _f) = make_api();
+    insert(&api, "/catalog/scripts/a.py", "", "python", "", "");
+    insert(&api, "/catalog/scripts/jobs/b.py", "", "python", "", "");
+    insert(
+        &api,
+        "/catalog/scripts/jobs/nested/c.py",
+        "",
+        "python",
+        "",
+        "",
+    );
+    insert(&api, "/catalog/scripts/tools/d.py", "", "python", "", "");
+
+    // "jobs" appears once despite two scripts under it, and "nested" is not
+    // an immediate child of /catalog/scripts.
+    assert_eq!(
+        api.subdirs_of("/catalog/scripts").unwrap(),
+        vec!["jobs", "tools"]
+    );
+    assert_eq!(
+        api.subdirs_of("/catalog/scripts/jobs").unwrap(),
+        vec!["nested"]
+    );
+}
+
+#[test]
+fn subdirs_of_root() {
+    let (api, _f) = make_api();
+    insert(&api, "/a.py", "", "python", "", "");
+    insert(&api, "/catalog/scripts/b.py", "", "python", "", "");
+
+    assert_eq!(api.subdirs_of("/").unwrap(), vec!["catalog"]);
+}
+
+#[test]
+fn subdirs_of_empty_cases() {
+    let (api, _f) = make_api();
+    insert(&api, "/catalog/scripts/a.py", "", "python", "", "");
+
+    assert!(api.subdirs_of("").unwrap().is_empty());
+    assert!(api.subdirs_of("/catalog/scripts").unwrap().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// siblings
+// ---------------------------------------------------------------------------
+
+#[test]
+fn siblings_lists_same_folder_excluding_self_and_subfolders() {
+    let (api, _f) = make_api();
+    insert(&api, "/catalog/scripts/a.py", "", "python", "", "");
+    insert(&api, "/catalog/scripts/b.py", "", "python", "", "");
+    insert(&api, "/catalog/scripts/jobs/c.py", "", "python", "", "");
+
+    let sib = api.siblings("/catalog/scripts/a.py").unwrap();
+    let paths: Vec<&str> = sib
+        .iter()
+        .map(|r| r["logical_path"].as_str().unwrap())
+        .collect();
+    assert_eq!(paths, vec!["/catalog/scripts/b.py"]);
+}
+
+#[test]
+fn siblings_at_root() {
+    let (api, _f) = make_api();
+    insert(&api, "/a.py", "", "python", "", "");
+    insert(&api, "/b.py", "", "python", "", "");
+    insert(&api, "/catalog/scripts/nested.py", "", "python", "", "");
+
+    let sib = api.siblings("/a.py").unwrap();
+    let paths: Vec<&str> = sib
+        .iter()
+        .map(|r| r["logical_path"].as_str().unwrap())
+        .collect();
+    assert_eq!(paths, vec!["/b.py"]);
+}
+
+#[test]
+fn siblings_empty_for_bare_path() {
+    let (api, _f) = make_api();
+    insert(&api, "bare.py", "", "python", "", "");
+    let sib = api.siblings("bare.py").unwrap();
+    assert!(sib.is_empty());
+}
+
+#[test]
+fn siblings_empty_when_alone_in_folder() {
+    let (api, _f) = make_api();
+    insert(&api, "/catalog/scripts/alone.py", "", "python", "", "");
+    let sib = api.siblings("/catalog/scripts/alone.py").unwrap();
+    assert!(sib.is_empty());
+}
+
+// ---------------------------------------------------------------------------
 // related_scripts
 // ---------------------------------------------------------------------------
 

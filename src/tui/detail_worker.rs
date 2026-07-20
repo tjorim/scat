@@ -6,7 +6,7 @@ use std::thread::{self, JoinHandle};
 use anyhow::{Context, Result, anyhow};
 
 use scat_core::core::db::JsonRow;
-use scat_core::core::script_view::ScriptView;
+use scat_core::core::script_view::{ScriptView, logical_parent_dir};
 use scat_core::core::search::{SearchApi, open_search_api};
 
 #[derive(Debug, Clone)]
@@ -45,6 +45,9 @@ pub struct DetailPayload {
     pub functions: Vec<FunctionItem>,
     pub function_call_sites: BTreeMap<String, Vec<FunctionCallSite>>,
     pub checkouts: Vec<JsonRow>,
+    pub siblings: Vec<JsonRow>,
+    /// Immediate subdirectory names of the script's parent folder.
+    pub sibling_dirs: Vec<String>,
     pub cached_preview: String,
     /// Total number of lines in the indexed content (before the
     /// `PREVIEW_LINES` cap); `cached_preview` is truncated when this exceeds it.
@@ -125,6 +128,8 @@ fn worker_loop(
                 functions: vec![],
                 function_call_sites: BTreeMap::new(),
                 checkouts: vec![],
+                siblings: vec![],
+                sibling_dirs: vec![],
                 cached_preview: String::new(),
                 preview_total_lines: 0,
                 error: Some(err.clone()),
@@ -155,6 +160,8 @@ fn load_detail(api: &SearchApi, path: &str) -> DetailPayload {
         functions: vec![],
         function_call_sites: BTreeMap::new(),
         checkouts: vec![],
+        siblings: vec![],
+        sibling_dirs: vec![],
         cached_preview: String::new(),
         preview_total_lines: 0,
         error: None,
@@ -181,6 +188,26 @@ fn load_detail(api: &SearchApi, path: &str) -> DetailPayload {
 
     result.checkouts = match api.revisions_for(path) {
         Ok(c) => c,
+        Err(e) => {
+            if result.error.is_none() {
+                result.error = Some(e.to_string());
+            }
+            vec![]
+        }
+    };
+
+    result.siblings = match api.siblings(path) {
+        Ok(s) => s,
+        Err(e) => {
+            if result.error.is_none() {
+                result.error = Some(e.to_string());
+            }
+            vec![]
+        }
+    };
+
+    result.sibling_dirs = match api.subdirs_of(logical_parent_dir(path)) {
+        Ok(dirs) => dirs,
         Err(e) => {
             if result.error.is_none() {
                 result.error = Some(e.to_string());

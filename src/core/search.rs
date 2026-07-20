@@ -9,7 +9,7 @@ use crate::core::db::{
     JsonRow, SCHEMA_VERSION, append_script_filters, fts_query_filtered, query_rows, row_string,
     row_to_map,
 };
-use crate::core::script_view::{ListField, ScriptView};
+use crate::core::script_view::{ListField, ScriptView, logical_parent_dir};
 use crate::core::vc::{REVISION_TYPE_ARCHIVE, REVISION_TYPE_DEVELOP};
 use crate::error::{Error, Result};
 
@@ -356,6 +356,92 @@ impl SearchApi {
             &[&logical_path],
         )?;
         Ok(rows.into_iter().next())
+    }
+
+    // ------------------------------------------------------------------
+    // Folder siblings
+    // ------------------------------------------------------------------
+
+    /// Return the indexed scripts that live directly in `dir` (one level
+    /// deep). `dir` should be a directory path as returned by
+    /// [`logical_parent_dir`] (for example `/catalog/scripts`, or `/` for
+    /// the root). Returns an empty list for an empty `dir` (a bare,
+    /// non-absolute logical path has no folder to list).
+    pub fn scripts_in_dir(&self, dir: &str) -> Result<Vec<JsonRow>> {
+        if dir.is_empty() {
+            return Ok(vec![]);
+        }
+        // Escape LIKE metacharacters in the folder path so a literal `%`/`_`
+        // in a directory name can't widen the match.
+        let escaped_dir = dir
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let prefix = if dir == "/" {
+            escaped_dir
+        } else {
+            format!("{escaped_dir}/")
+        };
+        let one_level = format!("{prefix}%");
+        let two_level = format!("{prefix}%/%");
+
+        query_script_rows(
+            &self.conn,
+            "SELECT * FROM scripts
+             WHERE logical_path LIKE ?1 ESCAPE '\\'
+               AND logical_path NOT LIKE ?2 ESCAPE '\\'
+             ORDER BY logical_path",
+            vec![SqlValue::Text(one_level), SqlValue::Text(two_level)],
+        )
+    }
+
+    /// Return the other indexed scripts that live directly in the same
+    /// parent folder as `logical_path` (one level deep, excluding
+    /// `logical_path` itself).
+    pub fn siblings(&self, logical_path: &str) -> Result<Vec<JsonRow>> {
+        let mut rows = self.scripts_in_dir(logical_parent_dir(logical_path))?;
+        rows.retain(|row| row_string(row, "logical_path") != logical_path);
+        Ok(rows)
+    }
+
+    /// Return the names (single path components, no separators) of the
+    /// immediate subdirectories of `dir` that contain at least one indexed
+    /// script, sorted and deduplicated. Directories only exist in the
+    /// catalog as path prefixes, so this derives them from `logical_path`
+    /// rows at least one level deeper than `dir`.
+    pub fn subdirs_of(&self, dir: &str) -> Result<Vec<String>> {
+        if dir.is_empty() {
+            return Ok(vec![]);
+        }
+        let escaped_dir = dir
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let (escaped_prefix, prefix) = if dir == "/" {
+            (escaped_dir, dir.to_string())
+        } else {
+            (format!("{escaped_dir}/"), format!("{dir}/"))
+        };
+        let pattern = format!("{escaped_prefix}%/%");
+        // SQLite substr is 1-indexed and counts characters for text, so the
+        // unescaped prefix's char count locates the first char after it.
+        let start = (prefix.chars().count() + 1) as i64;
+
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT substr(substr(logical_path, ?2), 1,
+                                    instr(substr(logical_path, ?2), '/') - 1) AS name
+             FROM scripts
+             WHERE logical_path LIKE ?1 ESCAPE '\\'
+             ORDER BY name",
+        )?;
+        let rows: Result<Vec<String>> = stmt
+            .query_map(
+                rusqlite::params![SqlValue::Text(pattern), SqlValue::Integer(start)],
+                |row| row.get(0),
+            )?
+            .map(|r| r.map_err(Error::from))
+            .collect();
+        rows
     }
 
     // ------------------------------------------------------------------

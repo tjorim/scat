@@ -98,14 +98,32 @@ scat tui
 | `g` / `G` | Jump to top/bottom of results; `g` resets detail-pane scroll |
 | `Home` / `End` | Jump within results; `Home` resets focused detail-pane scroll |
 | `d` (in detail view) | Open a script diff against the most-recent checkout |
+| `Tab` (in detail view) | Browse the script's folder: `j`/`k` highlight an entry, `Enter` opens a sibling script or descends into a subfolder, `[` goes up a level, `Backspace` returns |
 | `Ctrl+L` | Focus the results list |
 | `Escape` / `Backspace` | Return from script detail view, or quit from browse mode |
 | `q` | Quit |
 
+### Mouse
+
+The TUI also responds to the mouse:
+
+| Action | Effect |
+|---|---|
+| Click a result | Select it; double-click opens the full detail view |
+| Click a dependency / function | Select it; click again (or double-click) to jump to it |
+| Click the path (header or Metadata pane, or the `Path` line in the detail view) | Copy the full logical path to the clipboard |
+| Click the search box | Focus the search input |
+| Scroll wheel | Scroll (or move the selection in) the pane under the cursor |
+
+Copy uses the OSC 52 escape sequence, so it reaches your local clipboard even
+over SSH. To select text by hand instead (bypassing the app's mouse handling),
+hold **Shift** while dragging — the terminal's own selection then works as
+usual.
+
 The details pane shows metadata, checkout state, source preview, and related
 or dependent scripts for the highlighted result. Press `Enter` on a result to
 open a full script detail view with tags, entry points, warnings, checkout
-rows, dependency summary, and source preview.
+rows, dependency summary, folder siblings, and source preview.
 
 ---
 
@@ -121,6 +139,15 @@ scat show /catalog/scripts/patch_check.py
 
 ```bash
 scat show /catalog/scripts/patch_check.py --output json
+```
+
+### Folder context
+
+Opt-in fields list the script's parent directory and the other scripts
+indexed in the same folder:
+
+```bash
+scat show /catalog/scripts/patch_check.py --fields folder,siblings
 ```
 
 ---
