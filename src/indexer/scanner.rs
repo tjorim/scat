@@ -9,6 +9,7 @@ use tracing::{debug, warn};
 
 use crate::core::vc::{CheckoutRecord, REVISION_TYPE_WORKING, parse_checkout_filename};
 use crate::error::{Error, Result};
+use crate::indexer::scan_tree::ScanTreeView;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -206,6 +207,56 @@ pub fn scan_paths_with_revisions(
     progress: Option<&ProgressBar>,
     shutdown: &AtomicBool,
 ) -> Result<ScanResult> {
+    scan_paths_with_revisions_impl(
+        roots,
+        logical_prefix,
+        head_lines,
+        ignore_files,
+        checkout_dirs,
+        progress,
+        None,
+        shutdown,
+    )
+}
+
+/// Like [`scan_paths_with_revisions`], but also feeds a live multi-line
+/// directory tree view as the walk progresses — see [`ScanTreeView`]. Used
+/// only for interactive manual runs; unattended cron builds pass `None` to
+/// [`scan_paths_with_revisions`] instead and never construct one.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn scan_paths_with_revisions_and_tree(
+    roots: &[PathBuf],
+    logical_prefix: &str,
+    head_lines: usize,
+    ignore_files: &[PathBuf],
+    checkout_dirs: &[&str],
+    progress: Option<&ProgressBar>,
+    tree: Option<&mut ScanTreeView>,
+    shutdown: &AtomicBool,
+) -> Result<ScanResult> {
+    scan_paths_with_revisions_impl(
+        roots,
+        logical_prefix,
+        head_lines,
+        ignore_files,
+        checkout_dirs,
+        progress,
+        tree,
+        shutdown,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn scan_paths_with_revisions_impl(
+    roots: &[PathBuf],
+    logical_prefix: &str,
+    head_lines: usize,
+    ignore_files: &[PathBuf],
+    checkout_dirs: &[&str],
+    progress: Option<&ProgressBar>,
+    mut tree: Option<&mut ScanTreeView>,
+    shutdown: &AtomicBool,
+) -> Result<ScanResult> {
     use crate::core::vc::{DEFAULT_ARCHIVE_DIRS, DEFAULT_DEVELOP_DIRS};
     let default_checkout_dirs: Vec<&str> = DEFAULT_DEVELOP_DIRS
         .iter()
@@ -292,6 +343,9 @@ pub fn scan_paths_with_revisions(
                 pb.inc(1);
             }
             if shutdown.load(Ordering::Relaxed) {
+                if let Some(tree) = tree.as_deref_mut() {
+                    tree.clear();
+                }
                 if let Some(pb) = progress {
                     pb.finish_and_clear();
                 }
@@ -323,6 +377,9 @@ pub fn scan_paths_with_revisions(
                     entry.path().parent().unwrap_or_else(|| entry.path())
                 };
                 pb.set_message(display_path.display().to_string());
+                if let Some(tree) = tree.as_deref_mut() {
+                    tree.update(root, entry.path());
+                }
             }
 
             let file_type = match entry.file_type() {

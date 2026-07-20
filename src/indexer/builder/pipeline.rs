@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use rusqlite::Connection;
 use serde_json::Value;
@@ -14,7 +14,8 @@ use crate::error::{Error, Result};
 use crate::indexer::ast_deps::AstDependencies;
 use crate::indexer::checkpoint::{Checkpoint, write_checkpoint};
 use crate::indexer::extractor::{ExtractedMetadata, extract};
-use crate::indexer::scanner::{ScriptRecord, scan_paths_with_revisions};
+use crate::indexer::scan_tree::ScanTreeView;
+use crate::indexer::scanner::{ScriptRecord, scan_paths_with_revisions_and_tree};
 use crate::indexer::treesitter_deps::TreeSitterExtractor;
 
 use super::IndexResult;
@@ -57,8 +58,11 @@ pub(super) fn populate(
     // -----------------------------------------------------------------------
     // Phase 1: Scan
     // -----------------------------------------------------------------------
-    let scan_pb = if use_progress {
-        let pb = ProgressBar::new_spinner();
+    // The tree view shares the scan spinner's own MultiProgress so its level
+    // lines render directly beneath the "Scanning… [elapsed] N files" line.
+    let (scan_pb, mut scan_tree) = if use_progress {
+        let multi = MultiProgress::new();
+        let pb = multi.add(ProgressBar::new_spinner());
         pb.set_style(
             ProgressStyle::with_template(
                 "{spinner:.green} Scanning…  [{elapsed_precise}]  {pos} files  ({per_sec})  {msg}",
@@ -66,9 +70,9 @@ pub(super) fn populate(
             .unwrap_or_else(|_| ProgressStyle::default_spinner()),
         );
         pb.enable_steady_tick(std::time::Duration::from_millis(80));
-        Some(pb)
+        (Some(pb), Some(ScanTreeView::new(multi)))
     } else {
-        None
+        (None, None)
     };
 
     debug!(
@@ -77,13 +81,14 @@ pub(super) fn populate(
         "starting scan_paths phase"
     );
     let checkout_dirs: Vec<&str> = vc_config.all_checkout_dirs().collect();
-    let scan_result = scan_paths_with_revisions(
+    let scan_result = scan_paths_with_revisions_and_tree(
         scan_roots,
         logical_prefix,
         head_lines,
         ignore_files,
         &checkout_dirs,
         scan_pb.as_ref(),
+        scan_tree.as_mut(),
         shutdown,
     )?;
     let records = scan_result.scripts;
@@ -96,6 +101,9 @@ pub(super) fn populate(
         "completed build phase"
     );
 
+    if let Some(tree) = &mut scan_tree {
+        tree.clear();
+    }
     if let Some(pb) = &scan_pb {
         pb.finish_and_clear();
     }
