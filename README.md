@@ -169,6 +169,19 @@ provide the same field, precedence is deterministic:
 
 ***
 
+## Configuration
+
+scat can read an optional config file (JSON or YAML, detected from the
+extension) for the database path, scan roots, ignore patterns, vc
+executable/checkout dirs, and search bookmarks. Point scat at it with
+`--config <path>` or `SCAT_CONFIG`; CLI flags and env vars always take
+precedence over config-file values.
+
+See **[docs/scat.example.yaml](docs/scat.example.yaml)** for an annotated
+example covering every field.
+
+***
+
 ## Database
 
 *   SQLite (single file)

@@ -21,6 +21,14 @@ export SCAT_DB=/catalog/scat/scripts.sqlite
 $env:SCAT_DB = "C:\catalog\scat\scripts.sqlite"
 ```
 
+### Optional: config file
+
+Instead of (or in addition to) `SCAT_DB`, you can point scat at a config
+file with `--config <path>` or `SCAT_CONFIG` for the database path, scan
+roots, ignore patterns, vc settings, and search bookmarks (`scat search
+@name`). See **[scat.example.yaml](scat.example.yaml)** for an annotated
+example. CLI flags and env vars always override config-file values.
+
 ---
 
 ## 1 – Search

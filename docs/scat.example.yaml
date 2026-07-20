@@ -1,0 +1,43 @@
+# Example scat configuration file.
+#
+# Copy this file, edit it for your environment, then point scat at it with
+# either flag or environment variable:
+#
+#   scat --config /path/to/scat.yaml ...
+#   export SCAT_CONFIG=/path/to/scat.yaml
+#
+# JSON is also accepted; the format is picked from the file extension
+# (.yml/.yaml -> YAML, anything else -> JSON). All fields are optional —
+# omit anything you don't need.
+
+# Path to the catalog SQLite database. Overridden by --db / SCAT_DB.
+db_path: /catalog/scat/scripts.sqlite
+
+# Root directories scanned recursively by `scat catalog build` when
+# --scan-root is not passed on the command line.
+scan_roots:
+  - /catalog/scripts/linux
+  - /catalog/scripts/windows
+
+# Gitignore-style patterns applied during catalog scanning, in addition to
+# any --ignore-file passed on the command line.
+ignore_patterns:
+  - "*.pyc"
+  - "__pycache__/"
+  - "*.tmp"
+
+# vc (version-control checkout tool) integration settings.
+vc:
+  # Path to the vc executable. Falls back to PATH lookup if omitted.
+  executable: /usr/local/bin/vc
+  # Directory names treated as DEVELOP-type checkout containers.
+  develop_dirs:
+    - DEVELOP
+  # Directory names treated as ARCHIVE-type checkout containers.
+  archive_dirs:
+    - ARCHIVE
+
+# Named search aliases. `scat search @name` expands to the mapped query.
+bookmarks:
+  my-scripts: "owner:alice@example.com"
+  patch-tools: "patch freeze lang:python"
