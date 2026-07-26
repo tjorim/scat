@@ -29,4 +29,7 @@ skip = [
   # getrandom's WASI support currently resolves two transitive wit-bindgen
   # versions (via wasip2/wasip3); allow this duplicate until upstream converges.
   { name = "wit-bindgen" },
+  # thiserror-impl 2.0.19 moved to syn 3.x while clap, serde_derive, ratatui,
+  # and others are still on syn 2.x; allow this duplicate until they converge.
+  { name = "syn" },
 ]
