@@ -6,7 +6,7 @@ use tracing::{debug, trace};
 use crate::error::{Error, Result};
 
 /// Current SQLite schema version expected by this binary.
-pub const SCHEMA_VERSION: i64 = 11;
+pub const SCHEMA_VERSION: i64 = 12;
 
 /// A database row serialised as a JSON object — every column becomes a key.
 pub type JsonRow = serde_json::Map<String, serde_json::Value>;
@@ -104,6 +104,21 @@ CREATE TABLE IF NOT EXISTS scripts (
 CREATE INDEX IF NOT EXISTS idx_scripts_symlink_target
 ON scripts(symlink_target)
 WHERE symlink_target IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_scripts_language
+ON scripts(language)
+WHERE language IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_scripts_owner
+ON scripts(owner)
+WHERE owner IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_scripts_logical_path
+ON scripts(logical_path);
+
+CREATE INDEX IF NOT EXISTS idx_scripts_checkout_timestamp
+ON scripts(checkout_timestamp)
+WHERE checkout_timestamp IS NOT NULL;
 
 CREATE VIRTUAL TABLE IF NOT EXISTS script_fts USING fts5(
     logical_path,
