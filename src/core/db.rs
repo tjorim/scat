@@ -399,7 +399,13 @@ pub fn apply_bulk_build_pragmas(conn: &Connection) -> Result<()> {
 /// `MATCH ''` is itself a syntax error, so callers must check for this and
 /// skip the FTS query entirely rather than pass an empty string through.
 pub fn sanitize_fts_query(input: &str) -> String {
-    let chars: Vec<char> = input.chars().collect();
+    // NUL bytes can't occur in practice (shell argv and JSON strings can't
+    // carry one), but FTS5's phrase parser reads a quoted term as a C string
+    // and stops at the first NUL, turning it into an "unterminated string"
+    // syntax error even though every `"` was escaped correctly. Stripping
+    // them keeps the "no syntax error, ever" contract exact rather than
+    // "almost always".
+    let chars: Vec<char> = input.chars().filter(|&c| c != '\0').collect();
     let n = chars.len();
     let mut i = 0;
     let mut terms: Vec<String> = Vec::new();
@@ -553,6 +559,7 @@ pub fn query_rows(
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
     use serde_json::json;
 
     use super::*;
@@ -713,6 +720,15 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_strips_embedded_nul_bytes() {
+        // Regression guard (found by the proptest below): FTS5 reads a
+        // quoted term as a C string, so an embedded NUL truncates it and
+        // raises "unterminated string" even though every `"` is escaped.
+        assert_eq!(sanitize_fts_query("foo\0bar"), "\"foobar\"");
+        assert_eq!(sanitize_fts_query("\0"), "");
+    }
+
+    #[test]
     fn sanitize_handles_multibyte_input_without_panicking() {
         // Regression guard: an earlier char-indexing approach that sliced by
         // byte offset instead of char offset could panic on non-ASCII input.
@@ -756,5 +772,43 @@ mod tests {
         assert!(fts_query_filtered(&conn, "*nightly", 10, None, None, None).is_ok());
         assert!(fts_query_filtered(&conn, "AND", 10, None, None, None).is_ok());
         assert!(fts_query_filtered(&conn, "(nightly)", 10, None, None, None).is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // Property-based tests: sanitize_fts_query must turn *any* input into
+    // either an empty string or syntactically valid FTS5 MATCH syntax. These
+    // complement the fixed-case unit tests above by throwing arbitrary
+    // (including adversarial and multibyte) input at the sanitizer rather
+    // than a hand-picked set of operator characters.
+    // -----------------------------------------------------------------------
+
+    proptest! {
+        #[test]
+        fn sanitize_fts_query_never_panics(s in ".{0,120}") {
+            let _ = sanitize_fts_query(&s);
+        }
+
+        #[test]
+        fn sanitized_query_never_causes_an_fts5_syntax_error(s in ".{0,120}") {
+            let conn = Connection::open_in_memory().unwrap();
+            conn.execute_batch(DDL).unwrap();
+            conn.execute(
+                "INSERT INTO scripts (logical_path, language, content, owner, purpose)
+                 VALUES ('/catalog/scripts/nightly-backup.sh', 'shell', 'nightly backup job', 'alice', '')",
+                [],
+            )
+            .unwrap();
+            // A prior bug let unescaped FTS5 operator/boolean syntax reach
+            // MATCH and error out; this exercises every code point sanitize
+            // can be handed rather than a fixed list of "known bad" inputs.
+            prop_assert!(fts_query_filtered(&conn, &s, 10, None, None, None).is_ok());
+        }
+
+        #[test]
+        fn sanitized_terms_are_always_double_quoted(s in "[a-zA-Z0-9]{1,20}") {
+            // A plain alphanumeric word (no whitespace/quotes/operators) always
+            // round-trips as a single quoted term.
+            prop_assert_eq!(sanitize_fts_query(&s), format!("\"{s}\""));
+        }
     }
 }
