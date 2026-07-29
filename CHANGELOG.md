@@ -55,6 +55,10 @@ All notable changes to this project will be documented in this file.
 
 - **Typed `scripts` row view** ([#17](https://github.com/tjorim/scat/issues/17)) — introduced `scat_core::core::script_view::ScriptView`, a thin read-only wrapper over a queried `scripts` row that exposes typed accessors for the known columns plus parsed helpers for the JSON-encoded `tags`/`entry_points`/`related`/`metadata_json`/`vc_warnings` fields. The JSON, CSV, table, and TUI detail/metadata renderers (and the catalog-diff field extraction) now share this one definition of each column's name and parsing/fallback semantics instead of re-reading raw `JsonRow` keys by hand. Behavior-preserving: command and TUI output are unchanged.
 
+### Build
+
+- **Leaner release profile** ([#45](https://github.com/tjorim/scat/issues/45)) — `[profile.release]` now sets `lto = "thin"`, `codegen-units = 1`, `panic = "abort"`, and `strip = true` (build dependencies keep a `codegen-units = 4` override so they still compile quickly). On Linux x86_64, the release binary shrank from 12.8 MB to 9.4 MB (about 27% smaller); behavior is unchanged, since nothing in scat relies on unwinding across a panic. Full profile-guided optimization (instrumented build + representative training run) is a larger, separate undertaking and was left out of this pass.
+
 ## [Completed] VC Revision Indexing and Catalog Audit Hardening (May 2026)
 
 ### Catalog Schema and Indexer
