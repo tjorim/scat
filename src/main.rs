@@ -200,6 +200,7 @@ fn cmd_catalog(
         no_resume,
         force,
         no_incremental,
+        threads,
         json,
     } = command
     {
@@ -217,6 +218,7 @@ fn cmd_catalog(
             no_resume,
             force,
             no_incremental,
+            threads,
         );
     }
 

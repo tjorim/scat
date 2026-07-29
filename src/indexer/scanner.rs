@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use ignore::WalkBuilder;
 use indicatif::ProgressBar;
 use once_cell::sync::Lazy;
+use rayon::prelude::*;
 use regex::Regex;
 use tracing::{debug, warn};
 
@@ -213,6 +214,148 @@ fn is_within_roots(path: &Path, canonical_roots: &[PathBuf]) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Parallel per-file processing
+// ---------------------------------------------------------------------------
+
+/// A regular file the walk decided is worth a closer look — not yet
+/// classified as a script, a WORKING revision, or something to skip. Kept
+/// deliberately small since these accumulate per scan root before the
+/// parallel pass in [`process_candidate`] runs.
+struct ScanCandidate {
+    path: PathBuf,
+    is_symlink: bool,
+}
+
+/// What [`process_candidate`] decided about one [`ScanCandidate`].
+enum CandidateOutcome {
+    Record(ScriptRecord),
+    Revision(CheckoutRecord),
+    Skip,
+}
+
+/// Number of candidates processed per parallel batch. Bounds how long a
+/// Ctrl-C has to wait for the in-flight batch to finish before the shutdown
+/// flag is rechecked, mirroring `EXTRACT_BATCH_SIZE` in
+/// `builder/pipeline.rs`, which does the same for phase 2's extraction work.
+const SCAN_PROCESS_BATCH_SIZE: usize = 500;
+
+/// Stat, sniff, and classify one candidate file. Pure filesystem I/O with no
+/// shared state, so it's safe to call from any worker thread — this is what
+/// lets a scan root's candidate list process in parallel across cores
+/// instead of one file at a time on the directory-walking thread, which is
+/// what actually dominates scan time on a large tree (this function does
+/// every stat, file read, and symlink resolution; the walk itself just
+/// enumerates names).
+fn process_candidate(
+    filepath: &Path,
+    is_symlink: bool,
+    root: &Path,
+    logical_prefix: &str,
+    head_lines: usize,
+    os_flavor: &str,
+    now: f64,
+) -> CandidateOutcome {
+    // vc keeps recent checked-in copies (`<script>_<timestamp>`, no user
+    // suffix) in the working directory next to the active symlink. Record
+    // those as WORKING revisions instead of indexing them as scripts in
+    // their own right.
+    if let Some(filename) = filepath.file_name().and_then(|n| n.to_str())
+        && let Some((script_name, timestamp, user)) = parse_checkout_filename(filename)
+    {
+        let script_ext = Path::new(&script_name)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| format!(".{}", e.to_lowercase()))
+            .unwrap_or_default();
+        if is_working_dir_revision(filepath, &script_name, &script_ext) {
+            let logical_path =
+                make_logical_path(&filepath.with_file_name(&script_name), root, logical_prefix);
+            let age_seconds = filepath
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| (now - d.as_secs_f64()).max(0.0));
+            return CandidateOutcome::Revision(CheckoutRecord {
+                logical_path,
+                physical_path: filepath.to_string_lossy().into_owned(),
+                revision_type: REVISION_TYPE_WORKING.to_string(),
+                os_flavor: os_flavor.to_string(),
+                user,
+                timestamp,
+                age_seconds,
+            });
+        }
+    }
+
+    let ext = filepath
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| format!(".{}", e.to_lowercase()))
+        .unwrap_or_default();
+
+    // Only extensionless files need their head read here (to sniff a
+    // shebang); extension-matched files don't — nothing downstream
+    // consumes a pre-read head, so reading one would just be a wasted
+    // partial read that `extractor::extract` (which reads the whole file)
+    // throws away.
+    let language = if SCRIPT_EXTENSIONS.contains(&ext.as_str()) {
+        detect_language(filepath)
+    } else if ext.is_empty() {
+        let head = read_head(filepath, head_lines);
+        match head.first().and_then(|l| shebang_language(l)) {
+            None => return CandidateOutcome::Skip,
+            Some(l) => l,
+        }
+    } else {
+        return CandidateOutcome::Skip;
+    };
+
+    let meta = match filepath.metadata() {
+        Ok(m) => m,
+        Err(err) => {
+            warn!(path = %filepath.display(), error = %err, "failed to get file metadata, skipping");
+            return CandidateOutcome::Skip;
+        }
+    };
+    let size = meta.len();
+    if size > MAX_INDEXABLE_FILE_SIZE_BYTES {
+        debug!(
+            path = %filepath.display(),
+            size,
+            limit = MAX_INDEXABLE_FILE_SIZE_BYTES,
+            "skipping oversized file"
+        );
+        return CandidateOutcome::Skip;
+    }
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+
+    let logical_path = make_logical_path(filepath, root, logical_prefix);
+
+    let symlink_target = if is_symlink {
+        std::fs::canonicalize(filepath)
+            .ok()
+            .map(|resolved| make_logical_path(&resolved, root, logical_prefix))
+    } else {
+        None
+    };
+
+    CandidateOutcome::Record(ScriptRecord {
+        logical_path,
+        physical_path: filepath.to_string_lossy().into_owned(),
+        language: language.to_string(),
+        size,
+        mtime,
+        symlink_target,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Scanner
 // ---------------------------------------------------------------------------
 
@@ -321,6 +464,7 @@ fn scan_paths_with_revisions_impl(
     for root in roots {
         let mut found_in_root = 0usize;
         let mut skipped_in_root = 0usize;
+        let mut candidates: Vec<ScanCandidate> = Vec::new();
         // Same os_flavor derivation as `scan_checkouts`: the scan_root's
         // parent directory name (e.g. `linux` from /catalog/linux/scripts).
         let os_flavor = root
@@ -446,119 +590,58 @@ fn scan_paths_with_revisions_impl(
                 continue;
             }
 
-            // vc keeps recent checked-in copies (`<script>_<timestamp>`, no
-            // user suffix) in the working directory next to the active
-            // symlink. Record those as WORKING revisions instead of indexing
-            // them as scripts in their own right.
-            if let Some(filename) = filepath.file_name().and_then(|n| n.to_str())
-                && let Some((script_name, timestamp, user)) = parse_checkout_filename(filename)
-            {
-                let script_ext = Path::new(&script_name)
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .map(|e| format!(".{}", e.to_lowercase()))
-                    .unwrap_or_default();
-                if is_working_dir_revision(filepath, &script_name, &script_ext) {
-                    let logical_path = make_logical_path(
-                        &filepath.with_file_name(&script_name),
+            candidates.push(ScanCandidate {
+                path: filepath.to_path_buf(),
+                is_symlink: entry.path_is_symlink(),
+            });
+        }
+
+        // The per-candidate work — stat, shebang sniff for extensionless
+        // files, symlink resolution — is pure I/O with no shared state
+        // (see `process_candidate`), so it runs across a rayon worker pool
+        // instead of one file at a time on the thread that just walked the
+        // directory tree. Batched, rather than one `par_iter()` over the
+        // whole root, so a Ctrl-C during a huge root only has to wait for
+        // the in-flight batch rather than the entire root to finish.
+        for batch in candidates.chunks(SCAN_PROCESS_BATCH_SIZE) {
+            if shutdown.load(Ordering::Relaxed) {
+                if let Some(tree) = tree.as_deref_mut() {
+                    tree.clear();
+                }
+                if let Some(pb) = progress {
+                    pb.finish_and_clear();
+                }
+                return Err(Error::Interrupted);
+            }
+
+            let outcomes: Vec<CandidateOutcome> = batch
+                .par_iter()
+                .map(|c| {
+                    process_candidate(
+                        &c.path,
+                        c.is_symlink,
                         root,
                         logical_prefix,
-                    );
-                    let age_seconds = filepath
-                        .metadata()
-                        .ok()
-                        .and_then(|m| m.modified().ok())
-                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                        .map(|d| (now - d.as_secs_f64()).max(0.0));
-                    revisions.push(CheckoutRecord {
-                        logical_path,
-                        physical_path: filepath.to_string_lossy().into_owned(),
-                        revision_type: REVISION_TYPE_WORKING.to_string(),
-                        os_flavor: os_flavor.clone(),
-                        user,
-                        timestamp,
-                        age_seconds,
-                    });
-                    continue;
-                }
-            }
+                        head_lines,
+                        &os_flavor,
+                        now,
+                    )
+                })
+                .collect();
 
-            let ext = filepath
-                .extension()
-                .and_then(|e| e.to_str())
-                .map(|e| format!(".{}", e.to_lowercase()))
-                .unwrap_or_default();
-
-            // Only extensionless files need their head read here (to sniff a
-            // shebang); extension-matched files don't — nothing downstream
-            // consumes a pre-read head, so reading one would just be a wasted
-            // partial read that `extractor::extract` (which reads the whole
-            // file) throws away.
-            let language = if SCRIPT_EXTENSIONS.contains(&ext.as_str()) {
-                detect_language(filepath)
-            } else if ext.is_empty() {
-                let head = read_head(filepath, head_lines);
-                match head.first().and_then(|l| shebang_language(l)) {
-                    None => {
+            for outcome in outcomes {
+                match outcome {
+                    CandidateOutcome::Record(record) => {
+                        records.push(record);
+                        found_in_root += 1;
+                    }
+                    CandidateOutcome::Revision(revision) => revisions.push(revision),
+                    CandidateOutcome::Skip => {
                         skipped_in_root += 1;
                         total_skipped += 1;
-                        continue;
                     }
-                    Some(l) => l,
                 }
-            } else {
-                skipped_in_root += 1;
-                total_skipped += 1;
-                continue;
-            };
-
-            let meta = match filepath.metadata() {
-                Ok(m) => m,
-                Err(err) => {
-                    warn!(path = %filepath.display(), error = %err, "failed to get file metadata, skipping");
-                    skipped_in_root += 1;
-                    total_skipped += 1;
-                    continue;
-                }
-            };
-            let size = meta.len();
-            if size > MAX_INDEXABLE_FILE_SIZE_BYTES {
-                debug!(
-                    path = %filepath.display(),
-                    size,
-                    limit = MAX_INDEXABLE_FILE_SIZE_BYTES,
-                    "skipping oversized file"
-                );
-                skipped_in_root += 1;
-                total_skipped += 1;
-                continue;
             }
-            let mtime = meta
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs_f64())
-                .unwrap_or(0.0);
-
-            let logical_path = make_logical_path(filepath, root, logical_prefix);
-
-            let symlink_target = if entry.path_is_symlink() {
-                std::fs::canonicalize(filepath)
-                    .ok()
-                    .map(|resolved| make_logical_path(&resolved, root, logical_prefix))
-            } else {
-                None
-            };
-
-            records.push(ScriptRecord {
-                logical_path,
-                physical_path: filepath.to_string_lossy().into_owned(),
-                language: language.to_string(),
-                size,
-                mtime,
-                symlink_target,
-            });
-            found_in_root += 1;
         }
 
         debug!(
@@ -730,6 +813,7 @@ pub fn max_mtime_in_roots_with_shutdown(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     #[test]
     fn detects_python_from_extension() {
@@ -1272,5 +1356,61 @@ mod tests {
 
         // Both the real path and the in-root symlink alias are indexed.
         assert_eq!(records.len(), 2);
+    }
+
+    #[test]
+    fn scan_processes_a_root_spanning_multiple_parallel_batches() {
+        // More candidates than SCAN_PROCESS_BATCH_SIZE, so the per-root
+        // parallel processing loop runs across several batches — exercises
+        // that results from every batch (and every worker thread) land in
+        // `records` exactly once, with no duplicates or drops.
+        let dir = tempfile::TempDir::new().unwrap();
+        let file_count = SCAN_PROCESS_BATCH_SIZE * 2 + 50;
+        for i in 0..file_count {
+            std::fs::write(dir.path().join(format!("script_{i:04}.py")), "# python").unwrap();
+        }
+
+        let shutdown = AtomicBool::new(false);
+        let records = scan_paths(
+            &[dir.path().to_path_buf()],
+            "/catalog/scripts",
+            5,
+            &[],
+            &[],
+            None,
+            &shutdown,
+        )
+        .unwrap();
+
+        assert_eq!(records.len(), file_count);
+        let mut seen: HashSet<&str> = HashSet::new();
+        for record in &records {
+            assert_eq!(record.language, "python");
+            assert!(
+                seen.insert(record.logical_path.as_str()),
+                "duplicate logical_path: {}",
+                record.logical_path
+            );
+        }
+    }
+
+    #[test]
+    fn scan_respects_shutdown_signal_mid_batch() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("a.py"), "# python").unwrap();
+        let shutdown = AtomicBool::new(true);
+
+        let err = scan_paths_with_revisions(
+            &[dir.path().to_path_buf()],
+            "/catalog/scripts",
+            5,
+            &[],
+            &[],
+            None,
+            &shutdown,
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, Error::Interrupted));
     }
 }
