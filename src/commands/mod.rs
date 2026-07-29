@@ -1024,6 +1024,7 @@ pub(crate) fn cmd_index(
     no_resume: bool,
     force: bool,
     no_incremental: bool,
+    threads: Option<usize>,
 ) -> Result<()> {
     let effective_scan_roots: Vec<PathBuf> = if scan_roots.is_empty() {
         config.scan_roots.clone()
@@ -1103,6 +1104,7 @@ pub(crate) fn cmd_index(
         no_resume,
         no_incremental,
         shutdown: Some(shutdown),
+        threads,
     };
 
     let result = build_index(&effective_scan_roots, db_path, opts)

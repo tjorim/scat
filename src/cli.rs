@@ -229,6 +229,10 @@ pub(crate) enum CatalogCommands {
         /// completed build (which skips re-extracting unchanged scripts).
         #[arg(long)]
         no_incremental: bool,
+        /// Worker threads for the parallel scan and extraction phases.
+        /// Defaults to the number of logical CPUs.
+        #[arg(long)]
+        threads: Option<usize>,
         /// Emit machine-readable JSON output.
         #[arg(long)]
         json: bool,

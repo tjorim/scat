@@ -65,6 +65,10 @@ pub struct BuildOptions {
     pub no_incremental: bool,
     /// Shared shutdown flag for Ctrl-C handling. If None, a local handler is registered.
     pub shutdown: Option<Arc<AtomicBool>>,
+    /// Worker threads for the parallel scan and extraction phases. `None`
+    /// uses rayon's default (the number of logical CPUs, or `RAYON_NUM_THREADS`
+    /// if set).
+    pub threads: Option<usize>,
 }
 
 // ---------------------------------------------------------------------------
@@ -94,6 +98,11 @@ pub fn build_index(
             "database path must be a file, found {found_kind}: {}",
             db_path.display()
         )));
+    }
+    if opts.threads == Some(0) {
+        return Err(Error::Validation(
+            "threads must be greater than zero".into(),
+        ));
     }
     let parent = db_path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent)?;
@@ -213,7 +222,7 @@ pub fn build_index(
         flag
     };
 
-    let build_result = (|| -> Result<()> {
+    let run_build = || -> Result<()> {
         debug!(
             phase = "create_db",
             path = %tmp_path.display(),
@@ -264,7 +273,25 @@ pub fn build_index(
             opts.dry_run,
             incremental,
         )
-    })();
+    };
+
+    // Scanning (scanner.rs) and extraction (builder/pipeline.rs) both farm
+    // per-file work out to rayon. Installing a custom pool here — instead of
+    // letting each `par_iter()` fall back to rayon's global default pool —
+    // is what makes `opts.threads` actually bound the parallelism of both
+    // phases, since a pool installed with `.install()` becomes the "current"
+    // pool for every `par_iter()` called from within the closure, however
+    // deep the call stack.
+    let build_result = match opts.threads {
+        Some(n) => {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(n)
+                .build()
+                .map_err(|e| Error::Validation(format!("failed to build thread pool: {e}")))?;
+            pool.install(run_build)
+        }
+        None => run_build(),
+    };
 
     if let Err(e) = build_result {
         // If shutdown was requested we wrote a checkpoint before returning;
@@ -507,6 +534,60 @@ mod tests {
 
         let copy1 = dir.path().join("scripts.sqlite.1");
         assert!(copy1.exists());
+    }
+
+    #[test]
+    fn build_index_with_explicit_thread_count_still_indexes_everything() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().join("scripts");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("a.py"), "import os\n").unwrap();
+        std::fs::write(root.join("b.sh"), "#!/bin/bash\necho hi\n").unwrap();
+        let db_path = dir.path().join("scripts.sqlite");
+
+        let result = build_index(
+            std::slice::from_ref(&root),
+            &db_path,
+            BuildOptions {
+                logical_prefix: "/catalog/scripts".into(),
+                head_lines: 10,
+                keep_copies: 0,
+                threads: Some(2),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result.scripts_indexed, 2);
+        assert!(result.errors.is_empty());
+    }
+
+    #[test]
+    fn build_index_rejects_zero_threads() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().join("scripts");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("a.py"), "pass\n").unwrap();
+        let db_path = dir.path().join("scripts.sqlite");
+
+        let err = build_index(
+            std::slice::from_ref(&root),
+            &db_path,
+            BuildOptions {
+                logical_prefix: "/catalog/scripts".into(),
+                head_lines: 10,
+                keep_copies: 0,
+                threads: Some(0),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("threads must be greater than zero"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
