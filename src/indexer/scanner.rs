@@ -766,6 +766,15 @@ mod tests {
     }
 
     #[test]
+    fn shebang_direct_sh() {
+        // How the extensionless shell tools vc manages are detected at all:
+        // with no extension to go on, the shebang is the only language signal.
+        assert_eq!(shebang_language("#!/bin/sh"), Some("shell"));
+        assert_eq!(shebang_language("#! /bin/sh"), Some("shell"));
+        assert_eq!(shebang_language("#!/usr/bin/env sh"), Some("shell"));
+    }
+
+    #[test]
     fn shebang_env_python3() {
         assert_eq!(shebang_language("#!/usr/bin/env python3"), Some("python"));
     }
@@ -826,15 +835,15 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let scan_root = dir.path().join("linux").join("scripts");
         std::fs::create_dir_all(&scan_root).unwrap();
-        std::fs::write(scan_root.join("prepare_release"), "#!/bin/bash\n").unwrap();
+        std::fs::write(scan_root.join("prepare_release"), "#!/bin/sh\n").unwrap();
         std::fs::write(
             scan_root.join("prepare_release_20260729_140513"),
-            "#!/bin/bash\n",
+            "#!/bin/sh\n",
         )
         .unwrap();
         std::fs::write(
             scan_root.join("prepare_release_20260701_105550"),
-            "#!/bin/bash\n",
+            "#!/bin/sh\n",
         )
         .unwrap();
 
@@ -878,12 +887,12 @@ mod tests {
         std::fs::create_dir_all(&scan_root).unwrap();
         std::fs::write(
             scan_root.join("prepare_release_20260729_140513"),
-            "#!/bin/bash\n",
+            "#!/bin/sh\n",
         )
         .unwrap();
         std::fs::write(
             scan_root.join("prepare_release_20260701_105550"),
-            "#!/bin/bash\n",
+            "#!/bin/sh\n",
         )
         .unwrap();
         std::os::unix::fs::symlink(
@@ -921,8 +930,8 @@ mod tests {
         // `foo.sh~` is already dropped as an unknown extension; `foo~` has no
         // extension and must not reach the shebang sniff.
         let dir = tempfile::TempDir::new().unwrap();
-        std::fs::write(dir.path().join("prepare_release"), "#!/bin/bash\n").unwrap();
-        std::fs::write(dir.path().join("prepare_release~"), "#!/bin/bash\n").unwrap();
+        std::fs::write(dir.path().join("prepare_release"), "#!/bin/sh\n").unwrap();
+        std::fs::write(dir.path().join("prepare_release~"), "#!/bin/sh\n").unwrap();
         std::fs::write(dir.path().join("release_backup.sh"), "#!/bin/bash\n").unwrap();
         std::fs::write(dir.path().join("release_backup.sh~"), "#!/bin/bash\n").unwrap();
 
@@ -955,7 +964,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         std::fs::create_dir_all(dir.path().join("develop")).unwrap();
         std::fs::create_dir_all(dir.path().join("archive")).unwrap();
-        std::fs::write(dir.path().join("tool"), "#!/bin/bash\n").unwrap();
+        std::fs::write(dir.path().join("tool"), "#!/bin/sh\n").unwrap();
         std::fs::write(
             dir.path().join("develop").join("tool_20240315_1430_jdoe"),
             "#!/bin/bash\n",

@@ -1084,15 +1084,15 @@ fn build_indexes_a_vc_working_directory_as_one_script_per_tool() {
     std::fs::create_dir_all(root.join("develop")).unwrap();
     std::fs::create_dir_all(root.join("archive")).unwrap();
 
-    // Extensionless shell tool.
+    // An extensionless shell tool, detected by its shebang alone.
     std::fs::write(
         root.join("prepare_release_20260729_140513"),
-        "#!/bin/bash\necho release\n",
+        "#!/bin/sh\necho release\n",
     )
     .unwrap();
     std::fs::write(
         root.join("prepare_release_20260701_105550"),
-        "#!/bin/bash\necho release\n",
+        "#!/bin/sh\necho release\n",
     )
     .unwrap();
     std::os::unix::fs::symlink(
@@ -1100,9 +1100,10 @@ fn build_indexes_a_vc_working_directory_as_one_script_per_tool() {
         root.join("prepare_release"),
     )
     .unwrap();
-    std::fs::write(root.join("prepare_release~"), "#!/bin/bash\nold\n").unwrap();
+    std::fs::write(root.join("prepare_release~"), "#!/bin/sh\nold\n").unwrap();
 
-    // The same shape, with an extension.
+    // An unrelated tool in the same directory, differing only in that its
+    // name carries an extension — the control for the fix below.
     std::fs::write(
         root.join("release_backup.sh_20250311_080827"),
         "#!/bin/bash\necho backup\n",
@@ -1116,13 +1117,13 @@ fn build_indexes_a_vc_working_directory_as_one_script_per_tool() {
 
     std::fs::write(
         root.join("archive").join("prepare_release_20260420_082127"),
-        "#!/bin/bash\necho old\n",
+        "#!/bin/sh\necho old\n",
     )
     .unwrap();
     std::fs::write(
         root.join("develop")
             .join("prepare_release_20260729_152101_dev"),
-        "#!/bin/bash\necho wip\n",
+        "#!/bin/sh\necho wip\n",
     )
     .unwrap();
 
