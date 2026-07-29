@@ -165,24 +165,6 @@ fn is_working_dir_revision(filepath: &Path, script_name: &str, script_ext: &str)
         .is_ok_and(|meta| !meta.is_dir())
 }
 
-/// Case-insensitive lookup set of DEVELOP/ARCHIVE container directory names.
-///
-/// Container names are environment-specific (see `docs/VC_CONTRACT.md`) and
-/// the casing observed on disk varies — `ARCHIVE` in one tree, `archive` in
-/// the next — so names are compared case-insensitively rather than requiring
-/// every deployment to spell its local casing out in config. Matching a
-/// container that a case-sensitive comparison missed is what keeps its
-/// contents out of `scripts`, where they would otherwise surface as one search
-/// hit per archived version.
-fn checkout_dir_matcher(names: &[&str]) -> std::collections::HashSet<String> {
-    names.iter().map(|s| s.to_lowercase()).collect()
-}
-
-/// Whether `dir_name` names one of the checkout containers in `matcher`.
-fn is_checkout_dir(matcher: &std::collections::HashSet<String>, dir_name: &str) -> bool {
-    matcher.contains(&dir_name.to_lowercase())
-}
-
 fn get_external_ignore_paths(ignore_files: &[PathBuf]) -> Result<Vec<PathBuf>> {
     let mut paths = Vec::new();
 
@@ -325,8 +307,12 @@ fn scan_paths_with_revisions_impl(
 
     // Build an Arc'd set of checkout dir names for use in per-root filter_entry
     // closures, which require 'static + Send + Sync.
-    let checkout_dirs_set: std::sync::Arc<std::collections::HashSet<String>> =
-        std::sync::Arc::new(checkout_dir_matcher(effective_checkout_dirs));
+    let checkout_dirs_set: std::sync::Arc<std::collections::HashSet<String>> = std::sync::Arc::new(
+        effective_checkout_dirs
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+    );
     // Symlinked directories are only followed if they resolve inside one of
     // these — see `is_within_roots`.
     let canonical_roots: std::sync::Arc<Vec<PathBuf>> =
@@ -360,7 +346,7 @@ fn scan_paths_with_revisions_impl(
                 // traversing large DEVELOP/ARCHIVE trees file by file.
                 if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
                     let name = e.file_name().to_str().unwrap_or("");
-                    if is_checkout_dir(&cds, name) {
+                    if cds.contains(name) {
                         return false;
                     }
                     if e.path_is_symlink() && !is_within_roots(e.path(), &croots) {
@@ -654,8 +640,12 @@ pub fn max_mtime_in_roots_with_shutdown(
     } else {
         checkout_dirs
     };
-    let checkout_dirs_set: std::sync::Arc<std::collections::HashSet<String>> =
-        std::sync::Arc::new(checkout_dir_matcher(effective_checkout_dirs));
+    let checkout_dirs_set: std::sync::Arc<std::collections::HashSet<String>> = std::sync::Arc::new(
+        effective_checkout_dirs
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+    );
 
     let external_ignore_paths = get_external_ignore_paths(ignore_files)?;
     let mut max_mtime: Option<f64> = None;
@@ -676,7 +666,7 @@ pub fn max_mtime_in_roots_with_shutdown(
             .filter_entry(move |e| {
                 if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
                     let name = e.file_name().to_str().unwrap_or("");
-                    if is_checkout_dir(&cds, name) {
+                    if cds.contains(name) {
                         return false;
                     }
                     if e.path_is_symlink() && !is_within_roots(e.path(), &croots) {
@@ -955,48 +945,6 @@ mod tests {
                 "/catalog/scripts/prepare_release",
                 "/catalog/scripts/release_backup.sh"
             ]
-        );
-    }
-
-    #[test]
-    fn checkout_dirs_match_regardless_of_case() {
-        // Configured as `DEVELOP`/`ARCHIVE`, spelled lowercase on disk.
-        let dir = tempfile::TempDir::new().unwrap();
-        std::fs::create_dir_all(dir.path().join("develop")).unwrap();
-        std::fs::create_dir_all(dir.path().join("archive")).unwrap();
-        std::fs::write(dir.path().join("tool"), "#!/bin/sh\n").unwrap();
-        std::fs::write(
-            dir.path().join("develop").join("tool_20240315_1430_jdoe"),
-            "#!/bin/bash\n",
-        )
-        .unwrap();
-        std::fs::write(
-            dir.path().join("archive").join("tool_20230101_120000"),
-            "#!/bin/bash\n",
-        )
-        .unwrap();
-
-        let shutdown = AtomicBool::new(false);
-        let result = scan_paths_with_revisions(
-            &[dir.path().to_path_buf()],
-            "/catalog/scripts",
-            5,
-            &[],
-            &["DEVELOP", "ARCHIVE"],
-            None,
-            &shutdown,
-        )
-        .unwrap();
-
-        let paths: Vec<&str> = result
-            .scripts
-            .iter()
-            .map(|s| s.logical_path.as_str())
-            .collect();
-        assert_eq!(
-            paths,
-            vec!["/catalog/scripts/tool"],
-            "container contents must not be indexed as scripts"
         );
     }
 

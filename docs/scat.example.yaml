@@ -42,12 +42,9 @@ vc:
   # Path to the vc executable. Falls back to PATH lookup if omitted.
   executable: /usr/local/bin/vc
   # Directory names treated as DEVELOP-type checkout containers.
-  # Matched case-insensitively, so `DEVELOP` here also covers a tree that
-  # spells its container `develop` on disk.
   develop_dirs:
     - DEVELOP
   # Directory names treated as ARCHIVE-type checkout containers.
-  # Also matched case-insensitively.
   archive_dirs:
     - ARCHIVE
 

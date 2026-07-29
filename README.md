@@ -120,9 +120,11 @@ one per retained version. The rest are recorded as **revisions** of that
 script and surface through `scat show`, the TUI's revisions pane, and
 `scat catalog stats`, so a search for `prepare_release` returns the tool
 rather than every version of it. This holds whether or not the script name
-carries an extension, and container directory names are matched
-case-insensitively (`ARCHIVE` and `archive` are the same container). Editor
-backup files (`prepare_release~`) are skipped.
+carries an extension. Editor backup files (`prepare_release~`) are skipped.
+
+Container directory names are matched exactly as configured under `vc.develop_dirs`
+and `vc.archive_dirs`, so a tree whose containers are spelled differently from the
+`DEVELOP`/`ARCHIVE` defaults must list its own spelling there.
 
 Where the catalog shows a symlinked script, it also shows what the link
 resolved to at index time — a `↳ <target>` sub-row in the CLI's search table,

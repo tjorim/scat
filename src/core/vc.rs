@@ -271,16 +271,6 @@ pub fn load_vc_config(config_file: Option<&Path>) -> Result<VcConfig> {
 // Checkout scanning
 // ---------------------------------------------------------------------------
 
-/// Whether `name` is one of `configured` container directory names.
-///
-/// Matching is case-insensitive: container names are environment-specific
-/// (see `docs/VC_CONTRACT.md`) and the casing observed on disk varies between
-/// trees (`ARCHIVE` here, `archive` there), so a deployment does not have to
-/// enumerate every spelling in config to get its checkouts classified.
-pub(crate) fn matches_dir_name(configured: &[String], name: &str) -> bool {
-    configured.iter().any(|d| d.eq_ignore_ascii_case(name))
-}
-
 /// Parse a vc version filename into `(script, timestamp, user)`.
 ///
 /// Accepts every observed on-disk form: a DEVELOP checkout
@@ -369,9 +359,9 @@ pub fn scan_checkouts(config: &VcConfig, logical_prefix: &str) -> Vec<CheckoutRe
 
             for subdir in subdirs {
                 let name = subdir.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                let rev_type = if matches_dir_name(&config.develop_dirs, name) {
+                let rev_type = if config.develop_dirs.iter().any(|d| d == name) {
                     Some(REVISION_TYPE_DEVELOP)
-                } else if matches_dir_name(&config.archive_dirs, name) {
+                } else if config.archive_dirs.iter().any(|d| d == name) {
                     Some(REVISION_TYPE_ARCHIVE)
                 } else {
                     None

@@ -1077,12 +1077,12 @@ fn build_timestamp_after_index_is_newer_than_pre_build_mtime() {
 fn build_indexes_a_vc_working_directory_as_one_script_per_tool() {
     // A vc working directory as it actually looks on disk: an active symlink
     // per tool, the retained version copies vc keeps beside it for rollback,
-    // an editor backup, and lowercase DEVELOP/ARCHIVE containers. Only the two
+    // an editor backup, and the DEVELOP/ARCHIVE containers. Only the two
     // tools belong in `scripts`; everything else is a revision of one of them.
     let dir = tempfile::TempDir::new().unwrap();
     let root = dir.path().join("source");
-    std::fs::create_dir_all(root.join("develop")).unwrap();
-    std::fs::create_dir_all(root.join("archive")).unwrap();
+    std::fs::create_dir_all(root.join("DEVELOP")).unwrap();
+    std::fs::create_dir_all(root.join("ARCHIVE")).unwrap();
 
     // An extensionless shell tool, detected by its shebang alone.
     std::fs::write(
@@ -1116,12 +1116,12 @@ fn build_indexes_a_vc_working_directory_as_one_script_per_tool() {
     .unwrap();
 
     std::fs::write(
-        root.join("archive").join("prepare_release_20260420_082127"),
+        root.join("ARCHIVE").join("prepare_release_20260420_082127"),
         "#!/bin/sh\necho old\n",
     )
     .unwrap();
     std::fs::write(
-        root.join("develop")
+        root.join("DEVELOP")
             .join("prepare_release_20260729_152101_dev"),
         "#!/bin/sh\necho wip\n",
     )

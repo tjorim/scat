@@ -755,6 +755,14 @@ fn render_revision_stats_lines(stats: &scat_core::core::search::RevisionStats) -
             stats.total_archive_revision_files
         ),
         format!(
+            "  Scripts with working versions: {}",
+            stats.scripts_with_working_versions
+        ),
+        format!(
+            "  Total WORKING revision files: {}",
+            stats.total_working_revision_files
+        ),
+        format!(
             "  Scripts checked out by >1 user: {}",
             stats.scripts_checked_out_by_multiple_users
         ),
@@ -1400,6 +1408,8 @@ mod tests {
             scripts_with_archive_entries: 47,
             total_develop_revision_files: 18,
             total_archive_revision_files: 134,
+            scripts_with_working_versions: 51,
+            total_working_revision_files: 96,
             scripts_checked_out_by_multiple_users: 2,
         });
 
@@ -1410,6 +1420,8 @@ mod tests {
                 "  Scripts with archive entries: 47",
                 "  Total DEVELOP revision files: 18",
                 "  Total ARCHIVE revision files: 134",
+                "  Scripts with working versions: 51",
+                "  Total WORKING revision files: 96",
                 "  Scripts checked out by >1 user: 2",
             ]
         );

@@ -10,7 +10,7 @@ use crate::core::db::{
     row_to_map,
 };
 use crate::core::script_view::{ListField, ScriptView, logical_parent_dir};
-use crate::core::vc::{REVISION_TYPE_ARCHIVE, REVISION_TYPE_DEVELOP};
+use crate::core::vc::{REVISION_TYPE_ARCHIVE, REVISION_TYPE_DEVELOP, REVISION_TYPE_WORKING};
 use crate::error::{Error, Result};
 
 // ---------------------------------------------------------------------------
@@ -121,6 +121,16 @@ pub struct RevisionStats {
     pub total_develop_revision_files: i64,
     /// Total ARCHIVE revision rows stored in the catalog.
     pub total_archive_revision_files: i64,
+    /// Number of scripts with at least one WORKING revision.
+    pub scripts_with_working_versions: i64,
+    /// Total WORKING revision rows stored in the catalog.
+    ///
+    /// These are the checked-in version copies vc retains in the working
+    /// directory beside the active symlink. They are counted here because
+    /// they are otherwise invisible: they are deliberately kept out of
+    /// `scripts`, so without a line of their own a catalog rebuild that
+    /// reclassifies them looks like an unexplained drop in `total_scripts`.
+    pub total_working_revision_files: i64,
     /// Number of scripts that have DEVELOP revisions owned by more than one user.
     pub scripts_checked_out_by_multiple_users: i64,
 }
@@ -1276,17 +1286,34 @@ impl SearchApi {
         let (
             scripts_with_active_checkouts,
             scripts_with_archive_entries,
+            scripts_with_working_versions,
             total_develop_revision_files,
             total_archive_revision_files,
-        ): (i64, i64, i64, i64) = self.conn.query_row(
+            total_working_revision_files,
+        ): (i64, i64, i64, i64, i64, i64) = self.conn.query_row(
             "SELECT
                  COUNT(DISTINCT CASE WHEN revision_type = ?1 THEN logical_path END),
                  COUNT(DISTINCT CASE WHEN revision_type = ?2 THEN logical_path END),
+                 COUNT(DISTINCT CASE WHEN revision_type = ?3 THEN logical_path END),
                  COUNT(CASE WHEN revision_type = ?1 THEN 1 END),
-                 COUNT(CASE WHEN revision_type = ?2 THEN 1 END)
+                 COUNT(CASE WHEN revision_type = ?2 THEN 1 END),
+                 COUNT(CASE WHEN revision_type = ?3 THEN 1 END)
              FROM revisions",
-            [REVISION_TYPE_DEVELOP, REVISION_TYPE_ARCHIVE],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            [
+                REVISION_TYPE_DEVELOP,
+                REVISION_TYPE_ARCHIVE,
+                REVISION_TYPE_WORKING,
+            ],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
         )?;
         let scripts_checked_out_by_multiple_users: i64 = self.conn.query_row(
             "SELECT COUNT(*)
@@ -1306,6 +1333,8 @@ impl SearchApi {
             scripts_with_archive_entries,
             total_develop_revision_files,
             total_archive_revision_files,
+            scripts_with_working_versions,
+            total_working_revision_files,
             scripts_checked_out_by_multiple_users,
         }))
     }
