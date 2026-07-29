@@ -137,6 +137,34 @@ fn make_logical_path(filepath: &Path, root: &Path, logical_prefix: &str) -> Stri
     }
 }
 
+/// Whether a working-directory file whose name parses as `<script>_<timestamp>`
+/// is really one of vc's checked-in version copies rather than a script that
+/// merely happens to end in digits.
+///
+/// Two independent signals qualify it, because the script part of the name is
+/// not always enough on its own:
+///
+/// - The script part carries a known script extension (`bar.py_20260720_0900`).
+///   Nothing else is named that way, and it still holds after the active
+///   script is obsoleted and only the versions remain.
+/// - A sibling entry named exactly like the script part exists next to it
+///   (`prepare_release` beside `prepare_release_20260701_105550`). This is the
+///   case for the many extensionless shell tools vc manages, whose versions
+///   would otherwise each be indexed as a separate script — the symptom being
+///   a search for `prepare_release` returning every retained version of it.
+///   The sibling is normally vc's active symlink, so it is stat'ed without
+///   following links: a symlink left dangling by a half-finished checkin still
+///   counts, while a directory of that name does not.
+fn is_working_dir_revision(filepath: &Path, script_name: &str, script_ext: &str) -> bool {
+    if SCRIPT_EXTENSIONS.contains(&script_ext) {
+        return true;
+    }
+    filepath
+        .with_file_name(script_name)
+        .symlink_metadata()
+        .is_ok_and(|meta| !meta.is_dir())
+}
+
 fn get_external_ignore_paths(ignore_files: &[PathBuf]) -> Result<Vec<PathBuf>> {
     let mut paths = Vec::new();
 
@@ -403,13 +431,25 @@ fn scan_paths_with_revisions_impl(
 
             let filepath = entry.path();
 
+            // Editor backups (`prepare_release~`) are not scripts. Without
+            // this they would slip through for extensionless names: `foo.sh~`
+            // is already dropped below as an unknown extension, but `foo~` has
+            // no extension at all and would reach the shebang sniff and index
+            // as a duplicate of `foo`.
+            if filepath
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|name| name.ends_with('~'))
+            {
+                skipped_in_root += 1;
+                total_skipped += 1;
+                continue;
+            }
+
             // vc keeps recent checked-in copies (`<script>_<timestamp>`, no
             // user suffix) in the working directory next to the active
-            // symlink. Record those as WORKING revisions instead of dropping
-            // them as unknown extensions — but only when the embedded script
-            // name itself has a script extension, so a genuine extensionless
-            // script whose name merely ends in digits still falls through to
-            // shebang sniffing below.
+            // symlink. Record those as WORKING revisions instead of indexing
+            // them as scripts in their own right.
             if let Some(filename) = filepath.file_name().and_then(|n| n.to_str())
                 && let Some((script_name, timestamp, user)) = parse_checkout_filename(filename)
             {
@@ -418,7 +458,7 @@ fn scan_paths_with_revisions_impl(
                     .and_then(|e| e.to_str())
                     .map(|e| format!(".{}", e.to_lowercase()))
                     .unwrap_or_default();
-                if SCRIPT_EXTENSIONS.contains(&script_ext.as_str()) {
+                if is_working_dir_revision(filepath, &script_name, &script_ext) {
                     let logical_path = make_logical_path(
                         &filepath.with_file_name(&script_name),
                         root,
@@ -716,6 +756,15 @@ mod tests {
     }
 
     #[test]
+    fn shebang_direct_sh() {
+        // How the extensionless shell tools vc manages are detected at all:
+        // with no extension to go on, the shebang is the only language signal.
+        assert_eq!(shebang_language("#!/bin/sh"), Some("shell"));
+        assert_eq!(shebang_language("#! /bin/sh"), Some("shell"));
+        assert_eq!(shebang_language("#!/usr/bin/env sh"), Some("shell"));
+    }
+
+    #[test]
     fn shebang_env_python3() {
         assert_eq!(shebang_language("#!/usr/bin/env python3"), Some("python"));
     }
@@ -766,6 +815,137 @@ mod tests {
             .collect();
         timestamps.sort();
         assert_eq!(timestamps, vec!["20260610_151550", "20260720_090000"]);
+    }
+
+    #[test]
+    fn scan_records_version_copies_of_extensionless_scripts_as_revisions() {
+        // The same working-directory layout, for a shell tool carrying no
+        // extension: the versions belong to `prepare_release`, not to five
+        // scripts that happen to share a prefix.
+        let dir = tempfile::TempDir::new().unwrap();
+        let scan_root = dir.path().join("linux").join("scripts");
+        std::fs::create_dir_all(&scan_root).unwrap();
+        std::fs::write(scan_root.join("prepare_release"), "#!/bin/sh\n").unwrap();
+        std::fs::write(
+            scan_root.join("prepare_release_20260729_140513"),
+            "#!/bin/sh\n",
+        )
+        .unwrap();
+        std::fs::write(
+            scan_root.join("prepare_release_20260701_105550"),
+            "#!/bin/sh\n",
+        )
+        .unwrap();
+
+        let shutdown = AtomicBool::new(false);
+        let result = scan_paths_with_revisions(
+            std::slice::from_ref(&scan_root),
+            "/catalog/linux/scripts",
+            5,
+            &[],
+            &[],
+            None,
+            &shutdown,
+        )
+        .unwrap();
+
+        let paths: Vec<&str> = result
+            .scripts
+            .iter()
+            .map(|s| s.logical_path.as_str())
+            .collect();
+        assert_eq!(paths, vec!["/catalog/linux/scripts/prepare_release"]);
+
+        assert_eq!(result.revisions.len(), 2);
+        for revision in &result.revisions {
+            assert_eq!(
+                revision.logical_path,
+                "/catalog/linux/scripts/prepare_release"
+            );
+            assert_eq!(revision.revision_type, REVISION_TYPE_WORKING);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_records_version_copies_behind_an_active_symlink() {
+        // vc's steady state: the script name is a symlink to the newest
+        // version. Only the symlink indexes, and it keeps pointing at the
+        // version it resolves to.
+        let dir = tempfile::TempDir::new().unwrap();
+        let scan_root = dir.path().join("linux").join("scripts");
+        std::fs::create_dir_all(&scan_root).unwrap();
+        std::fs::write(
+            scan_root.join("prepare_release_20260729_140513"),
+            "#!/bin/sh\n",
+        )
+        .unwrap();
+        std::fs::write(
+            scan_root.join("prepare_release_20260701_105550"),
+            "#!/bin/sh\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(
+            "prepare_release_20260729_140513",
+            scan_root.join("prepare_release"),
+        )
+        .unwrap();
+
+        let shutdown = AtomicBool::new(false);
+        let result = scan_paths_with_revisions(
+            std::slice::from_ref(&scan_root),
+            "/catalog/linux/scripts",
+            5,
+            &[],
+            &[],
+            None,
+            &shutdown,
+        )
+        .unwrap();
+
+        assert_eq!(result.scripts.len(), 1);
+        assert_eq!(
+            result.scripts[0].logical_path,
+            "/catalog/linux/scripts/prepare_release"
+        );
+        assert_eq!(
+            result.scripts[0].symlink_target.as_deref(),
+            Some("/catalog/linux/scripts/prepare_release_20260729_140513")
+        );
+        assert_eq!(result.revisions.len(), 2);
+    }
+
+    #[test]
+    fn scan_skips_editor_backup_files() {
+        // `foo.sh~` is already dropped as an unknown extension; `foo~` has no
+        // extension and must not reach the shebang sniff.
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("prepare_release"), "#!/bin/sh\n").unwrap();
+        std::fs::write(dir.path().join("prepare_release~"), "#!/bin/sh\n").unwrap();
+        std::fs::write(dir.path().join("release_backup.sh"), "#!/bin/bash\n").unwrap();
+        std::fs::write(dir.path().join("release_backup.sh~"), "#!/bin/bash\n").unwrap();
+
+        let shutdown = AtomicBool::new(false);
+        let records = scan_paths(
+            &[dir.path().to_path_buf()],
+            "/catalog/scripts",
+            5,
+            &[],
+            &[],
+            None,
+            &shutdown,
+        )
+        .unwrap();
+
+        let mut paths: Vec<&str> = records.iter().map(|r| r.logical_path.as_str()).collect();
+        paths.sort();
+        assert_eq!(
+            paths,
+            vec![
+                "/catalog/scripts/prepare_release",
+                "/catalog/scripts/release_backup.sh"
+            ]
+        );
     }
 
     #[test]

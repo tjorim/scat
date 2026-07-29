@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use scat_core::core::diff::{
     ScriptDiffResult, diff_catalog_vs_checkout, diff_catalog_vs_file, diff_files, render_diff_text,
 };
-use scat_core::core::script_view::{ListField, ScriptView};
+use scat_core::core::script_view::{ListField, ScriptView, symlink_target_display};
 use scat_core::core::search::{CatalogDiff, compare_catalogs};
 use scat_core::core::vc::{compare_revision_rows, relative_age};
 use scat_core::indexer::builder::{BuildOptions, build_index};
@@ -133,7 +133,7 @@ pub(crate) fn query_uses_fts(query: &str) -> bool {
 
 /// Re-sort results so exact and prefix filename matches appear first.
 /// Preserves the original (BM25) order within each tier.
-fn sort_by_name_relevance(
+pub(crate) fn sort_by_name_relevance(
     mut results: Vec<scat_core::core::db::JsonRow>,
     query: &str,
 ) -> Vec<scat_core::core::db::JsonRow> {
@@ -164,7 +164,8 @@ fn sort_by_name_relevance(
     results
 }
 
-/// showing its target path.
+/// Group symlinked scripts with their targets: each symlink stays a primary
+/// table row and gains a `↳` sub-row showing its target path.
 ///
 /// If the target also appears in the result set it is suppressed as a
 /// standalone entry — it is already visible via the ↳ row.  If the target is
@@ -194,9 +195,16 @@ fn group_by_symlinks(
 
         if let Some(target_path) = target {
             // Symlink is the primary entry; show its target as a sub-row.
+            // The path column truncates from the left to keep filenames
+            // visible, which would eat a leading marker, so the sub-row is
+            // written as a short sibling name wherever it can be — the arrow
+            // is what makes the row mean anything.
+            let shown =
+                symlink_target_display(ScriptView::new(&row).logical_path(), target_path.as_str());
+            let sub_row = format!("  ↳ {shown}");
             output.push(row);
             let mut sub = scat_core::core::db::JsonRow::new();
-            sub.insert("logical_path".into(), format!("  ↳ {target_path}").into());
+            sub.insert("logical_path".into(), sub_row.into());
             output.push(sub);
         } else {
             // Non-symlink: skip if it's already shown as a ↳ sub-row above.
@@ -745,6 +753,14 @@ fn render_revision_stats_lines(stats: &scat_core::core::search::RevisionStats) -
         format!(
             "  Total ARCHIVE revision files: {}",
             stats.total_archive_revision_files
+        ),
+        format!(
+            "  Scripts with working versions: {}",
+            stats.scripts_with_working_versions
+        ),
+        format!(
+            "  Total WORKING revision files: {}",
+            stats.total_working_revision_files
         ),
         format!(
             "  Scripts checked out by >1 user: {}",
@@ -1392,6 +1408,8 @@ mod tests {
             scripts_with_archive_entries: 47,
             total_develop_revision_files: 18,
             total_archive_revision_files: 134,
+            scripts_with_working_versions: 51,
+            total_working_revision_files: 96,
             scripts_checked_out_by_multiple_users: 2,
         });
 
@@ -1402,6 +1420,8 @@ mod tests {
                 "  Scripts with archive entries: 47",
                 "  Total DEVELOP revision files: 18",
                 "  Total ARCHIVE revision files: 134",
+                "  Scripts with working versions: 51",
+                "  Total WORKING revision files: 96",
                 "  Scripts checked out by >1 user: 2",
             ]
         );

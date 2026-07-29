@@ -460,6 +460,24 @@ fn stats_include_revision_statistics_when_available() {
             "carla",
             "20240303_1430",
         ),
+        // The version copies vc retains in the working directory itself,
+        // beside the active symlink — no user suffix on these.
+        (
+            "/catalog/scripts/a.py",
+            "/catalog/scripts/a.py_20240310_1430",
+            "WORKING",
+            "LINUX",
+            "",
+            "20240310_1430",
+        ),
+        (
+            "/catalog/scripts/a.py",
+            "/catalog/scripts/a.py_20240220_0900",
+            "WORKING",
+            "LINUX",
+            "",
+            "20240220_0900",
+        ),
     ] {
         api.conn
             .execute(
@@ -488,6 +506,10 @@ fn stats_include_revision_statistics_when_available() {
     assert_eq!(revisions.scripts_with_archive_entries, 2);
     assert_eq!(revisions.total_develop_revision_files, 3);
     assert_eq!(revisions.total_archive_revision_files, 3);
+    // WORKING rows are counted separately: they are kept out of `scripts` on
+    // purpose, so this is the only place they are visible as a total.
+    assert_eq!(revisions.scripts_with_working_versions, 1);
+    assert_eq!(revisions.total_working_revision_files, 2);
     assert_eq!(revisions.scripts_checked_out_by_multiple_users, 1);
 
     let json = serde_json::to_value(&stats).unwrap();
@@ -495,6 +517,8 @@ fn stats_include_revision_statistics_when_available() {
     assert_eq!(json["revisions"]["scripts_with_archive_entries"], 2);
     assert_eq!(json["revisions"]["total_develop_revision_files"], 3);
     assert_eq!(json["revisions"]["total_archive_revision_files"], 3);
+    assert_eq!(json["revisions"]["scripts_with_working_versions"], 1);
+    assert_eq!(json["revisions"]["total_working_revision_files"], 2);
     assert_eq!(
         json["revisions"]["scripts_checked_out_by_multiple_users"],
         1

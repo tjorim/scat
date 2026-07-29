@@ -5,7 +5,7 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
-use scat_core::core::script_view::ScriptView;
+use scat_core::core::script_view::{ScriptView, symlink_target_display};
 use scat_core::core::vc::relative_age;
 
 use super::{Focus, RegionKind, TuiApp, ViewMode, detail};
@@ -376,6 +376,33 @@ fn pane_scroll(selected: usize, outer: Rect) -> usize {
     selected.saturating_sub(visible_rows.saturating_sub(1))
 }
 
+/// One line of the results pane: the script's path, the target it symlinks to
+/// when it is one, then language and checkout markers.
+fn result_line(row: &scat_core::core::db::JsonRow, area: Rect) -> String {
+    let view = ScriptView::new(row);
+    let path = view.logical_path();
+    let lang = view.language();
+    let checkout = if view.checkout_user().is_empty() {
+        ""
+    } else {
+        " CO"
+    };
+    // A symlink's own row carries the arrow, the same relationship the CLI
+    // table shows as a `↳ <target>` sub-row. Rows here are selectable entries
+    // backed by a script, so the target is annotated in place rather than
+    // added as a row of its own.
+    let arrow = symlink_arrow(path, view.symlink_target());
+    // Reserve: 2 (highlight) + 2 (separator) + lang + checkout + arrow
+    let max_name = (area.width as usize)
+        .saturating_sub(2)
+        .saturating_sub(2)
+        .saturating_sub(lang.len())
+        .saturating_sub(checkout.len())
+        .saturating_sub(arrow.chars().count());
+    let display = left_truncate_path(path, max_name);
+    format!("{display}{arrow}  {lang}{checkout}")
+}
+
 fn draw_results(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
     let spinner = spinner_char(app.tick);
     let items: Vec<ListItem> = if app.search_in_flight && app.results.is_empty() {
@@ -388,24 +415,7 @@ fn draw_results(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
     } else {
         app.results
             .iter()
-            .map(|row| {
-                let view = ScriptView::new(row);
-                let path = view.logical_path();
-                let lang = view.language();
-                let checkout = if view.checkout_user().is_empty() {
-                    ""
-                } else {
-                    " CO"
-                };
-                // Reserve: 2 (highlight) + 2 (separator) + lang + checkout
-                let max_name = (area.width as usize)
-                    .saturating_sub(2)
-                    .saturating_sub(2)
-                    .saturating_sub(lang.len())
-                    .saturating_sub(checkout.len());
-                let display = left_truncate_path(path, max_name);
-                ListItem::new(format!("{display}  {lang}{checkout}"))
-            })
+            .map(|row| ListItem::new(result_line(row, area)))
             .collect()
     };
     let list = List::new(items)
@@ -487,6 +497,12 @@ fn draw_metadata(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
             Span::raw(view.checkout_label()),
         ]),
     ];
+    if !view.symlink_target().is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("Symlink   ", detail::label_style()),
+            Span::raw(format!("→ {}", view.symlink_target())),
+        ]));
+    }
     if !warnings.is_empty() {
         lines.push(Line::from(vec![
             Span::styled("Warnings  ", detail::label_style()),
@@ -725,7 +741,13 @@ fn draw_revisions(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
             Style::default().fg(Color::DarkGray),
         ))]
     } else {
-        revision_lines(&app.checkouts)
+        let active = app
+            .detail
+            .as_ref()
+            .map(ScriptView::new)
+            .map(|view| view.symlink_target().to_string())
+            .unwrap_or_default();
+        revision_lines(&app.checkouts, &active)
     };
     clamp_scroll_offset(&mut app.revisions_scroll, lines.len(), area);
     let title = format!(
@@ -746,16 +768,31 @@ fn draw_revisions(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
     );
 }
 
-fn revision_lines(revisions: &[super::JsonRow]) -> Vec<Line<'static>> {
+/// Render the revisions pane, grouped by revision type.
+///
+/// `active_target` is the script's `symlink_target`; the WORKING revision it
+/// resolves to is marked as the live one. Which of the retained versions is
+/// actually active is not implied by their order — a rollback re-points the
+/// symlink at an older version and leaves the newer ones in place, so the
+/// group can hold versions both older and newer than the live one.
+fn revision_lines(revisions: &[super::JsonRow], active_target: &str) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
-    append_revision_group(&mut lines, "DEVELOP", revisions);
+    append_revision_group(&mut lines, "DEVELOP", revisions, active_target);
     lines.push(Line::raw(""));
-    append_revision_group(&mut lines, "ARCHIVE", revisions);
+    // Between DEVELOP and ARCHIVE: newer than anything archived, not a
+    // checkout. Without a group of its own this lands under "OTHER", which is
+    // where every working-directory version copy used to be filed.
+    append_revision_group(&mut lines, "WORKING", revisions, active_target);
+    lines.push(Line::raw(""));
+    append_revision_group(&mut lines, "ARCHIVE", revisions, active_target);
     let other_rows = revisions
         .iter()
         .filter(|row| {
             let revision_type = super::str_field(row, "revision_type");
-            !matches!(revision_type.as_str(), "" | "DEVELOP" | "ARCHIVE")
+            !matches!(
+                revision_type.as_str(),
+                "" | "DEVELOP" | "WORKING" | "ARCHIVE"
+            )
         })
         .collect::<Vec<_>>();
     if !other_rows.is_empty() {
@@ -767,7 +804,7 @@ fn revision_lines(revisions: &[super::JsonRow]) -> Vec<Line<'static>> {
                 .add_modifier(Modifier::BOLD),
         )));
         for row in other_rows {
-            lines.push(Line::raw(format_revision_row(row)));
+            lines.push(Line::raw(format_revision_row(row, "")));
         }
     }
     lines
@@ -777,10 +814,14 @@ fn append_revision_group(
     lines: &mut Vec<Line<'static>>,
     revision_type: &str,
     revisions: &[super::JsonRow],
+    active_target: &str,
 ) {
     let badge_style = match revision_type {
         "DEVELOP" => Style::default()
             .fg(Color::Green)
+            .add_modifier(Modifier::BOLD),
+        "WORKING" => Style::default()
+            .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD),
         "ARCHIVE" => Style::default()
             .fg(Color::Yellow)
@@ -799,7 +840,7 @@ fn append_revision_group(
         if row_revision_type == revision_type
             || (revision_type == "DEVELOP" && row_revision_type.is_empty())
         {
-            lines.push(Line::raw(format_revision_row(row)));
+            lines.push(Line::raw(format_revision_row(row, active_target)));
             found = true;
         }
     }
@@ -812,7 +853,7 @@ fn append_revision_group(
     }
 }
 
-fn format_revision_row(row: &super::JsonRow) -> String {
+fn format_revision_row(row: &super::JsonRow, active_target: &str) -> String {
     let os = super::str_field(row, "os_flavor");
     let user = super::str_field(row, "user");
     let timestamp = super::str_field(row, "timestamp");
@@ -821,7 +862,28 @@ fn format_revision_row(row: &super::JsonRow) -> String {
         .and_then(serde_json::Value::as_f64)
         .map(relative_age);
     let age_suffix = age.map(|v| format!("   ({v})")).unwrap_or_default();
-    format!("  {os:<7} {user:<12} {timestamp}{age_suffix}")
+    let active = if is_active_revision(row, active_target) {
+        "  ← active"
+    } else {
+        ""
+    };
+    format!("  {os:<7} {user:<12} {timestamp}{age_suffix}{active}")
+}
+
+/// Whether this revision is the version the script's symlink resolves to.
+///
+/// The symlink target is a logical path and a revision carries the on-disk
+/// path it was found at, so the two are compared by filename. That is exact
+/// for the case it is meant to catch: vc's active-version symlinks point at a
+/// sibling in the same working directory, so a matching filename there is the
+/// same file. An empty target (the script is not a symlink) matches nothing.
+fn is_active_revision(row: &super::JsonRow, active_target: &str) -> bool {
+    if active_target.is_empty() {
+        return false;
+    }
+    let file_name = |p: &str| p.rsplit(['/', '\\']).next().unwrap_or(p).to_string();
+    let physical = super::str_field(row, "physical_path");
+    !physical.is_empty() && file_name(&physical) == file_name(active_target)
 }
 
 fn draw_footer(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
@@ -929,6 +991,15 @@ fn focus_border(current: Focus, target: Focus) -> Style {
 }
 
 /// Left-truncate a path to `max_chars`, preferring a `…/parent/file` form.
+/// Render a symlink's target as a ` → target` suffix, or an empty string when
+/// the script is not a symlink. Counterpart to the CLI table's `↳` sub-row.
+fn symlink_arrow(path: &str, target: &str) -> String {
+    if target.is_empty() {
+        return String::new();
+    }
+    format!(" → {}", symlink_target_display(path, target))
+}
+
 fn left_truncate_path(path: &str, max_chars: usize) -> String {
     if max_chars == 0 {
         return String::new();
@@ -983,6 +1054,7 @@ mod tests {
 
     use super::{
         clamp_scroll_offset, left_truncate_path, line_count, preview_title, revision_lines,
+        symlink_arrow,
     };
     use ratatui::layout::Rect;
 
@@ -1032,15 +1104,22 @@ mod tests {
             "timestamp".to_string(),
             Value::String(timestamp.to_string()),
         );
+        row.insert(
+            "physical_path".to_string(),
+            Value::String(format!("/srv/scripts/tool_{timestamp}")),
+        );
         row
     }
 
     #[test]
     fn revision_lines_group_develop_and_archive_rows() {
-        let lines = revision_lines(&[
-            revision_row("DEVELOP", "LINUX", "alice", "20240102_1200"),
-            revision_row("ARCHIVE", "ZOS", "bob", "20231231_0900"),
-        ]);
+        let lines = revision_lines(
+            &[
+                revision_row("DEVELOP", "LINUX", "alice", "20240102_1200"),
+                revision_row("ARCHIVE", "ZOS", "bob", "20231231_0900"),
+            ],
+            "",
+        );
 
         let texts: Vec<String> = lines.iter().map(line_text).collect();
         assert!(texts.iter().any(|t| t == "DEVELOP"));
@@ -1056,6 +1135,125 @@ mod tests {
                 .any(|t| t == "  ZOS     bob          20231231_0900")
         );
         assert!(!texts.iter().any(|t| t == "  (no archive entries.)"));
+    }
+
+    #[test]
+    fn revision_lines_give_working_versions_their_own_group() {
+        // Working-directory version copies used to land under "OTHER"; they
+        // are the common case for a vc-managed script, not an oddity.
+        let lines = revision_lines(
+            &[revision_row("WORKING", "LINUX", "", "20260701_105550")],
+            "",
+        );
+
+        let texts: Vec<String> = lines.iter().map(line_text).collect();
+        assert!(texts.iter().any(|t| t == "WORKING"), "{texts:?}");
+        assert!(
+            !texts.iter().any(|t| t == "OTHER"),
+            "a WORKING row must not fall through to OTHER: {texts:?}"
+        );
+        let working_at = texts.iter().position(|t| t == "WORKING").unwrap();
+        let develop_at = texts.iter().position(|t| t == "DEVELOP").unwrap();
+        let archive_at = texts.iter().position(|t| t == "ARCHIVE").unwrap();
+        assert!(
+            develop_at < working_at && working_at < archive_at,
+            "WORKING belongs between DEVELOP and ARCHIVE: {texts:?}"
+        );
+    }
+
+    #[test]
+    fn revision_lines_mark_the_version_the_symlink_points_at() {
+        // Order does not imply which version is live: a rollback re-points the
+        // symlink at an older version and leaves the newer one in place, so
+        // here the *older* of the two is the active one.
+        let lines = revision_lines(
+            &[
+                revision_row("WORKING", "LINUX", "", "20260729_140513"),
+                revision_row("WORKING", "LINUX", "", "20260701_105550"),
+            ],
+            "/catalog/scripts/tool_20260701_105550",
+        );
+
+        let texts: Vec<String> = lines.iter().map(line_text).collect();
+        let active: Vec<&String> = texts.iter().filter(|t| t.contains("← active")).collect();
+        assert_eq!(active.len(), 1, "exactly one row is active: {texts:?}");
+        assert!(active[0].contains("20260701_105550"), "{active:?}");
+    }
+
+    #[test]
+    fn revision_lines_mark_nothing_when_the_script_is_not_a_symlink() {
+        let lines = revision_lines(
+            &[revision_row("WORKING", "LINUX", "", "20260701_105550")],
+            "",
+        );
+        let texts: Vec<String> = lines.iter().map(line_text).collect();
+        assert!(!texts.iter().any(|t| t.contains("← active")), "{texts:?}");
+    }
+
+    #[test]
+    fn results_pane_renders_the_symlink_arrow_on_screen() {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let mut row = Map::new();
+        row.insert(
+            "logical_path".into(),
+            Value::String("/shared/tools/scripts/source/prepare_release".into()),
+        );
+        row.insert("language".into(), Value::String("shell".into()));
+        row.insert(
+            "symlink_target".into(),
+            Value::String("/shared/tools/scripts/source/prepare_release_20260729_140513".into()),
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 6)).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                let items = vec![ratatui::widgets::ListItem::new(super::result_line(
+                    &row, area,
+                ))];
+                frame.render_widget(ratatui::widgets::List::new(items), area);
+            })
+            .unwrap();
+
+        let rendered: String =
+            terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .fold(String::new(), |mut acc, cell| {
+                    acc.push_str(cell.symbol());
+                    acc
+                });
+        assert!(
+            rendered.contains("→ prepare_release_20260729_140513"),
+            "results pane must show the symlink target: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn symlink_arrow_is_empty_for_a_plain_script() {
+        assert_eq!(symlink_arrow("/catalog/scripts/tool.py", ""), "");
+    }
+
+    #[test]
+    fn symlink_arrow_shows_bare_name_for_a_sibling_target() {
+        assert_eq!(
+            symlink_arrow(
+                "/catalog/scripts/prepare_release",
+                "/catalog/scripts/prepare_release_20260729_140513"
+            ),
+            " → prepare_release_20260729_140513"
+        );
+    }
+
+    #[test]
+    fn symlink_arrow_keeps_full_path_for_a_target_elsewhere() {
+        assert_eq!(
+            symlink_arrow("/catalog/scripts/tool.py", "/catalog/shared/tool_v2.py"),
+            " → /catalog/shared/tool_v2.py"
+        );
     }
 
     #[test]
