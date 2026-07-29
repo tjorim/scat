@@ -584,7 +584,8 @@ mod tests {
         .unwrap_err();
 
         assert!(
-            err.to_string().contains("threads must be greater than zero"),
+            err.to_string()
+                .contains("threads must be greater than zero"),
             "unexpected error: {err}"
         );
     }
