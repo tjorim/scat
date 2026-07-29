@@ -13,6 +13,10 @@ path = "src/main.rs"
 name = "scat_core"
 path = "src/lib.rs"
 
+[[bench]]
+name = "indexing"
+harness = false
+
 [dependencies]
 rusqlite = { version = "0.40", features = ["bundled-full"] }
 clap = { version = "4", features = ["derive", "env"] }
@@ -47,3 +51,5 @@ clap_complete = "4.6.7"
 rusqlite = { version = "0.40", features = ["bundled-full"] }
 tempfile = "3"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+proptest = "1.11.0"
+criterion = { version = "0.8.2", features = ["html_reports"] }

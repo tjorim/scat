@@ -379,6 +379,55 @@ mod tests {
     }
 
     #[test]
+    fn normalise_lang_is_case_insensitive_with_unknown_fallback() {
+        assert_eq!(normalise_lang("Shell"), "bash");
+        assert_eq!(normalise_lang("PYTHON"), "python");
+        assert_eq!(normalise_lang("perl"), "unknown");
+        assert_eq!(normalise_lang(""), "unknown");
+    }
+
+    #[test]
+    fn extract_deps_unknown_language_returns_empty() {
+        let mut ext = TreeSitterExtractor::new().unwrap();
+        assert!(ext.extract_deps("import os", "ruby").is_empty());
+    }
+
+    #[test]
+    fn extract_python_ast_returns_full_dependency_payload() {
+        let mut ext = TreeSitterExtractor::new().unwrap();
+        let deps = ext.extract_python_ast("import os\ndef f():\n    pass\nf()\n", Some("pkg.m"));
+        assert!(deps.imports.contains(&"os".to_string()));
+        assert_eq!(deps.definitions.len(), 1);
+        assert_eq!(deps.calls.len(), 1);
+    }
+
+    #[test]
+    fn reference_paths_do_not_match_uppercase_extension() {
+        // The regex is case-sensitive: `.PY` must not be treated as `.py`.
+        let refs = extract_reference_paths("run a/b/SCRIPT.PY now");
+        assert!(refs.is_empty(), "unexpected: {refs:?}");
+    }
+
+    #[test]
+    fn reference_paths_stop_at_trailing_punctuation() {
+        let refs = extract_reference_paths("see /catalog/scripts/run.py, then done.");
+        assert_eq!(refs, vec!["/catalog/scripts/run.py".to_string()]);
+    }
+
+    #[test]
+    fn fallback_extract_deps_unknown_language_returns_empty() {
+        assert!(extract_deps_fallback("import os", "ruby").is_empty());
+    }
+
+    #[test]
+    fn empty_source_does_not_panic_either_extractor() {
+        let mut ext = TreeSitterExtractor::new().unwrap();
+        assert!(ext.extract_deps("", "python").is_empty());
+        assert!(ext.extract_deps("", "shell").is_empty());
+        assert!(extract_reference_paths("").is_empty());
+    }
+
+    #[test]
     fn extract_deps_handles_deeply_nested_script_without_stack_overflow() {
         // The command walk used to be recursive, tracking AST nesting depth
         // 1:1 with native stack depth. A deeply nested script would overflow

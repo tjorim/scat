@@ -719,4 +719,117 @@ mod tests {
         let call = deps.calls.iter().find(|c| c.callee == "inner").unwrap();
         assert_eq!(call.caller, "outer");
     }
+
+    // -----------------------------------------------------------------------
+    // Further edge-case coverage
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn empty_source_yields_empty_deps() {
+        let mut p = make_parser();
+        let deps = extract_python_deps(&mut p, "");
+        assert!(deps.imports.is_empty());
+        assert!(deps.definitions.is_empty());
+        assert!(deps.calls.is_empty());
+    }
+
+    #[test]
+    fn import_with_alias_binds_local_name() {
+        let mut p = make_parser();
+        let src = "import os.path as op\nop.join('a', 'b')\n";
+        let deps = extract_python_deps_with_module(&mut p, src, Some("pkg.main"));
+        assert!(deps.imports.contains(&"os.path".to_string()));
+        let call = deps.calls.iter().find(|c| c.callee == "op.join").unwrap();
+        assert_eq!(call.resolved_target.as_deref(), Some("os.path.join"));
+    }
+
+    #[test]
+    fn from_import_multiple_names_with_mixed_alias() {
+        let mut p = make_parser();
+        let src = "from pkg.mod import a, b as c\na()\nc()\n";
+        let deps = extract_python_deps_with_module(&mut p, src, Some("pkg.main"));
+        assert!(deps.imports.contains(&"pkg.mod".to_string()));
+        let call_a = deps.calls.iter().find(|c| c.callee == "a").unwrap();
+        assert_eq!(call_a.resolved_target.as_deref(), Some("pkg.mod.a"));
+        let call_c = deps.calls.iter().find(|c| c.callee == "c").unwrap();
+        assert_eq!(call_c.resolved_target.as_deref(), Some("pkg.mod.b"));
+    }
+
+    #[test]
+    fn chained_attribute_call_uses_leftmost_object_root() {
+        let mut p = make_parser();
+        let src = "import requests\nrequests.session().get('/x')\n";
+        let deps = extract_python_deps(&mut p, src);
+        // `.get` is called on the result of `.session()`, which has no name of
+        // its own, so the callee for the outer call collapses to `get`.
+        assert!(deps.calls.iter().any(|c| c.callee == "requests.session"));
+    }
+
+    #[test]
+    fn docstring_extraction_strips_raw_and_fstring_prefixes() {
+        let mut p = make_parser();
+        let src = "def f():\n    r\"\"\"raw doc\"\"\"\n    pass\ndef g():\n    f\"\"\"f doc\"\"\"\n    pass\n";
+        let deps = extract_python_deps(&mut p, src);
+        let f = deps.definitions.iter().find(|d| d.name == "f").unwrap();
+        assert_eq!(f.docstring, "raw doc");
+        let g = deps.definitions.iter().find(|d| d.name == "g").unwrap();
+        assert_eq!(g.docstring, "f doc");
+    }
+
+    #[test]
+    fn no_docstring_when_body_has_no_leading_string() {
+        let mut p = make_parser();
+        let src = "def f():\n    pass\n";
+        let deps = extract_python_deps(&mut p, src);
+        assert_eq!(deps.definitions[0].docstring, "");
+    }
+
+    #[test]
+    fn class_without_body_or_name_is_skipped_safely() {
+        let mut p = make_parser();
+        // Syntactically broken class definition; must not panic.
+        let deps = extract_python_deps(&mut p, "class :\n    pass\n");
+        let _ = deps;
+    }
+
+    #[test]
+    fn resolve_relative_import_beyond_package_depth_falls_back_to_suffix() {
+        // Module "main" has only one path segment, so climbing 2 levels above
+        // it (3 leading dots) goes past the package root; the resolver falls
+        // back to the bare suffix rather than producing a bogus path.
+        assert_eq!(
+            resolve_relative("...sibling", Some("main")),
+            Some("sibling".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_relative_without_module_name_returns_none() {
+        assert_eq!(resolve_relative(".sibling", None), None);
+    }
+
+    #[test]
+    fn resolve_relative_absolute_name_passes_through() {
+        assert_eq!(
+            resolve_relative("os.path", Some("pkg.main")),
+            Some("os.path".to_string())
+        );
+    }
+
+    #[test]
+    fn multiple_decorators_are_all_captured() {
+        let mut p = make_parser();
+        let src = "@a\n@b.c\ndef f():\n    pass\n";
+        let deps = extract_python_deps(&mut p, src);
+        assert_eq!(deps.definitions[0].decorators, vec!["a", "b.c"]);
+    }
+
+    #[test]
+    fn unresolved_call_has_no_target() {
+        let mut p = make_parser();
+        let src = "unknown_fn()\n";
+        let deps = extract_python_deps_with_module(&mut p, src, Some("pkg.main"));
+        assert_eq!(deps.calls.len(), 1);
+        assert!(deps.calls[0].resolved_target.is_none());
+    }
 }

@@ -427,4 +427,117 @@ mod tests {
         // Owner plus the history author, de-duplicated and sorted.
         assert_eq!(view.contributors(), vec!["Alice", "Carol"]);
     }
+
+    // -----------------------------------------------------------------------
+    // Further edge-case coverage
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn string_list_falls_back_to_empty_on_malformed_json() {
+        let mut row = JsonRow::new();
+        row.insert("tags".into(), json!("not valid json"));
+        let view = ScriptView::new(&row);
+        assert!(view.string_list(ListField::Tags).is_empty());
+    }
+
+    #[test]
+    fn string_list_falls_back_to_empty_when_column_missing() {
+        let row = JsonRow::new();
+        let view = ScriptView::new(&row);
+        assert!(view.string_list(ListField::EntryPoints).is_empty());
+        assert!(view.string_list(ListField::Related).is_empty());
+    }
+
+    #[test]
+    fn list_value_falls_back_to_empty_array_for_non_array_json() {
+        let mut row = JsonRow::new();
+        // A JSON object, not an array, must not be returned as-is.
+        row.insert("related".into(), json!(r#"{"not":"a list"}"#));
+        let view = ScriptView::new(&row);
+        assert_eq!(
+            view.list_value_or_empty(ListField::Related),
+            Value::Array(Vec::new())
+        );
+    }
+
+    #[test]
+    fn metadata_falls_back_to_empty_map_on_malformed_json() {
+        let mut row = JsonRow::new();
+        row.insert("metadata_json".into(), json!("{not json"));
+        let view = ScriptView::new(&row);
+        assert!(view.metadata().is_empty());
+    }
+
+    #[test]
+    fn metadata_falls_back_to_empty_map_when_not_an_object() {
+        let mut row = JsonRow::new();
+        row.insert("metadata_json".into(), json!("[1,2,3]"));
+        let view = ScriptView::new(&row);
+        assert!(view.metadata().is_empty());
+    }
+
+    #[test]
+    fn vc_warnings_fall_back_to_empty_on_malformed_json() {
+        let mut row = JsonRow::new();
+        row.insert("vc_warnings".into(), json!("not json"));
+        let view = ScriptView::new(&row);
+        assert!(view.vc_warning_kinds().is_empty());
+        assert!(view.vc_warning_messages().is_empty());
+    }
+
+    #[test]
+    fn contributors_ignores_whitespace_only_owner_and_authors() {
+        let mut row = JsonRow::new();
+        row.insert("owner".into(), json!("   "));
+        row.insert(
+            "metadata_json".into(),
+            json!(json!({"history_entries": [{"author": "  "}, {"author": "Dana"}]}).to_string()),
+        );
+        let view = ScriptView::new(&row);
+        assert_eq!(view.contributors(), vec!["Dana"]);
+    }
+
+    #[test]
+    fn contributors_empty_when_no_owner_and_no_history() {
+        let row = JsonRow::new();
+        let view = ScriptView::new(&row);
+        assert!(view.contributors().is_empty());
+    }
+
+    #[test]
+    fn checkout_label_ignores_timestamp_without_user() {
+        let mut row = JsonRow::new();
+        row.insert("checkout_timestamp".into(), json!("2025-01-01T00:00:00"));
+        let view = ScriptView::new(&row);
+        // No holder means "clean" even if a stray timestamp is present.
+        assert_eq!(view.checkout_label(), "clean");
+    }
+
+    #[test]
+    fn checkout_label_without_timestamp() {
+        let mut row = JsonRow::new();
+        row.insert("checkout_user".into(), json!("alice"));
+        let view = ScriptView::new(&row);
+        assert_eq!(view.checkout_label(), "checked out by alice");
+    }
+
+    #[test]
+    fn logical_parent_dir_empty_input() {
+        assert_eq!(logical_parent_dir(""), "");
+    }
+
+    #[test]
+    fn symlink_target_display_handles_empty_target() {
+        assert_eq!(symlink_target_display("/catalog/scripts/a.py", ""), "");
+    }
+
+    #[test]
+    fn size_and_mtime_are_none_for_non_numeric_values() {
+        let mut row = JsonRow::new();
+        row.insert("size".into(), json!("not a number"));
+        row.insert("mtime".into(), json!("also not a number"));
+        let view = ScriptView::new(&row);
+        assert_eq!(view.size(), None);
+        assert_eq!(view.mtime(), None);
+    }
 }
