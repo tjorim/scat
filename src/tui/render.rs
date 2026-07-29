@@ -4,7 +4,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use scat_core::core::script_view::{ScriptView, symlink_target_display};
 use scat_core::core::vc::relative_age;
 
@@ -405,33 +405,67 @@ fn result_line(row: &scat_core::core::db::JsonRow, area: Rect) -> String {
 
 fn draw_results(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
     let spinner = spinner_char(app.tick);
-    let items: Vec<ListItem> = if app.search_in_flight && app.results.is_empty() {
-        vec![ListItem::new(format!("{spinner} Searching…"))]
-    } else if app.results.is_empty() {
-        vec![ListItem::new(Span::styled(
-            "No results.",
-            Style::default().fg(Color::DarkGray),
-        ))]
+    let title = format!("Results ({})", app.results.len());
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .border_style(focus_border(app.focus, Focus::Results));
+
+    if app.results.is_empty() {
+        let items = if app.search_in_flight {
+            vec![ListItem::new(format!("{spinner} Searching…"))]
+        } else {
+            vec![ListItem::new(Span::styled(
+                "No results.",
+                Style::default().fg(Color::DarkGray),
+            ))]
+        };
+        frame.render_widget(List::new(items).block(block), area);
+        return;
+    }
+
+    // Every row renders as exactly one line, so the visible window can be
+    // computed directly (no variable item heights to walk). Only that window
+    // is turned into `ListItem`s and reformatted, instead of all of
+    // `app.results` on every frame — the difference that lets the list stay
+    // cheap to draw with thousands of results, not just the handful visible.
+    let inner_height = area.height.saturating_sub(2) as usize;
+    let len = app.results.len();
+    let selected = app.selected.min(len - 1);
+    let mut offset = app.results_state.offset().min(len - 1);
+    if inner_height == 0 {
+        offset = 0;
     } else {
-        app.results
-            .iter()
-            .map(|row| ListItem::new(result_line(row, area)))
-            .collect()
-    };
+        if selected < offset {
+            offset = selected;
+        } else if selected >= offset + inner_height {
+            offset = selected + 1 - inner_height;
+        }
+        offset = offset.min(len.saturating_sub(inner_height));
+    }
+    // Recorded here (rather than left to the widget) since only the window is
+    // rendered below; `record_region` calls after `draw_results` read this to
+    // map a mouse click back to a full-list index.
+    *app.results_state.offset_mut() = offset;
+
+    let end = (offset + inner_height.max(1)).min(len);
+    let items: Vec<ListItem> = app.results[offset..end]
+        .iter()
+        .map(|row| ListItem::new(result_line(row, area)))
+        .collect();
+
+    let mut window_state = ListState::default();
+    window_state.select(Some(selected - offset));
+
     let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(format!("Results ({})", app.results.len()))
-                .border_style(focus_border(app.focus, Focus::Results)),
-        )
+        .block(block)
         .highlight_style(
             Style::default()
                 .add_modifier(Modifier::REVERSED)
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("> ");
-    frame.render_stateful_widget(list, area, &mut app.results_state);
+    frame.render_stateful_widget(list, area, &mut window_state);
 }
 
 fn draw_metadata(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {

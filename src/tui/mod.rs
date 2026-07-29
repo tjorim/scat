@@ -52,7 +52,10 @@ use self::helpers::*;
 use self::render::draw;
 use self::search_worker::{SearchRequest, SearchWorker};
 
-const RESULT_LIMIT: usize = 200;
+// The results list only builds `ListItem`s for the rows visible in the pane
+// (see `render::draw_results`), so this can be well beyond a single screen
+// without making rendering more expensive.
+const RESULT_LIMIT: usize = 2000;
 const PREVIEW_LINES: usize = 500;
 const DEBOUNCE_MS: u64 = 150;
 const POLL_TICK_MS: u64 = 50;

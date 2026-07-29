@@ -1119,3 +1119,47 @@ fn esc_exits_fullscreen_before_quitting() {
         .unwrap();
     assert!(should_quit, "second Esc should quit");
 }
+
+#[test]
+fn results_list_only_renders_the_visible_window() {
+    use ratatui::{Terminal, backend::TestBackend};
+
+    let db = super::make_test_db();
+    let mut app = make_app(db.path());
+
+    let total = 2000;
+    app.results = (0..total)
+        .map(|i| detail_row(&format!("/scripts/item_{i:04}.sh")))
+        .collect();
+    app.selected = total - 1;
+    app.results_state.select(Some(app.selected));
+
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    terminal
+        .draw(|frame| super::render::draw(frame, &mut app))
+        .unwrap();
+
+    let rendered: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+
+    // The selected row (the very last result) is on screen…
+    assert!(rendered.contains(&format!("item_{:04}", total - 1)));
+    // …but the first row, thousands of entries earlier, was scrolled out of
+    // the window rather than formatted into the buffer.
+    assert!(!rendered.contains("item_0000"));
+    // The offset used for mouse hit-testing tracks the scrolled window.
+    assert!(app.results_state.offset() > 0);
+
+    // Selecting the very first result scrolls back to the top.
+    app.selected = 0;
+    app.results_state.select(Some(0));
+    terminal
+        .draw(|frame| super::render::draw(frame, &mut app))
+        .unwrap();
+    assert_eq!(app.results_state.offset(), 0);
+}
