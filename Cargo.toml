@@ -53,3 +53,17 @@ tempfile = "3"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 proptest = "1.11.0"
 criterion = { version = "0.8.2", features = ["html_reports"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# Build dependencies (rusqlite's bundled sqlite, proc-macros) don't benefit
+# from release-grade optimization the way scat's own code does; keep them
+# fast to compile instead.
+[profile.release.build-override]
+opt-level = 3
+codegen-units = 4
