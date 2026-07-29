@@ -77,20 +77,20 @@ fn open_db_rejects_schema_mismatch() {
 fn create_db_creates_new_indexes() {
     let db = NamedTempFile::new().unwrap();
     let conn = create_db(db.path()).unwrap();
-    
+
     // Query all indexes on the scripts table
     let mut stmt = conn
         .prepare(
             "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='scripts' ORDER BY name",
         )
         .unwrap();
-    
+
     let indexes: Vec<String> = stmt
         .query_map([], |row| row.get(0))
         .unwrap()
         .map(|r| r.unwrap())
         .collect();
-    
+
     // Check that all our new indexes exist
     let expected = vec![
         "idx_scripts_checkout_timestamp",
@@ -99,8 +99,13 @@ fn create_db_creates_new_indexes() {
         "idx_scripts_owner",
         "idx_scripts_symlink_target",
     ];
-    
+
     for exp in &expected {
-        assert!(indexes.contains(&exp.to_string()), "Index {} not found. Available: {:?}", exp, indexes);
+        assert!(
+            indexes.contains(&exp.to_string()),
+            "Index {} not found. Available: {:?}",
+            exp,
+            indexes
+        );
     }
 }

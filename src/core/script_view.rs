@@ -29,6 +29,23 @@ pub fn logical_parent_dir(logical_path: &str) -> &str {
     }
 }
 
+/// How a symlink's target should be written next to the script that points at
+/// it: bare filename for a target in the same directory, full logical path for
+/// one anywhere else.
+///
+/// vc's active-version symlinks point at a sibling `<script>_<timestamp>` file,
+/// so repeating the shared directory on every arrow costs the width that the
+/// interesting part — which version is live — needs, and in a narrow terminal
+/// or results pane pushes it out of view entirely. A target somewhere else
+/// keeps its full path, where the location *is* the point.
+pub fn symlink_target_display<'a>(logical_path: &str, symlink_target: &'a str) -> &'a str {
+    let same_dir = logical_parent_dir(logical_path) == logical_parent_dir(symlink_target);
+    match symlink_target.rsplit_once('/') {
+        Some((_, name)) if same_dir && !name.is_empty() => name,
+        _ => symlink_target,
+    }
+}
+
 /// JSON-encoded list columns of the `scripts` table.
 ///
 /// Each stores a JSON array string (for example `["ops","nightly"]`) that the
@@ -347,6 +364,25 @@ mod tests {
         );
         assert_eq!(logical_parent_dir("/foo.py"), "/");
         assert_eq!(logical_parent_dir("bare.py"), "");
+    }
+
+    #[test]
+    fn symlink_target_display_shortens_a_sibling_target() {
+        assert_eq!(
+            symlink_target_display(
+                "/catalog/scripts/prepare_release",
+                "/catalog/scripts/prepare_release_20260729_140513"
+            ),
+            "prepare_release_20260729_140513"
+        );
+    }
+
+    #[test]
+    fn symlink_target_display_keeps_a_target_in_another_directory() {
+        assert_eq!(
+            symlink_target_display("/catalog/scripts/tool.py", "/catalog/shared/tool_v2.py"),
+            "/catalog/shared/tool_v2.py"
+        );
     }
 
     #[test]

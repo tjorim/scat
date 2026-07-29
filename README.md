@@ -108,6 +108,30 @@ scat completions bash
 
 ***
 
+## vc working directories
+
+Scripts under change control keep several files per tool on disk: an active
+symlink (`prepare_release`), the version copies vc retains beside it for
+rollback (`prepare_release_20260729_140513`), and the DEVELOP/ARCHIVE
+containers holding checkouts and older versions.
+
+Only the active script is indexed into the catalog — one entry per tool, not
+one per retained version. The rest are recorded as **revisions** of that
+script and surface through `scat show`, the TUI's revisions pane, and
+`scat catalog stats`, so a search for `prepare_release` returns the tool
+rather than every version of it. This holds whether or not the script name
+carries an extension, and container directory names are matched
+case-insensitively (`ARCHIVE` and `archive` are the same container). Editor
+backup files (`prepare_release~`) are skipped.
+
+Where the catalog shows a symlinked script, it also shows what the link
+resolved to at index time — a `↳ <target>` sub-row in the CLI's search table,
+a `→ <target>` suffix in the TUI's results list and metadata pane. Since the
+catalog is built nightly, a script checked in during the day still shows the
+version that was live when the index was last built.
+
+***
+
 ## Supported script types
 
 *   Python

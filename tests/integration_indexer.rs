@@ -1067,3 +1067,120 @@ fn build_timestamp_after_index_is_newer_than_pre_build_mtime() {
         pre_build_mtime.floor()
     );
 }
+
+// ---------------------------------------------------------------------------
+// vc working directories
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+#[test]
+fn build_indexes_a_vc_working_directory_as_one_script_per_tool() {
+    // A vc working directory as it actually looks on disk: an active symlink
+    // per tool, the retained version copies vc keeps beside it for rollback,
+    // an editor backup, and lowercase DEVELOP/ARCHIVE containers. Only the two
+    // tools belong in `scripts`; everything else is a revision of one of them.
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path().join("source");
+    std::fs::create_dir_all(root.join("develop")).unwrap();
+    std::fs::create_dir_all(root.join("archive")).unwrap();
+
+    // Extensionless shell tool.
+    std::fs::write(
+        root.join("prepare_release_20260729_140513"),
+        "#!/bin/bash\necho release\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("prepare_release_20260701_105550"),
+        "#!/bin/bash\necho release\n",
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(
+        "prepare_release_20260729_140513",
+        root.join("prepare_release"),
+    )
+    .unwrap();
+    std::fs::write(root.join("prepare_release~"), "#!/bin/bash\nold\n").unwrap();
+
+    // The same shape, with an extension.
+    std::fs::write(
+        root.join("release_backup.sh_20250311_080827"),
+        "#!/bin/bash\necho backup\n",
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(
+        "release_backup.sh_20250311_080827",
+        root.join("release_backup.sh"),
+    )
+    .unwrap();
+
+    std::fs::write(
+        root.join("archive").join("prepare_release_20260420_082127"),
+        "#!/bin/bash\necho old\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("develop")
+            .join("prepare_release_20260729_152101_dev"),
+        "#!/bin/bash\necho wip\n",
+    )
+    .unwrap();
+
+    let db_path = dir.path().join("catalog.sqlite");
+    build_index(
+        std::slice::from_ref(&root),
+        &db_path,
+        BuildOptions {
+            logical_prefix: "/catalog/source".into(),
+            head_lines: 10,
+            keep_copies: 0,
+            vc_config: Some(VcConfig {
+                scan_roots: vec![root.clone()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let conn = open_ro(&db_path);
+    let mut stmt = conn
+        .prepare("SELECT logical_path FROM scripts ORDER BY logical_path")
+        .unwrap();
+    let paths: Vec<String> = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(
+        paths,
+        vec![
+            "/catalog/source/prepare_release".to_string(),
+            "/catalog/source/release_backup.sh".to_string(),
+        ],
+        "version copies, editor backups, and container contents are not scripts"
+    );
+
+    // The symlink row carries the target the CLI and TUI render as an arrow.
+    let target: String = conn
+        .query_row(
+            "SELECT symlink_target FROM scripts WHERE logical_path = '/catalog/source/prepare_release'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(target, "/catalog/source/prepare_release_20260729_140513");
+
+    // Every non-script file is still catalogued, as a revision of its tool.
+    let revisions: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM revisions WHERE logical_path = '/catalog/source/prepare_release'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        revisions, 4,
+        "two working copies plus the archive and develop entries"
+    );
+}

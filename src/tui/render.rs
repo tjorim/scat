@@ -5,7 +5,7 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
-use scat_core::core::script_view::ScriptView;
+use scat_core::core::script_view::{ScriptView, symlink_target_display};
 use scat_core::core::vc::relative_age;
 
 use super::{Focus, RegionKind, TuiApp, ViewMode, detail};
@@ -376,6 +376,33 @@ fn pane_scroll(selected: usize, outer: Rect) -> usize {
     selected.saturating_sub(visible_rows.saturating_sub(1))
 }
 
+/// One line of the results pane: the script's path, the target it symlinks to
+/// when it is one, then language and checkout markers.
+fn result_line(row: &scat_core::core::db::JsonRow, area: Rect) -> String {
+    let view = ScriptView::new(row);
+    let path = view.logical_path();
+    let lang = view.language();
+    let checkout = if view.checkout_user().is_empty() {
+        ""
+    } else {
+        " CO"
+    };
+    // A symlink's own row carries the arrow, the same relationship the CLI
+    // table shows as a `↳ <target>` sub-row. Rows here are selectable entries
+    // backed by a script, so the target is annotated in place rather than
+    // added as a row of its own.
+    let arrow = symlink_arrow(path, view.symlink_target());
+    // Reserve: 2 (highlight) + 2 (separator) + lang + checkout + arrow
+    let max_name = (area.width as usize)
+        .saturating_sub(2)
+        .saturating_sub(2)
+        .saturating_sub(lang.len())
+        .saturating_sub(checkout.len())
+        .saturating_sub(arrow.chars().count());
+    let display = left_truncate_path(path, max_name);
+    format!("{display}{arrow}  {lang}{checkout}")
+}
+
 fn draw_results(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
     let spinner = spinner_char(app.tick);
     let items: Vec<ListItem> = if app.search_in_flight && app.results.is_empty() {
@@ -388,24 +415,7 @@ fn draw_results(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
     } else {
         app.results
             .iter()
-            .map(|row| {
-                let view = ScriptView::new(row);
-                let path = view.logical_path();
-                let lang = view.language();
-                let checkout = if view.checkout_user().is_empty() {
-                    ""
-                } else {
-                    " CO"
-                };
-                // Reserve: 2 (highlight) + 2 (separator) + lang + checkout
-                let max_name = (area.width as usize)
-                    .saturating_sub(2)
-                    .saturating_sub(2)
-                    .saturating_sub(lang.len())
-                    .saturating_sub(checkout.len());
-                let display = left_truncate_path(path, max_name);
-                ListItem::new(format!("{display}  {lang}{checkout}"))
-            })
+            .map(|row| ListItem::new(result_line(row, area)))
             .collect()
     };
     let list = List::new(items)
@@ -487,6 +497,12 @@ fn draw_metadata(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
             Span::raw(view.checkout_label()),
         ]),
     ];
+    if !view.symlink_target().is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("Symlink   ", detail::label_style()),
+            Span::raw(format!("→ {}", view.symlink_target())),
+        ]));
+    }
     if !warnings.is_empty() {
         lines.push(Line::from(vec![
             Span::styled("Warnings  ", detail::label_style()),
@@ -929,6 +945,15 @@ fn focus_border(current: Focus, target: Focus) -> Style {
 }
 
 /// Left-truncate a path to `max_chars`, preferring a `…/parent/file` form.
+/// Render a symlink's target as a ` → target` suffix, or an empty string when
+/// the script is not a symlink. Counterpart to the CLI table's `↳` sub-row.
+fn symlink_arrow(path: &str, target: &str) -> String {
+    if target.is_empty() {
+        return String::new();
+    }
+    format!(" → {}", symlink_target_display(path, target))
+}
+
 fn left_truncate_path(path: &str, max_chars: usize) -> String {
     if max_chars == 0 {
         return String::new();
@@ -983,6 +1008,7 @@ mod tests {
 
     use super::{
         clamp_scroll_offset, left_truncate_path, line_count, preview_title, revision_lines,
+        symlink_arrow,
     };
     use ratatui::layout::Rect;
 
@@ -1056,6 +1082,72 @@ mod tests {
                 .any(|t| t == "  ZOS     bob          20231231_0900")
         );
         assert!(!texts.iter().any(|t| t == "  (no archive entries.)"));
+    }
+
+    #[test]
+    fn results_pane_renders_the_symlink_arrow_on_screen() {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let mut row = Map::new();
+        row.insert(
+            "logical_path".into(),
+            Value::String("/shared/tools/scripts/source/prepare_release".into()),
+        );
+        row.insert("language".into(), Value::String("shell".into()));
+        row.insert(
+            "symlink_target".into(),
+            Value::String("/shared/tools/scripts/source/prepare_release_20260729_140513".into()),
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 6)).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                let items = vec![ratatui::widgets::ListItem::new(super::result_line(
+                    &row, area,
+                ))];
+                frame.render_widget(ratatui::widgets::List::new(items), area);
+            })
+            .unwrap();
+
+        let rendered: String =
+            terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .fold(String::new(), |mut acc, cell| {
+                    acc.push_str(cell.symbol());
+                    acc
+                });
+        assert!(
+            rendered.contains("→ prepare_release_20260729_140513"),
+            "results pane must show the symlink target: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn symlink_arrow_is_empty_for_a_plain_script() {
+        assert_eq!(symlink_arrow("/catalog/scripts/tool.py", ""), "");
+    }
+
+    #[test]
+    fn symlink_arrow_shows_bare_name_for_a_sibling_target() {
+        assert_eq!(
+            symlink_arrow(
+                "/catalog/scripts/prepare_release",
+                "/catalog/scripts/prepare_release_20260729_140513"
+            ),
+            " → prepare_release_20260729_140513"
+        );
+    }
+
+    #[test]
+    fn symlink_arrow_keeps_full_path_for_a_target_elsewhere() {
+        assert_eq!(
+            symlink_arrow("/catalog/scripts/tool.py", "/catalog/shared/tool_v2.py"),
+            " → /catalog/shared/tool_v2.py"
+        );
     }
 
     #[test]

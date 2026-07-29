@@ -162,8 +162,13 @@ fn run_search(api: &SearchApi, query: &str, limit: usize) -> Result<Vec<JsonRow>
     }
     if crate::commands::query_uses_fts(text) {
         let live = auto_prefix_last_term(text);
-        api.search_with_filters(&live, limit, lang, owner, tag)
-            .context("failed to run search query")
+        let rows = api
+            .search_with_filters(&live, limit, lang, owner, tag)
+            .context("failed to run search query")?;
+        // Same re-ranking the CLI applies to FTS hits: raw BM25 order buries
+        // the script actually named like the query under its own retained
+        // versions and near-namesakes.
+        Ok(crate::commands::sort_by_name_relevance(rows, text))
     } else {
         // The INSTR path search matches `/`-separated logical paths, so
         // normalise Windows separators from the query first.
@@ -345,6 +350,47 @@ mod tests {
         assert_eq!(
             rows[0].get("logical_path").unwrap().as_str().unwrap(),
             "/catalog/scripts/a.py"
+        );
+    }
+
+    #[test]
+    fn fts_results_are_ranked_by_name_relevance_like_the_cli() {
+        // BM25 alone has no reason to put the script actually named
+        // `prepare_release` above the versions and namesakes around it.
+        let db = NamedTempFile::new().unwrap();
+        let conn = create_db(db.path()).unwrap();
+        conn.execute(
+            "INSERT INTO index_metadata (id, build_timestamp, schema_version) VALUES (1, '2024-01-01T00:00:00', ?)",
+            rusqlite::params![SCHEMA_VERSION],
+        )
+        .unwrap();
+        for path in [
+            "/catalog/scripts/prepare_release_helpers.sh",
+            "/catalog/scripts/rerun_prepare_release.sh",
+            "/catalog/scripts/prepare_release",
+        ] {
+            conn.execute(
+                "INSERT INTO scripts (logical_path, language, content, owner, purpose) VALUES (?, 'shell', 'prepare_release', '', '')",
+                rusqlite::params![path],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let worker = SearchWorker::new(db.path()).unwrap();
+        worker
+            .send(SearchRequest {
+                id: 9,
+                query: "prepare_release".to_string(),
+                limit: 200,
+            })
+            .unwrap();
+        let rows = recv_response(&worker).result.unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(
+            rows[0].get("logical_path").unwrap().as_str().unwrap(),
+            "/catalog/scripts/prepare_release",
+            "the exact-name match ranks first"
         );
     }
 
