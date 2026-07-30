@@ -144,8 +144,14 @@ struct TuiApp {
     contributors: Vec<String>,
     deps: Vec<DependencyItem>,
     deps_selected: usize,
+    /// Scroll offset for the Deps pane, kept in the same
+    /// `ListState`-plus-manual-window shape as `results_state` so the two
+    /// panes' scrolling behaves identically (see `render::scroll_window`).
+    deps_state: ListState,
     functions: Vec<FunctionItem>,
     functions_selected: usize,
+    /// Scroll offset for the Functions pane; see `deps_state`.
+    functions_state: ListState,
     function_call_sites: std::collections::BTreeMap<String, Vec<FunctionCallSite>>,
     function_xref: Option<String>,
     dep_backstack: Vec<String>,
