@@ -281,7 +281,11 @@ pub fn open_db(path: &Path) -> Result<Connection> {
     }
     debug!(path = %path.display(), "opening read-only database");
     let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+    // `temp_store = MEMORY` keeps temp b-trees (e.g. the `ORDER BY
+    // bm25(...)` sort in `fts_query_filtered`) off disk; it's a
+    // per-connection setting SQLite doesn't persist in the database file, so
+    // every connection — including this read-only one — must set it itself.
+    conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA temp_store = MEMORY;")?;
     let schema_version: i64 = conn
         .query_row(
             "SELECT schema_version FROM index_metadata WHERE id = 1",
@@ -312,6 +316,15 @@ pub fn create_db(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
     // journal_mode = WAL returns a row; must be consumed, not execute_batch'd.
     let wal_mode: String = conn.query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))?;
+    // `synchronous = NORMAL` is the recommended pairing with WAL: SQLite
+    // skips the fsync on every commit (safe under WAL, since a crash can
+    // only roll back the last transaction rather than corrupt the database)
+    // while still fsyncing at checkpoints. `temp_store = MEMORY` keeps temp
+    // b-trees off disk. Both are per-connection settings that SQLite does
+    // not persist in the database file, so every connection sets them; a
+    // bulk-build connection later relaxes `synchronous` further via
+    // `apply_bulk_build_pragmas`.
+    conn.execute_batch("PRAGMA synchronous = NORMAL; PRAGMA temp_store = MEMORY;")?;
     conn.execute_batch(DDL)?;
     debug!(
         path = %path.display(),
