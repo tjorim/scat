@@ -471,8 +471,13 @@ fn result_line(row: &scat_core::core::db::JsonRow, area: Rect) -> String {
     // backed by a script, so the target is annotated in place rather than
     // added as a row of its own.
     let arrow = symlink_arrow(path, view.symlink_target());
-    // Reserve: 2 (highlight) + 2 (separator) + lang + checkout + arrow
+    // `area` is the pane's outer (bordered) rect, but the List widget lays
+    // rows out inside `block.inner(area)`. Reserve: 2 (border) + 2
+    // (highlight) + 2 (separator) + lang + checkout + arrow — missing the
+    // border here previously let the last couple of characters of every row
+    // (usually into `lang`/`checkout`) get silently clipped by the widget.
     let max_name = (area.width as usize)
+        .saturating_sub(2)
         .saturating_sub(2)
         .saturating_sub(2)
         .saturating_sub(lang.len())
@@ -1305,6 +1310,33 @@ mod tests {
         assert!(
             rendered.contains("→ prepare_release_20260729_140513"),
             "results pane must show the symlink target: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn result_line_fits_inside_the_bordered_pane_width() {
+        // `result_line` is handed the pane's *outer* (bordered) rect, but it's
+        // always drawn inside a `Borders::ALL` block plus a 2-column
+        // highlight-symbol reservation. Its width budget must account for
+        // both, or the last couple of characters (often into `lang`/
+        // `checkout`) get silently clipped by the widget.
+        let mut row = Map::new();
+        row.insert(
+            "logical_path".into(),
+            Value::String(
+                "/very/long/catalog/of/scripts/tools/prepare_release_for_deployment.py".into(),
+            ),
+        );
+        row.insert("language".into(), Value::String("python".into()));
+        row.insert("checkout_user".into(), Value::String("alice".into()));
+
+        let area = Rect::new(0, 0, 40, 10);
+        let line = super::result_line(&row, area);
+        let inner_width = area.width as usize - 2 /* border */ - 2 /* highlight symbol */;
+        assert!(
+            line.chars().count() <= inner_width,
+            "line {line:?} ({} chars) overflows the {inner_width}-column inner width",
+            line.chars().count()
         );
     }
 
