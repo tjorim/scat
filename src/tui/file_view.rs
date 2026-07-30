@@ -1,4 +1,4 @@
-use super::*;
+use super::{FileCheckRequest, FileCheckResponse, PathBuf, Result, ScriptView, TuiApp, viewer};
 
 impl TuiApp {
     pub(super) fn queue_catalog_view(&mut self) {

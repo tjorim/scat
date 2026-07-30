@@ -6,7 +6,7 @@ use crate::output::{
     canonicalize_row_keys, dash_or_empty, print_json, render_table, warning_kinds,
 };
 
-pub(crate) fn cmd_status(
+pub fn cmd_status(
     api: &scat_core::core::search::SearchApi,
     path: Option<String>,
     all: bool,

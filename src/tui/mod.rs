@@ -48,7 +48,10 @@ use self::detail_worker::{
 use self::diff_worker::{DiffRequest, DiffResponse, DiffWorker};
 use self::file_check_worker::{FileCheckRequest, FileCheckResponse, FileCheckWorker};
 use self::folder_worker::{FolderListing, FolderRequest, FolderResponse, FolderWorker};
-use self::helpers::*;
+use self::helpers::{
+    apply_scroll_key, move_selection, next_focus, previous_focus, scroll_by, search_title,
+    sort_checkouts,
+};
 use self::render::draw;
 use self::search_worker::{SearchRequest, SearchWorker};
 
@@ -379,7 +382,7 @@ impl Drop for TerminalGuard {
 }
 
 #[cfg(test)]
-pub(super) fn make_test_db() -> tempfile::NamedTempFile {
+pub fn make_test_db() -> tempfile::NamedTempFile {
     use scat_core::core::db::{SCHEMA_VERSION, create_db};
     let db = tempfile::NamedTempFile::new().unwrap();
     let conn = create_db(db.path()).unwrap();

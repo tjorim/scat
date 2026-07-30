@@ -9,6 +9,9 @@ use crate::error::Result;
 pub(super) fn module_name_from_logical_path(logical_path: &str) -> String {
     let mut path = logical_path.replace('\\', "/");
     path = path.trim_start_matches('/').to_string();
+    // `path` is a catalog logical path (always lowercase `.py`), not a
+    // filesystem path, so a case-sensitive suffix check is correct here.
+    #[allow(clippy::case_sensitive_file_extension_comparisons)]
     if path.ends_with(".py") {
         path.truncate(path.len().saturating_sub(3));
     }
@@ -185,7 +188,7 @@ fn resolve_relative_reference(base_dir: &str, reference: &str) -> Option<String>
     let mut components: Vec<&str> = base_dir.split('/').filter(|c| !c.is_empty()).collect();
     for part in reference.split('/') {
         match part {
-            "" | "." => continue,
+            "" | "." => {}
             ".." => {
                 components.pop()?;
             }

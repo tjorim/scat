@@ -54,7 +54,7 @@ pub fn ckpt_path(db_path: &Path) -> PathBuf {
         .unwrap_or_default()
         .to_string_lossy()
         .into_owned();
-    let mut p = wip.clone();
+    let mut p = wip;
     p.set_file_name(format!("{name}.ckpt"));
     p
 }

@@ -85,8 +85,8 @@ impl SearchApi {
 
         let (ts, sv) = row.unwrap_or((None, None));
         Ok(IndexMetadata {
-            build_timestamp: ts.map(Value::String).unwrap_or(Value::Null),
-            schema_version: sv.map(|n| Value::Number(n.into())).unwrap_or(Value::Null),
+            build_timestamp: ts.map_or(Value::Null, Value::String),
+            schema_version: sv.map_or(Value::Null, |n| Value::Number(n.into())),
             current_schema_version: SCHEMA_VERSION,
         })
     }
@@ -122,7 +122,7 @@ impl SearchApi {
 
         let mut findings = Vec::new();
 
-        if should_run(&selected, "unowned") {
+        if should_run(selected.as_ref(), "unowned") {
             let rows = query_rows(
                 &self.conn,
                 "SELECT logical_path
@@ -140,7 +140,7 @@ impl SearchApi {
             }));
         }
 
-        if should_run(&selected, "no-purpose") {
+        if should_run(selected.as_ref(), "no-purpose") {
             let rows = query_rows(
                 &self.conn,
                 "SELECT logical_path
@@ -157,7 +157,7 @@ impl SearchApi {
             }));
         }
 
-        if should_run(&selected, "broken-deps") {
+        if should_run(selected.as_ref(), "broken-deps") {
             let rows = query_rows(
                 &self.conn,
                 "SELECT src.logical_path AS logical_path, d.depends_on_path AS dependency
@@ -178,7 +178,7 @@ impl SearchApi {
             }));
         }
 
-        if should_run(&selected, "orphan-checkouts") {
+        if should_run(selected.as_ref(), "orphan-checkouts") {
             let rows = query_rows(
                 &self.conn,
                 "SELECT r.logical_path
@@ -198,7 +198,7 @@ impl SearchApi {
             }));
         }
 
-        if should_run(&selected, "stale-checkouts") {
+        if should_run(selected.as_ref(), "stale-checkouts") {
             let rows = query_rows(
                 &self.conn,
                 "SELECT logical_path, MAX(age_seconds) AS checkout_age_seconds
@@ -225,7 +225,7 @@ impl SearchApi {
             }));
         }
 
-        if should_run(&selected, "dead-scripts") {
+        if should_run(selected.as_ref(), "dead-scripts") {
             let rows = query_rows(
                 &self.conn,
                 "SELECT s.logical_path
@@ -249,7 +249,7 @@ impl SearchApi {
             }));
         }
 
-        if should_run(&selected, "no-description") {
+        if should_run(selected.as_ref(), "no-description") {
             let rows = query_rows(
                 &self.conn,
                 "SELECT logical_path
@@ -364,8 +364,6 @@ impl SearchApi {
     }
 }
 
-fn should_run(selected: &Option<std::collections::HashSet<String>>, check: &str) -> bool {
-    selected
-        .as_ref()
-        .is_none_or(|checks| checks.contains(check))
+fn should_run(selected: Option<&std::collections::HashSet<String>>, check: &str) -> bool {
+    selected.is_none_or(|checks| checks.contains(check))
 }

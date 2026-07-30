@@ -7,7 +7,7 @@ use scat_core::core::search::{CatalogDiff, compare_catalogs};
 use crate::output::print_json;
 
 /// `scat diff /catalog/foo.py` or `scat diff /catalog/foo.py --against <file>`
-pub(crate) fn cmd_script_diff_catalog(
+pub fn cmd_script_diff_catalog(
     api: &scat_core::core::search::SearchApi,
     logical_path: &str,
     against: Option<&std::path::Path>,
@@ -20,30 +20,31 @@ pub(crate) fn cmd_script_diff_catalog(
     }
     .with_context(|| format!("Script diff failed for '{logical_path}'"))?;
 
-    print_script_diff(&result, json)
+    print_script_diff(&result, json);
+    Ok(())
 }
 
 /// `scat diff --old <file> --new <file>`
-pub(crate) fn cmd_script_diff_explicit(
+pub fn cmd_script_diff_explicit(
     old: &std::path::Path,
     new: &std::path::Path,
     json: bool,
 ) -> Result<()> {
     let result =
         diff_files(old, new).with_context(|| "Script diff failed for explicit file pair")?;
-    print_script_diff(&result, json)
+    print_script_diff(&result, json);
+    Ok(())
 }
 
-fn print_script_diff(result: &ScriptDiffResult, json: bool) -> Result<()> {
+fn print_script_diff(result: &ScriptDiffResult, json: bool) {
     if json {
         print_json(result);
     } else {
         print!("{}", render_diff_text(result));
     }
-    Ok(())
 }
 
-pub(crate) fn cmd_diff(
+pub fn cmd_diff(
     db_path: &std::path::Path,
     against: Option<std::path::PathBuf>,
     old: Option<std::path::PathBuf>,
@@ -57,20 +58,19 @@ pub(crate) fn cmd_diff(
         anyhow::bail!("Provide both --old and --new together.");
     }
 
-    let (old_db, new_db) = match (old, new) {
-        (Some(old), Some(new)) => (old, new),
-        _ => {
-            let new_db = db_path.to_path_buf();
-            let old_db = against
-                .unwrap_or_else(|| std::path::PathBuf::from(format!("{}.1", db_path.display())));
-            if !old_db.exists() {
-                anyhow::bail!(
-                    "No previous snapshot found at {}. Run index again or pass --against / --old and --new.",
-                    old_db.display()
-                );
-            }
-            (old_db, new_db)
+    let (old_db, new_db) = if let (Some(old), Some(new)) = (old, new) {
+        (old, new)
+    } else {
+        let new_db = db_path.to_path_buf();
+        let old_db =
+            against.unwrap_or_else(|| std::path::PathBuf::from(format!("{}.1", db_path.display())));
+        if !old_db.exists() {
+            anyhow::bail!(
+                "No previous snapshot found at {}. Run index again or pass --against / --old and --new.",
+                old_db.display()
+            );
         }
+        (old_db, new_db)
     };
 
     let diff = compare_catalogs(&old_db, &new_db)?;

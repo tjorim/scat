@@ -136,8 +136,8 @@ mod tests {
         // Create existing copies .1 .2 .3
         for i in 1..=3 {
             fs::write(
-                dir.path().join(format!("scripts.sqlite.{}", i)),
-                format!("v{}", i),
+                dir.path().join(format!("scripts.sqlite.{i}")),
+                format!("v{i}"),
             )
             .unwrap();
         }

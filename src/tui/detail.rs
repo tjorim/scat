@@ -18,8 +18,7 @@ pub(super) fn detail_lines(app: &TuiApp) -> Vec<Line<'static>> {
 
     let size = view
         .size()
-        .map(|n| n.to_string())
-        .unwrap_or_else(|| "—".to_string());
+        .map_or_else(|| "—".to_string(), |n| n.to_string());
     let mut lines = vec![
         section("Script"),
         field_line("Path", view.logical_path().to_string()),

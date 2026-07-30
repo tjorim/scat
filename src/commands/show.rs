@@ -12,7 +12,7 @@ const DEFAULT_SHOW_FIELDS: &[&str] = &[
     "language", "owner", "purpose", "checkout", "size", "indexed", "uses", "used_by",
 ];
 
-pub(crate) fn cmd_show(
+pub fn cmd_show(
     api: &scat_core::core::search::SearchApi,
     path: &str,
     fields: &[String],
@@ -60,9 +60,8 @@ pub(crate) fn cmd_show(
                     str_field(f, "name"),
                     str_field(f, "kind"),
                     f.get("line")
-                        .and_then(|v| v.as_i64())
-                        .map(|n| n.to_string())
-                        .unwrap_or_else(|| str_field(f, "line")),
+                        .and_then(serde_json::Value::as_i64)
+                        .map_or_else(|| str_field(f, "line"), |n| n.to_string()),
                     str_field(f, "docstring"),
                 ]
             })
@@ -200,7 +199,7 @@ pub(crate) fn cmd_show(
                 println!(
                     "  Entries      : {}",
                     list_field_display(view, ListField::EntryPoints)
-                )
+                );
             }
             "related" => println!(
                 "  Related      : {}",
@@ -223,9 +222,7 @@ pub(crate) fn cmd_show(
     Ok(())
 }
 
-pub(crate) fn render_revision_lines(
-    mut revisions: Vec<scat_core::core::db::JsonRow>,
-) -> Vec<String> {
+pub fn render_revision_lines(mut revisions: Vec<scat_core::core::db::JsonRow>) -> Vec<String> {
     revisions.sort_by(compare_revision_rows);
 
     revisions
@@ -245,7 +242,7 @@ pub(crate) fn render_revision_lines(
         .collect()
 }
 
-pub(crate) fn revisions_to_json(revisions: Vec<scat_core::core::db::JsonRow>) -> serde_json::Value {
+pub fn revisions_to_json(revisions: Vec<scat_core::core::db::JsonRow>) -> serde_json::Value {
     serde_json::Value::Array(
         revisions
             .into_iter()

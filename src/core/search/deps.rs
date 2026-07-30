@@ -16,12 +16,14 @@ impl SearchApi {
 
     /// Return related scripts from explicit relations and dependency edges.
     pub fn related_scripts(&self, logical_path: &str) -> Result<Vec<JsonRow>> {
+        const SQLITE_PARAM_LIMIT: usize = 999;
+
         let script = match self.get_script(logical_path)? {
             Some(s) => s,
             None => return Ok(vec![]),
         };
 
-        let mut related: BTreeSet<String> = Default::default();
+        let mut related: BTreeSet<String> = BTreeSet::new();
 
         if let Some(Value::String(raw)) = script.get("related")
             && let Ok(Value::Array(paths)) = serde_json::from_str::<Value>(raw)
@@ -67,7 +69,6 @@ impl SearchApi {
             return Ok(vec![]);
         }
 
-        const SQLITE_PARAM_LIMIT: usize = 999;
         let mut all_rows = Vec::new();
         let paths_vec: Vec<&str> = related.iter().map(String::as_str).collect();
 
@@ -80,7 +81,11 @@ impl SearchApi {
                 chunk.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
 
             let mut stmt = self.conn.prepare(&sql)?;
-            let cols: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+            let cols: Vec<String> = stmt
+                .column_names()
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect();
             let rows: std::result::Result<Vec<JsonRow>, _> = stmt
                 .query_map(params.as_slice(), |row| Ok(row_to_map(row, &cols)))?
                 .map(|r| r.map_err(Error::from))

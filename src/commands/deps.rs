@@ -8,7 +8,7 @@ use crate::output::{
 /// Default traversal depth for `scat deps --tree` without an explicit --depth.
 const DEFAULT_TREE_DEPTH: usize = 5;
 
-pub(crate) fn cmd_deps(
+pub fn cmd_deps(
     api: &scat_core::core::search::SearchApi,
     path: &str,
     tree: bool,
@@ -146,7 +146,7 @@ fn tree_has(
     predicate(node) || node.children.iter().any(|child| tree_has(child, predicate))
 }
 
-pub(crate) fn render_tree_lines(root: &scat_core::core::search::DepsTreeNode) -> Vec<String> {
+pub fn render_tree_lines(root: &scat_core::core::search::DepsTreeNode) -> Vec<String> {
     fn node_label(node: &scat_core::core::search::DepsTreeNode) -> String {
         let mut label = node.logical_path.clone();
         if node.via_kind.as_deref() == Some("referenced") {

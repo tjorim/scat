@@ -1,6 +1,6 @@
 /// Integration tests for `scat diff` — script-level diff command.
 ///
-/// Each test builds a minimal SQLite database with the production schema and
+/// Each test builds a minimal `SQLite` database with the production schema and
 /// exercises the public diff API directly (without spawning the CLI binary).
 use scat_core::core::db::{SCHEMA_VERSION, create_db};
 use scat_core::core::diff::{

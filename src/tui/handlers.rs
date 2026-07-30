@@ -1,4 +1,7 @@
-use super::*;
+use super::{
+    Focus, KeyCode, KeyEvent, KeyModifiers, Result, TuiApp, ViewMode, apply_scroll_key,
+    move_selection, next_focus, previous_focus,
+};
 
 impl TuiApp {
     pub(super) fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
@@ -371,6 +374,10 @@ impl TuiApp {
         Ok(false)
     }
 
+    // Matches the `Result<bool>` signature of its sibling `handle_*_key`
+    // handlers so `handle_key` can dispatch to any of them uniformly, even
+    // though this one never actually errors.
+    #[allow(clippy::unnecessary_wraps)]
     pub(super) fn handle_detail_diff_key(&mut self, key: KeyEvent) -> Result<bool> {
         match key {
             KeyEvent {

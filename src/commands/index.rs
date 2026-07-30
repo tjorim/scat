@@ -7,8 +7,10 @@ use tracing::warn;
 
 use crate::output::print_json;
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn cmd_index(
+// Each bool is an independent CLI flag passed straight through from clap;
+// grouping them into a struct would just move the same list one level over.
+#[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
+pub fn cmd_index(
     scan_roots: &[PathBuf],
     db_path: &Path,
     logical_prefix: &str,
@@ -144,7 +146,7 @@ pub(crate) fn cmd_index(
     Ok(())
 }
 
-pub(crate) fn should_skip_catalog_rebuild(indexed_at_secs: f64, max_mtime: Option<f64>) -> bool {
+pub fn should_skip_catalog_rebuild(indexed_at_secs: f64, max_mtime: Option<f64>) -> bool {
     max_mtime.is_some_and(|mtime| mtime.floor() < indexed_at_secs)
 }
 

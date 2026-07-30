@@ -1124,8 +1124,7 @@ fn left_truncate_path(path: &str, max_chars: usize) -> String {
     let start_idx = path
         .char_indices()
         .nth_back(available.saturating_sub(1))
-        .map(|(idx, _)| idx)
-        .unwrap_or(path.len());
+        .map_or(path.len(), |(idx, _)| idx);
     format!("…{}", &path[start_idx..])
 }
 
