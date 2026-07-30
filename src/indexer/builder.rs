@@ -687,6 +687,52 @@ mod tests {
     }
 
     #[test]
+    fn incremental_reuses_touched_but_unchanged_script() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().join("scripts");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("a.py"), "import os\n").unwrap();
+        let db_path = dir.path().join("scripts.sqlite");
+
+        build_index(std::slice::from_ref(&root), &db_path, incremental_opts(0)).unwrap();
+
+        // Bump mtime without changing content — e.g. a `touch`, or a VC
+        // checkout that rewrites the file with identical bytes.
+        let file = std::fs::File::open(root.join("a.py")).unwrap();
+        let new_mtime = std::time::SystemTime::now() + std::time::Duration::from_secs(120);
+        file.set_modified(new_mtime).unwrap();
+
+        let second =
+            build_index(std::slice::from_ref(&root), &db_path, incremental_opts(0)).unwrap();
+        assert_eq!(second.scripts_indexed, 1);
+        assert_eq!(
+            second.scripts_reused, 1,
+            "content-identical script should be reused via hash comparison even though mtime changed"
+        );
+
+        // The stored mtime should have been refreshed to the new value so
+        // the next build stays on the cheap size+mtime fast path.
+        let conn =
+            Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .unwrap();
+        let stored_mtime: f64 = conn
+            .query_row(
+                "SELECT mtime FROM scripts WHERE logical_path LIKE '%a.py'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let expected_mtime = new_mtime
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+        assert!(
+            (stored_mtime - expected_mtime).abs() < 1.0,
+            "stored mtime should be refreshed to the new on-disk mtime, got {stored_mtime}, expected ~{expected_mtime}"
+        );
+    }
+
+    #[test]
     fn incremental_removes_deleted_script_and_unresolves_dependents() {
         let dir = tempfile::TempDir::new().unwrap();
         let root = dir.path().join("scripts");
