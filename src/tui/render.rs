@@ -4,7 +4,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use scat_core::core::script_view::{ScriptView, symlink_target_display};
 use scat_core::core::vc::relative_age;
 
@@ -86,15 +86,11 @@ fn draw_browse_fullscreen(frame: &mut Frame<'_>, app: &mut TuiApp) {
         }
         Focus::Deps => {
             draw_deps(frame, app, pane);
-            app.record_region(pane, RegionKind::Deps, pane_scroll(app.deps_selected, pane));
+            app.record_region(pane, RegionKind::Deps, app.deps_state.offset());
         }
         Focus::Functions => {
             draw_functions(frame, app, pane);
-            app.record_region(
-                pane,
-                RegionKind::Functions,
-                pane_scroll(app.functions_selected, pane),
-            );
+            app.record_region(pane, RegionKind::Functions, app.functions_state.offset());
         }
         Focus::Revisions => {
             draw_revisions(frame, app, pane);
@@ -351,15 +347,11 @@ fn draw_body(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
         RegionKind::Preview,
         usize::from(app.preview_scroll),
     );
-    app.record_region(
-        right[2],
-        RegionKind::Deps,
-        pane_scroll(app.deps_selected, right[2]),
-    );
+    app.record_region(right[2], RegionKind::Deps, app.deps_state.offset());
     app.record_region(
         right[3],
         RegionKind::Functions,
-        pane_scroll(app.functions_selected, right[3]),
+        app.functions_state.offset(),
     );
     app.record_region(
         right[4],
@@ -368,12 +360,99 @@ fn draw_body(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
     );
 }
 
-/// First visible row index for a selection-scrolled pane, matching the
-/// `scroll_y` computed in [`draw_deps`]/[`draw_functions`]: keep the selected
-/// entry within the pane's inner (bordered) height.
-fn pane_scroll(selected: usize, outer: Rect) -> usize {
-    let visible_rows = usize::from(outer.height.saturating_sub(2));
-    selected.saturating_sub(visible_rows.saturating_sub(1))
+/// Scroll offset for a pane of uniform single-line items, keeping the
+/// selected item within the visible window. `prev_offset` is preserved
+/// as-is when the selection is already visible (matching ratatui's `List`
+/// widget behavior for uniform-height items) so a pane doesn't jump to put
+/// the selection at an edge every frame — only when it would otherwise fall
+/// off-screen. Shared by every list-shaped pane (Results, Deps, Functions)
+/// so their scrolling can't silently drift apart.
+fn scroll_window(prev_offset: usize, selected: usize, len: usize, inner_height: usize) -> usize {
+    if len == 0 || inner_height == 0 {
+        return 0;
+    }
+    let selected = selected.min(len - 1);
+    let mut offset = prev_offset.min(len - 1);
+    if selected < offset {
+        offset = selected;
+    } else if selected >= offset + inner_height {
+        offset = selected + 1 - inner_height;
+    }
+    offset.min(len.saturating_sub(inner_height))
+}
+
+/// Truncate `text` to at most `max_chars` display columns, marking
+/// truncation with a trailing ellipsis. Used for free-form labels (a
+/// dependency's path, a function's docstring) that must render as exactly
+/// one row — unlike wrapping, this guarantees the row a click resolves to is
+/// always the row it visually points at.
+fn truncate_line(text: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    if max_chars == 1 {
+        return "…".to_string();
+    }
+    let keep: String = text.chars().take(max_chars - 1).collect();
+    format!("{keep}…")
+}
+
+/// Render the already-sliced visible window of a list pane. `selected_in_window`
+/// is the selected index relative to the start of `items` (not the full
+/// source list), since only the window — not the whole list — is ever handed
+/// to the widget.
+fn render_window(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    block: Block<'_>,
+    items: Vec<ListItem>,
+    selected_in_window: usize,
+) {
+    let mut window_state = ListState::default();
+    window_state.select(Some(selected_in_window));
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(
+            Style::default()
+                .add_modifier(Modifier::REVERSED)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("> ");
+    frame.render_stateful_widget(list, area, &mut window_state);
+}
+
+/// Render a bordered pane as a virtualized, single-selection list of
+/// pre-formatted `labels`: only the rows inside the visible window become
+/// `ListItem`s (truncated, never wrapped), and the real full-list offset is
+/// written back into `state` for mouse hit-testing. Shared by the Deps and
+/// Functions panes — Results uses the same `scroll_window` math but builds
+/// its window lazily from `JsonRow`s since its item count can run into the
+/// thousands, where Deps/Functions labels are cheap to format in full.
+fn render_list_pane(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    block: Block<'_>,
+    labels: &[String],
+    selected: usize,
+    state: &mut ListState,
+) {
+    let inner_height = area.height.saturating_sub(2) as usize;
+    let len = labels.len();
+    let selected = selected.min(len - 1);
+    let offset = scroll_window(state.offset(), selected, len, inner_height);
+    *state.offset_mut() = offset;
+
+    let end = (offset + inner_height.max(1)).min(len);
+    let max_chars = area.width.saturating_sub(4) as usize;
+    let items: Vec<ListItem> = labels[offset..end]
+        .iter()
+        .map(|line| ListItem::new(truncate_line(line, max_chars)))
+        .collect();
+
+    render_window(frame, area, block, items, selected - offset);
 }
 
 /// One line of the results pane: the script's path, the target it symlinks to
@@ -392,8 +471,13 @@ fn result_line(row: &scat_core::core::db::JsonRow, area: Rect) -> String {
     // backed by a script, so the target is annotated in place rather than
     // added as a row of its own.
     let arrow = symlink_arrow(path, view.symlink_target());
-    // Reserve: 2 (highlight) + 2 (separator) + lang + checkout + arrow
+    // `area` is the pane's outer (bordered) rect, but the List widget lays
+    // rows out inside `block.inner(area)`. Reserve: 2 (border) + 2
+    // (highlight) + 2 (separator) + lang + checkout + arrow — missing the
+    // border here previously let the last couple of characters of every row
+    // (usually into `lang`/`checkout`) get silently clipped by the widget.
     let max_name = (area.width as usize)
+        .saturating_sub(2)
         .saturating_sub(2)
         .saturating_sub(2)
         .saturating_sub(lang.len())
@@ -405,33 +489,46 @@ fn result_line(row: &scat_core::core::db::JsonRow, area: Rect) -> String {
 
 fn draw_results(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
     let spinner = spinner_char(app.tick);
-    let items: Vec<ListItem> = if app.search_in_flight && app.results.is_empty() {
-        vec![ListItem::new(format!("{spinner} Searching…"))]
-    } else if app.results.is_empty() {
-        vec![ListItem::new(Span::styled(
-            "No results.",
-            Style::default().fg(Color::DarkGray),
-        ))]
-    } else {
-        app.results
-            .iter()
-            .map(|row| ListItem::new(result_line(row, area)))
-            .collect()
-    };
-    let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(format!("Results ({})", app.results.len()))
-                .border_style(focus_border(app.focus, Focus::Results)),
-        )
-        .highlight_style(
-            Style::default()
-                .add_modifier(Modifier::REVERSED)
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol("> ");
-    frame.render_stateful_widget(list, area, &mut app.results_state);
+    let title = format!("Results ({})", app.results.len());
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .border_style(focus_border(app.focus, Focus::Results));
+
+    if app.results.is_empty() {
+        let items = if app.search_in_flight {
+            vec![ListItem::new(format!("{spinner} Searching…"))]
+        } else {
+            vec![ListItem::new(Span::styled(
+                "No results.",
+                Style::default().fg(Color::DarkGray),
+            ))]
+        };
+        frame.render_widget(List::new(items).block(block), area);
+        return;
+    }
+
+    // Every row renders as exactly one line, so the visible window can be
+    // computed directly (no variable item heights to walk). Only that window
+    // is turned into `ListItem`s and reformatted, instead of all of
+    // `app.results` on every frame — the difference that lets the list stay
+    // cheap to draw with thousands of results, not just the handful visible.
+    let inner_height = area.height.saturating_sub(2) as usize;
+    let len = app.results.len();
+    let selected = app.selected.min(len - 1);
+    let offset = scroll_window(app.results_state.offset(), selected, len, inner_height);
+    // Recorded here (rather than left to the widget) since only the window is
+    // rendered below; `record_region` calls after `draw_results` read this to
+    // map a mouse click back to a full-list index.
+    *app.results_state.offset_mut() = offset;
+
+    let end = (offset + inner_height.max(1)).min(len);
+    let items: Vec<ListItem> = app.results[offset..end]
+        .iter()
+        .map(|row| ListItem::new(result_line(row, area)))
+        .collect();
+
+    render_window(frame, area, block, items, selected - offset);
 }
 
 fn draw_metadata(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
@@ -582,140 +679,124 @@ fn draw_preview(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
     );
 }
 
-fn draw_deps(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
+fn draw_deps(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
     let spinner = spinner_char(app.tick);
-    let (text, title) = if app.detail_loading {
-        (format!("{spinner} Loading…"), "Deps (loading…)".to_string())
-    } else if let Some(function_name) = &app.function_xref {
-        if let Some(call_sites) = app.xref_call_sites() {
-            let lines = call_sites
-                .iter()
-                .enumerate()
-                .map(|(idx, site)| {
-                    let marker = if idx == app.deps_selected { "> " } else { "  " };
-                    format!(
-                        "{marker}{:<7} {}:{}  {} -> {}",
-                        "calls", site.caller_path, site.line, site.caller, site.callee
-                    )
-                })
-                .collect::<Vec<_>>();
-            (
-                if lines.is_empty() {
-                    "No call sites.".to_string()
-                } else {
-                    lines.join("\n")
-                },
-                format!("Deps (call sites for {function_name})"),
-            )
-        } else {
-            (
-                "No call sites.".to_string(),
-                format!("Deps (call sites for {function_name})"),
-            )
-        }
+    let border_style = focus_border(app.focus, Focus::Deps);
+
+    if app.detail_loading {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title("Deps (loading…)")
+            .border_style(border_style);
+        let items = vec![ListItem::new(format!("{spinner} Loading…"))];
+        frame.render_widget(List::new(items).block(block), area);
+        return;
+    }
+
+    let (labels, title, empty_message) = if let Some(function_name) = &app.function_xref {
+        let labels = app
+            .xref_call_sites()
+            .map(|sites| {
+                sites
+                    .iter()
+                    .map(|site| {
+                        format!(
+                            "{:<7} {}:{}  {} -> {}",
+                            "calls", site.caller_path, site.line, site.caller, site.callee
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        (
+            labels,
+            format!("Deps (call sites for {function_name})"),
+            "No call sites.",
+        )
     } else {
-        let lines = app
+        let labels = app
             .deps
             .iter()
-            .enumerate()
-            .map(|(idx, item)| {
-                let marker = if idx == app.deps_selected { "> " } else { "  " };
-                format!("{marker}{:<7} {}", item.kind, item.logical_path)
-            })
+            .map(|item| format!("{:<7} {}", item.kind, item.logical_path))
             .collect::<Vec<_>>();
-        (
-            if lines.is_empty() {
-                "No dependencies.".to_string()
-            } else {
-                lines.join("\n")
-            },
-            "Deps".to_string(),
-        )
+        (labels, "Deps".to_string(), "No dependencies.")
     };
-    let text_widget: Text =
-        if !app.detail_loading && (text == "No dependencies." || text == "No call sites.") {
-            Text::from(Span::styled(text, Style::default().fg(Color::DarkGray)))
-        } else {
-            Text::from(text.as_str())
-        };
-    // Scroll the pane so the selected item stays within the visible window.
-    let visible_rows = area.height.saturating_sub(2) as usize;
-    let scroll_y = app
-        .deps_selected
-        .saturating_sub(visible_rows.saturating_sub(1)) as u16;
-    frame.render_widget(
-        Paragraph::new(text_widget)
-            .wrap(Wrap { trim: true })
-            .scroll((scroll_y, 0))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(title)
-                    .border_style(focus_border(app.focus, Focus::Deps)),
-            ),
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .border_style(border_style);
+
+    if labels.is_empty() {
+        let items = vec![ListItem::new(Span::styled(
+            empty_message,
+            Style::default().fg(Color::DarkGray),
+        ))];
+        frame.render_widget(List::new(items).block(block), area);
+        return;
+    }
+
+    render_list_pane(
+        frame,
         area,
+        block,
+        &labels,
+        app.deps_selected,
+        &mut app.deps_state,
     );
 }
 
-fn draw_functions(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
+fn draw_functions(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
     let spinner = spinner_char(app.tick);
-    let (text, title) = if app.detail_loading {
-        (
-            format!("{spinner} Loading…"),
-            "Functions (loading…)".to_string(),
-        )
-    } else {
-        let lines = app
-            .functions
-            .iter()
-            .enumerate()
-            .map(|(idx, function)| {
-                let marker = if idx == app.functions_selected {
-                    "> "
-                } else {
-                    "  "
-                };
-                let doc = if function.docstring.is_empty() {
-                    "—".to_string()
-                } else {
-                    function.docstring.clone()
-                };
-                format!(
-                    "{marker}{:<20} {:<8} {:>4}  {}",
-                    function.name, function.kind, function.line, doc
-                )
-            })
-            .collect::<Vec<_>>();
-        (
-            if lines.is_empty() {
-                "No functions indexed.".to_string()
+    let border_style = focus_border(app.focus, Focus::Functions);
+
+    if app.detail_loading {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title("Functions (loading…)")
+            .border_style(border_style);
+        let items = vec![ListItem::new(format!("{spinner} Loading…"))];
+        frame.render_widget(List::new(items).block(block), area);
+        return;
+    }
+
+    let labels: Vec<String> = app
+        .functions
+        .iter()
+        .map(|function| {
+            let doc = if function.docstring.is_empty() {
+                "—"
             } else {
-                lines.join("\n")
-            },
-            "Functions".to_string(),
-        )
-    };
-    let text_widget: Text = if !app.detail_loading && text == "No functions indexed." {
-        Text::from(Span::styled(text, Style::default().fg(Color::DarkGray)))
-    } else {
-        Text::from(text.as_str())
-    };
-    // Scroll the pane so the selected item stays within the visible window.
-    let visible_rows = area.height.saturating_sub(2) as usize;
-    let scroll_y = app
-        .functions_selected
-        .saturating_sub(visible_rows.saturating_sub(1)) as u16;
-    frame.render_widget(
-        Paragraph::new(text_widget)
-            .wrap(Wrap { trim: true })
-            .scroll((scroll_y, 0))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(title)
-                    .border_style(focus_border(app.focus, Focus::Functions)),
-            ),
+                function.docstring.as_str()
+            };
+            format!(
+                "{:<20} {:<8} {:>4}  {}",
+                function.name, function.kind, function.line, doc
+            )
+        })
+        .collect();
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("Functions")
+        .border_style(border_style);
+
+    if labels.is_empty() {
+        let items = vec![ListItem::new(Span::styled(
+            "No functions indexed.",
+            Style::default().fg(Color::DarkGray),
+        ))];
+        frame.render_widget(List::new(items).block(block), area);
+        return;
+    }
+
+    render_list_pane(
+        frame,
         area,
+        block,
+        &labels,
+        app.functions_selected,
+        &mut app.functions_state,
     );
 }
 
@@ -1229,6 +1310,33 @@ mod tests {
         assert!(
             rendered.contains("→ prepare_release_20260729_140513"),
             "results pane must show the symlink target: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn result_line_fits_inside_the_bordered_pane_width() {
+        // `result_line` is handed the pane's *outer* (bordered) rect, but it's
+        // always drawn inside a `Borders::ALL` block plus a 2-column
+        // highlight-symbol reservation. Its width budget must account for
+        // both, or the last couple of characters (often into `lang`/
+        // `checkout`) get silently clipped by the widget.
+        let mut row = Map::new();
+        row.insert(
+            "logical_path".into(),
+            Value::String(
+                "/very/long/catalog/of/scripts/tools/prepare_release_for_deployment.py".into(),
+            ),
+        );
+        row.insert("language".into(), Value::String("python".into()));
+        row.insert("checkout_user".into(), Value::String("alice".into()));
+
+        let area = Rect::new(0, 0, 40, 10);
+        let line = super::result_line(&row, area);
+        let inner_width = area.width as usize - 2 /* border */ - 2 /* highlight symbol */;
+        assert!(
+            line.chars().count() <= inner_width,
+            "line {line:?} ({} chars) overflows the {inner_width}-column inner width",
+            line.chars().count()
         );
     }
 

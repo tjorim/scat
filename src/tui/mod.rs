@@ -52,7 +52,10 @@ use self::helpers::*;
 use self::render::draw;
 use self::search_worker::{SearchRequest, SearchWorker};
 
-const RESULT_LIMIT: usize = 200;
+// The results list only builds `ListItem`s for the rows visible in the pane
+// (see `render::draw_results`), so this can be well beyond a single screen
+// without making rendering more expensive.
+const RESULT_LIMIT: usize = 2000;
 const PREVIEW_LINES: usize = 500;
 const DEBOUNCE_MS: u64 = 150;
 const POLL_TICK_MS: u64 = 50;
@@ -141,8 +144,14 @@ struct TuiApp {
     contributors: Vec<String>,
     deps: Vec<DependencyItem>,
     deps_selected: usize,
+    /// Scroll offset for the Deps pane, kept in the same
+    /// `ListState`-plus-manual-window shape as `results_state` so the two
+    /// panes' scrolling behaves identically (see `render::scroll_window`).
+    deps_state: ListState,
     functions: Vec<FunctionItem>,
     functions_selected: usize,
+    /// Scroll offset for the Functions pane; see `deps_state`.
+    functions_state: ListState,
     function_call_sites: std::collections::BTreeMap<String, Vec<FunctionCallSite>>,
     function_xref: Option<String>,
     dep_backstack: Vec<String>,

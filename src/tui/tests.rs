@@ -2,9 +2,10 @@ use std::io::Write;
 
 use super::detail::native_path_for_row;
 use super::{
-    ClickRegion, DetailPayload, DetailResponse, DetailWorker, DiffWorker, Focus, FolderListing,
-    FolderResponse, FolderWorker, RegionKind, SearchWorker, TuiApp, ViewMode, hit_test,
-    move_selection, next_focus, previous_focus, scroll_by, search_title, viewer,
+    ClickRegion, DependencyItem, DetailPayload, DetailResponse, DetailWorker, DiffWorker, Focus,
+    FolderListing, FolderResponse, FolderWorker, FunctionItem, RegionKind, SearchWorker, TuiApp,
+    ViewMode, hit_test, move_selection, next_focus, previous_focus, scroll_by, search_title,
+    viewer,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
@@ -1118,4 +1119,200 @@ fn esc_exits_fullscreen_before_quitting() {
         .handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
         .unwrap();
     assert!(should_quit, "second Esc should quit");
+}
+
+#[test]
+fn results_list_only_renders_the_visible_window() {
+    use ratatui::{Terminal, backend::TestBackend};
+
+    let db = super::make_test_db();
+    let mut app = make_app(db.path());
+
+    let total = 2000;
+    app.results = (0..total)
+        .map(|i| detail_row(&format!("/scripts/item_{i:04}.sh")))
+        .collect();
+    app.selected = total - 1;
+    app.results_state.select(Some(app.selected));
+
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    terminal
+        .draw(|frame| super::render::draw(frame, &mut app))
+        .unwrap();
+
+    let rendered: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+
+    // The selected row (the very last result) is on screen…
+    assert!(rendered.contains(&format!("item_{:04}", total - 1)));
+    // …but the first row, thousands of entries earlier, was scrolled out of
+    // the window rather than formatted into the buffer.
+    assert!(!rendered.contains("item_0000"));
+    // The offset used for mouse hit-testing tracks the scrolled window.
+    assert!(app.results_state.offset() > 0);
+
+    // Selecting the very first result scrolls back to the top.
+    app.selected = 0;
+    app.results_state.select(Some(0));
+    terminal
+        .draw(|frame| super::render::draw(frame, &mut app))
+        .unwrap();
+    assert_eq!(app.results_state.offset(), 0);
+}
+
+#[test]
+fn clicking_a_visible_result_does_not_shift_the_scroll_window() {
+    use ratatui::{Terminal, backend::TestBackend};
+
+    let db = super::make_test_db();
+    let mut app = make_app(db.path());
+
+    let total = 500;
+    app.results = (0..total)
+        .map(|i| detail_row(&format!("/scripts/item_{i:04}.sh")))
+        .collect();
+    // Select something deep in the list so the pane is scrolled, not sitting
+    // at offset 0 (where a click couldn't reveal an off-by-one).
+    app.selected = 300;
+    app.results_state.select(Some(app.selected));
+
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    terminal
+        .draw(|frame| super::render::draw(frame, &mut app))
+        .unwrap();
+    let offset_before = app.results_state.offset();
+    assert!(offset_before > 0, "selection should have scrolled the pane");
+
+    // Click a different row that's already on screen (two rows below the
+    // current selection, still inside the scrolled window).
+    let region = app
+        .click_regions
+        .iter()
+        .find(|r| r.kind == RegionKind::Results)
+        .copied()
+        .expect("results region recorded");
+    let target_index = offset_before + 2;
+    let row = region.area.y + u16::try_from(target_index - region.scroll).unwrap();
+    app.handle_left_click(region.area.x, row).unwrap();
+    assert_eq!(app.selected, target_index);
+
+    terminal
+        .draw(|frame| super::render::draw(frame, &mut app))
+        .unwrap();
+
+    // Selecting an already-visible row must not move the scroll window: the
+    // clicked row was rendered at `row` under the old offset, and should
+    // stay there rather than jumping by a line.
+    assert_eq!(
+        app.results_state.offset(),
+        offset_before,
+        "clicking a visible row should not shift the pane's scroll offset"
+    );
+}
+
+#[test]
+fn deps_pane_virtualizes_and_never_wraps_a_long_path() {
+    use ratatui::{Terminal, backend::TestBackend};
+
+    let db = super::make_test_db();
+    let mut app = make_app(db.path());
+
+    let total = 300;
+    app.deps = (0..total)
+        .map(|i| DependencyItem {
+            kind: "imports".to_string(),
+            // The identifying part comes first, then padding pushes the line
+            // well past the pane width: before truncation this would have
+            // wrapped onto a second visual row, desyncing the pane's "one
+            // item = one row" scroll math from what's on screen.
+            logical_path: format!(
+                "/item_{i:04}/very/long/padding/that/does/not/fit/in/one/row/of/this/pane/at/all"
+            ),
+        })
+        .collect();
+    app.deps_selected = total - 1;
+
+    // Tall enough that the Deps pane (18% of the body's leftover height)
+    // gets more than a couple of rows to scroll within.
+    let mut terminal = Terminal::new(TestBackend::new(80, 120)).unwrap();
+    terminal
+        .draw(|frame| super::render::draw(frame, &mut app))
+        .unwrap();
+
+    let rendered: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+
+    assert!(rendered.contains(&format!("item_{:04}", total - 1)));
+    assert!(!rendered.contains("item_0000"));
+    assert!(app.deps_state.offset() > 0);
+
+    // Click a different, still-visible row; the window must not shift.
+    let offset_before = app.deps_state.offset();
+    let region = app
+        .click_regions
+        .iter()
+        .find(|r| r.kind == RegionKind::Deps)
+        .copied()
+        .expect("deps region recorded");
+    let target_index = offset_before + 1;
+    let row = region.area.y + u16::try_from(target_index - region.scroll).unwrap();
+    app.handle_left_click(region.area.x, row).unwrap();
+    assert_eq!(app.deps_selected, target_index);
+
+    terminal
+        .draw(|frame| super::render::draw(frame, &mut app))
+        .unwrap();
+    assert_eq!(
+        app.deps_state.offset(),
+        offset_before,
+        "clicking a visible dep should not shift the pane's scroll offset"
+    );
+}
+
+#[test]
+fn functions_pane_virtualizes_large_lists() {
+    use ratatui::{Terminal, backend::TestBackend};
+
+    let db = super::make_test_db();
+    let mut app = make_app(db.path());
+
+    let total = 300;
+    app.functions = (0..total)
+        .map(|i| FunctionItem {
+            name: format!("func_{i:04}"),
+            kind: "function".to_string(),
+            line: u16::try_from(i + 1).unwrap(),
+            docstring: String::new(),
+        })
+        .collect();
+    app.functions_selected = total - 1;
+
+    // Tall enough that the Functions pane (20% of the body's leftover
+    // height) gets more than a couple of rows to scroll within.
+    let mut terminal = Terminal::new(TestBackend::new(80, 120)).unwrap();
+    terminal
+        .draw(|frame| super::render::draw(frame, &mut app))
+        .unwrap();
+
+    let rendered: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+
+    assert!(rendered.contains(&format!("func_{:04}", total - 1)));
+    assert!(!rendered.contains("func_0000"));
+    assert!(app.functions_state.offset() > 0);
 }
