@@ -116,6 +116,9 @@ pub fn parse_history_entry(raw: &str) -> HistoryEntry {
 pub struct ExtractedMetadata {
     /// Full file content as UTF-8 (lossy) text.
     pub content: String,
+    /// SHA-256 digest (lowercase hex) of the file's raw bytes, used for
+    /// content-based change detection during incremental builds.
+    pub content_hash: String,
     /// Normalized owner metadata extracted from comments.
     pub owner: String,
     /// Normalized purpose/brief metadata.
@@ -137,7 +140,7 @@ pub struct ExtractedMetadata {
 /// Extract structured metadata from a scanned script record.
 pub fn extract(record: &ScriptRecord) -> ExtractedMetadata {
     let mut meta = ExtractedMetadata::default();
-    let content = read_file(Path::new(&record.physical_path));
+    let (content, content_hash) = read_file(Path::new(&record.physical_path));
 
     parse_header_comments(&content, &mut meta);
 
@@ -146,6 +149,7 @@ pub fn extract(record: &ScriptRecord) -> ExtractedMetadata {
     }
 
     meta.content = content;
+    meta.content_hash = content_hash;
     meta
 }
 
@@ -153,18 +157,41 @@ pub fn extract(record: &ScriptRecord) -> ExtractedMetadata {
 // File reading
 // ---------------------------------------------------------------------------
 
-fn read_file(path: &Path) -> String {
+/// Read a file's raw bytes, returning its lossy-UTF-8 text alongside a
+/// SHA-256 hex digest of the *raw* bytes (computed before the lossy
+/// conversion, so it reflects the file's actual on-disk content).
+fn read_file(path: &Path) -> (String, String) {
     match std::fs::read(path) {
-        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        Ok(bytes) => {
+            let hash = hash_bytes(&bytes);
+            (String::from_utf8_lossy(&bytes).into_owned(), hash)
+        }
         Err(err) => {
             warn!(
                 path = %path.display(),
                 error = %err,
                 "failed to read file for metadata extraction"
             );
-            String::new()
+            (String::new(), hash_bytes(&[]))
         }
     }
+}
+
+/// SHA-256 hex digest of `bytes`.
+fn hash_bytes(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
+}
+
+/// SHA-256 hex digest of a file's current on-disk content, or `None` if it
+/// can't be read. Used by incremental seeding to check whether a file whose
+/// mtime/size changed actually has different content — a `touch`, a
+/// checkout/restore, or a VC operation that rewrites the file with identical
+/// bytes all move the mtime without changing what's indexed.
+pub fn hash_file(path: &Path) -> Option<String> {
+    std::fs::read(path).ok().map(|bytes| hash_bytes(&bytes))
 }
 
 // ---------------------------------------------------------------------------

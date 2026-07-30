@@ -456,11 +456,30 @@ fn checkpoint_for_resume(
     Ok(())
 }
 
+/// An existing `scripts` row's change-detection fields, as seen by
+/// [`seed_from_existing_database`].
+struct ExistingScript {
+    size: i64,
+    mtime: f64,
+    content_hash: Option<String>,
+}
+
 /// For an incrementally-seeded database (started from a copy of the
 /// previous completed build — see `builder::build_index`), find scripts
-/// already present with matching size and mtime and add their physical
-/// paths to `already_indexed`, same as a resume checkpoint would, so
-/// phase 2 skips re-extracting them.
+/// already present and unchanged and add their physical paths to
+/// `already_indexed`, same as a resume checkpoint would, so phase 2 skips
+/// re-extracting them.
+///
+/// A script is considered unchanged if its size and mtime match the stored
+/// row exactly (the fast path — no file I/O beyond the scan's own `stat`).
+/// When either differs, its content hash is compared against the stored
+/// `content_hash` before concluding the script actually changed: a `touch`,
+/// a checkout/restore, or a VC operation that rewrites a file with identical
+/// bytes moves the mtime (and sometimes reports a different size on some
+/// filesystems) without changing what should be indexed. A hash match is
+/// still reused, and the stored size/mtime are refreshed so later builds
+/// stay on the fast path; only a genuine content change falls through to
+/// re-extraction.
 ///
 /// Scripts present in the database but no longer found by this scan are
 /// deleted outright; the schema's `ON DELETE SET NULL` foreign keys
@@ -476,15 +495,23 @@ fn seed_from_existing_database(
     records: &[ScriptRecord],
     already_indexed: &mut HashSet<String>,
 ) -> Result<()> {
-    let mut existing: HashMap<String, (i64, f64)> = HashMap::new();
+    let mut existing: HashMap<String, ExistingScript> = HashMap::new();
     {
-        let mut stmt = tx.prepare("SELECT logical_path, size, mtime FROM scripts")?;
+        let mut stmt = tx.prepare("SELECT logical_path, size, mtime, content_hash FROM scripts")?;
         let mut rows = stmt.query([])?;
         while let Some(row) = rows.next()? {
             let logical_path: String = row.get(0)?;
             let size: i64 = row.get(1)?;
             let mtime: f64 = row.get(2)?;
-            existing.insert(logical_path, (size, mtime));
+            let content_hash: Option<String> = row.get(3)?;
+            existing.insert(
+                logical_path,
+                ExistingScript {
+                    size,
+                    mtime,
+                    content_hash,
+                },
+            );
         }
     }
 
@@ -500,9 +527,30 @@ fn seed_from_existing_database(
         }
     }
 
+    let mut refresh_stmt =
+        tx.prepare("UPDATE scripts SET size = ?1, mtime = ?2 WHERE logical_path = ?3")?;
     for record in records {
-        if existing.get(&record.logical_path) == Some(&(record.size as i64, record.mtime)) {
+        let Some(prev) = existing.get(&record.logical_path) else {
+            continue;
+        };
+        let size_matches = prev.size == record.size as i64;
+        if size_matches && prev.mtime == record.mtime {
             already_indexed.insert(record.physical_path.clone());
+            continue;
+        }
+        // Size or mtime moved — check content before treating this as a
+        // real change.
+        if let Some(prev_hash) = &prev.content_hash
+            && let Some(hash) =
+                crate::indexer::extractor::hash_file(Path::new(&record.physical_path))
+            && hash == *prev_hash
+        {
+            already_indexed.insert(record.physical_path.clone());
+            refresh_stmt.execute(rusqlite::params![
+                record.size as i64,
+                record.mtime,
+                record.logical_path
+            ])?;
         }
     }
 
@@ -578,16 +626,17 @@ fn insert_extracted_row(
 
     conn.prepare_cached(
         "INSERT OR REPLACE INTO scripts
-         (logical_path, language, size, mtime, content,
+         (logical_path, language, size, mtime, content_hash, content,
           owner, purpose, tags, entry_points, related, symlink_target,
           metadata_json, vc_warnings, indexed_at)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
     )?
     .execute(rusqlite::params![
         record.logical_path,
         record.language,
         record.size as i64,
         record.mtime,
+        row.meta.content_hash,
         row.meta.content,
         row.meta.owner,
         row.meta.purpose,
