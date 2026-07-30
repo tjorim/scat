@@ -22,7 +22,7 @@ impl SearchApi {
             .query_row("SELECT COUNT(*) FROM scripts", [], |r| r.get(0))?;
 
         let by_language: Vec<LangCount> = {
-            let mut stmt = self.conn.prepare(
+            let mut stmt = self.conn.prepare_cached(
                 "SELECT COALESCE(language,'unknown') AS language, COUNT(*) AS count
                  FROM scripts GROUP BY language ORDER BY count DESC",
             )?;
@@ -39,7 +39,7 @@ impl SearchApi {
         };
 
         let by_owner: Vec<OwnerCount> = {
-            let mut stmt = self.conn.prepare(
+            let mut stmt = self.conn.prepare_cached(
                 "SELECT COALESCE(owner,'unknown') AS owner, COUNT(*) AS count
                  FROM scripts GROUP BY owner ORDER BY count DESC",
             )?;

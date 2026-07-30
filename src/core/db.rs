@@ -287,6 +287,13 @@ pub fn open_db(path: &Path) -> Result<Connection> {
     // per-connection setting SQLite doesn't persist in the database file, so
     // every connection — including this read-only one — must set it itself.
     conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA temp_store = MEMORY;")?;
+    // SearchApi re-issues the same handful of query shapes (search, list,
+    // stats, deps) many times over a connection's life — e.g. once per
+    // keystroke in the TUI's live search. `prepare_cached` (used throughout
+    // `core::search`) skips re-parsing and re-planning those on repeat calls;
+    // raise the cache above rusqlite's default of 16 so the filter
+    // combinations (language/owner/tag) across all query shapes still fit.
+    conn.set_prepared_statement_cache_capacity(64);
     let schema_version: i64 = conn
         .query_row(
             "SELECT schema_version FROM index_metadata WHERE id = 1",
@@ -523,7 +530,7 @@ pub fn fts_query_filtered(
     sql.push_str(" ORDER BY bm25(script_fts) LIMIT ?");
     params.push(SqlValue::Integer(lim));
 
-    let mut stmt = conn.prepare(&sql)?;
+    let mut stmt = conn.prepare_cached(&sql)?;
     let cols: Vec<String> = stmt
         .column_names()
         .iter()
@@ -565,7 +572,7 @@ pub fn query_rows(
     sql: &str,
     params: &[&dyn rusqlite::ToSql],
 ) -> Result<Vec<JsonRow>> {
-    let mut stmt = conn.prepare(sql)?;
+    let mut stmt = conn.prepare_cached(sql)?;
     let cols: Vec<String> = stmt
         .column_names()
         .iter()
