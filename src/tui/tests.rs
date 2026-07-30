@@ -1163,3 +1163,53 @@ fn results_list_only_renders_the_visible_window() {
         .unwrap();
     assert_eq!(app.results_state.offset(), 0);
 }
+
+#[test]
+fn clicking_a_visible_result_does_not_shift_the_scroll_window() {
+    use ratatui::{Terminal, backend::TestBackend};
+
+    let db = super::make_test_db();
+    let mut app = make_app(db.path());
+
+    let total = 500;
+    app.results = (0..total)
+        .map(|i| detail_row(&format!("/scripts/item_{i:04}.sh")))
+        .collect();
+    // Select something deep in the list so the pane is scrolled, not sitting
+    // at offset 0 (where a click couldn't reveal an off-by-one).
+    app.selected = 300;
+    app.results_state.select(Some(app.selected));
+
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    terminal
+        .draw(|frame| super::render::draw(frame, &mut app))
+        .unwrap();
+    let offset_before = app.results_state.offset();
+    assert!(offset_before > 0, "selection should have scrolled the pane");
+
+    // Click a different row that's already on screen (two rows below the
+    // current selection, still inside the scrolled window).
+    let region = app
+        .click_regions
+        .iter()
+        .find(|r| r.kind == RegionKind::Results)
+        .copied()
+        .expect("results region recorded");
+    let target_index = offset_before + 2;
+    let row = region.area.y + u16::try_from(target_index - region.scroll).unwrap();
+    app.handle_left_click(region.area.x, row).unwrap();
+    assert_eq!(app.selected, target_index);
+
+    terminal
+        .draw(|frame| super::render::draw(frame, &mut app))
+        .unwrap();
+
+    // Selecting an already-visible row must not move the scroll window: the
+    // clicked row was rendered at `row` under the old offset, and should
+    // stay there rather than jumping by a line.
+    assert_eq!(
+        app.results_state.offset(),
+        offset_before,
+        "clicking a visible row should not shift the pane's scroll offset"
+    );
+}
