@@ -81,7 +81,7 @@ impl SearchApi {
         append_script_filters(&mut sql, &mut params, None, language, owner, tag);
         sql.push_str(" ORDER BY logical_path");
 
-        let mut stmt = self.conn.prepare(&sql)?;
+        let mut stmt = self.conn.prepare_cached(&sql)?;
         let cols: Vec<String> = stmt
             .column_names()
             .iter()
@@ -218,7 +218,7 @@ impl SearchApi {
         // unescaped prefix's char count locates the first char after it.
         let start = (prefix.chars().count() + 1) as i64;
 
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare_cached(
             "SELECT DISTINCT substr(substr(logical_path, ?2), 1,
                                     instr(substr(logical_path, ?2), '/') - 1) AS name
              FROM scripts

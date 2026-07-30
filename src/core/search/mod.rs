@@ -226,7 +226,7 @@ pub struct SearchApi {
 }
 
 fn query_script_rows(conn: &Connection, sql: &str, params: Vec<SqlValue>) -> Result<Vec<JsonRow>> {
-    let mut stmt = conn.prepare(sql)?;
+    let mut stmt = conn.prepare_cached(sql)?;
     let cols: Vec<String> = stmt
         .column_names()
         .iter()

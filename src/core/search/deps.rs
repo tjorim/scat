@@ -80,7 +80,7 @@ impl SearchApi {
             let params: Vec<&dyn rusqlite::ToSql> =
                 chunk.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
 
-            let mut stmt = self.conn.prepare(&sql)?;
+            let mut stmt = self.conn.prepare_cached(&sql)?;
             let cols: Vec<String> = stmt
                 .column_names()
                 .iter()
