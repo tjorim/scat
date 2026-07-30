@@ -72,6 +72,7 @@ jobs:
               language TEXT,
               size INTEGER,
               mtime REAL,
+              content_hash TEXT,
               content TEXT,
               owner TEXT,
               purpose TEXT,
@@ -189,7 +190,7 @@ jobs:
           conn.execute(
               "INSERT INTO index_metadata (id, build_timestamp, schema_version) VALUES (1, ?, ?)",
               # Must match scat_core::core::db::SCHEMA_VERSION.
-              ("2026-06-01T00:00:00Z", 12),
+              ("2026-06-01T00:00:00Z", 13),
           )
           conn.commit()
           conn.close()
@@ -252,6 +253,7 @@ jobs:
               language TEXT,
               size INTEGER,
               mtime REAL,
+              content_hash TEXT,
               content TEXT,
               owner TEXT,
               purpose TEXT,
@@ -369,7 +371,7 @@ jobs:
           conn.execute(
               "INSERT INTO index_metadata (id, build_timestamp, schema_version) VALUES (1, ?, ?)",
               # Must match scat_core::core::db::SCHEMA_VERSION.
-              ("2026-06-01T00:00:00Z", 12),
+              ("2026-06-01T00:00:00Z", 13),
           )
           conn.commit()
           conn.close()
