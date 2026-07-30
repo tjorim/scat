@@ -12,18 +12,18 @@ const TABLE_BORDER_END_WIDTH: usize = 1;
 const DEFAULT_TERMINAL_WIDTH: usize = 120;
 const DEFAULT_SEARCH_FIELDS: &[&str] = &["path", "language", "owner", "purpose"];
 
-pub(crate) fn print_json<T: serde::Serialize>(value: &T) {
+pub fn print_json<T: serde::Serialize>(value: &T) {
     match serde_json::to_string_pretty(value) {
         Ok(s) => println!("{s}"),
         Err(e) => warn!(error = %e, "failed to serialize JSON"),
     }
 }
 
-pub(crate) fn print_script_table(scripts: &[scat_core::core::db::JsonRow], no_color: bool) {
+pub fn print_script_table(scripts: &[scat_core::core::db::JsonRow], no_color: bool) {
     print_script_table_with_fields(scripts, DEFAULT_SEARCH_FIELDS, no_color);
 }
 
-pub(crate) fn print_script_table_with_fields(
+pub fn print_script_table_with_fields(
     scripts: &[scat_core::core::db::JsonRow],
     fields: &[&str],
     no_color: bool,
@@ -62,10 +62,7 @@ fn script_table_rows(
     (headers, rows, truncate_left)
 }
 
-pub(crate) fn render_script_csv(
-    scripts: &[scat_core::core::db::JsonRow],
-    fields: &[String],
-) -> String {
+pub fn render_script_csv(scripts: &[scat_core::core::db::JsonRow], fields: &[String]) -> String {
     let selected_fields = selected_script_fields(fields);
     let mut output = String::new();
     output.push_str(&render_csv_row(&selected_fields));
@@ -98,7 +95,7 @@ fn csv_escape(value: &str) -> String {
     }
 }
 
-pub(crate) fn script_rows_to_json(
+pub fn script_rows_to_json(
     scripts: &[scat_core::core::db::JsonRow],
     fields: &[String],
 ) -> Vec<scat_core::core::db::JsonRow> {
@@ -116,7 +113,7 @@ pub(crate) fn script_rows_to_json(
         .collect()
 }
 
-pub(crate) fn selected_script_fields(fields: &[String]) -> Vec<&'static str> {
+pub fn selected_script_fields(fields: &[String]) -> Vec<&'static str> {
     let requested = if fields.is_empty() {
         DEFAULT_SEARCH_FIELDS
             .iter()
@@ -191,7 +188,7 @@ fn display_script_field(view: ScriptView, field: &str) -> String {
     }
 }
 
-pub(crate) fn json_script_field(view: ScriptView, field: &str) -> serde_json::Value {
+pub fn json_script_field(view: ScriptView, field: &str) -> serde_json::Value {
     let cloned =
         |value: Option<&serde_json::Value>| value.cloned().unwrap_or(serde_json::Value::Null);
     match field {
@@ -211,7 +208,7 @@ pub(crate) fn json_script_field(view: ScriptView, field: &str) -> serde_json::Va
     }
 }
 
-pub(crate) fn render_table(headers: &[&str], rows: &[Vec<String>], no_color: bool) -> String {
+pub fn render_table(headers: &[&str], rows: &[Vec<String>], no_color: bool) -> String {
     let width = terminal_width();
     render_table_with_width(headers, rows, no_color, width, &[])
 }
@@ -363,12 +360,10 @@ fn truncate_left_with_ellipsis(value: &str, max_width: usize) -> String {
 }
 
 fn terminal_width() -> usize {
-    crossterm::terminal::size()
-        .map(|(width, _)| usize::from(width))
-        .unwrap_or(DEFAULT_TERMINAL_WIDTH)
+    crossterm::terminal::size().map_or(DEFAULT_TERMINAL_WIDTH, |(width, _)| usize::from(width))
 }
 
-pub(crate) fn warning_kinds(view: ScriptView) -> String {
+pub fn warning_kinds(view: ScriptView) -> String {
     let kinds = view.vc_warning_kinds();
     if kinds.is_empty() {
         "—".to_string()
@@ -378,12 +373,12 @@ pub(crate) fn warning_kinds(view: ScriptView) -> String {
 }
 
 /// Format a string field, substituting an em dash for empty values.
-pub(crate) fn str_field(row: &scat_core::core::db::JsonRow, key: &str) -> String {
+pub fn str_field(row: &scat_core::core::db::JsonRow, key: &str) -> String {
     dash_or_empty(row_str(row, key))
 }
 
 /// Substitute an em dash for an empty string, otherwise return the value owned.
-pub(crate) fn dash_or_empty(value: &str) -> String {
+pub fn dash_or_empty(value: &str) -> String {
     if value.is_empty() {
         "—".to_string()
     } else {
@@ -394,9 +389,7 @@ pub(crate) fn dash_or_empty(value: &str) -> String {
 /// Rename raw DB column names to the canonical keys used in JSON output:
 /// `logical_path` → `path`, `indexed_at` → `indexed`, `symlink_target` → `symlink`.
 /// All other keys are preserved as-is.
-pub(crate) fn canonicalize_row_keys(
-    row: &scat_core::core::db::JsonRow,
-) -> scat_core::core::db::JsonRow {
+pub fn canonicalize_row_keys(row: &scat_core::core::db::JsonRow) -> scat_core::core::db::JsonRow {
     row.iter()
         .map(|(key, val)| {
             let canonical = match key.as_str() {
@@ -411,7 +404,7 @@ pub(crate) fn canonicalize_row_keys(
 }
 
 /// Serialize a [`DependencyEntry`] as a JSON object using the canonical `"path"` key.
-pub(crate) fn dep_entry_to_json(e: &scat_core::core::search::DependencyEntry) -> serde_json::Value {
+pub fn dep_entry_to_json(e: &scat_core::core::search::DependencyEntry) -> serde_json::Value {
     serde_json::json!({
         "path": e.logical_path,
         "depends_on_path": e.depends_on_path,
@@ -424,7 +417,7 @@ pub(crate) fn dep_entry_to_json(e: &scat_core::core::search::DependencyEntry) ->
 }
 
 /// Serialize a reverse-dependency row as a compact JSON object using canonical field names.
-pub(crate) fn used_by_row_to_json(row: &scat_core::core::db::JsonRow) -> serde_json::Value {
+pub fn used_by_row_to_json(row: &scat_core::core::db::JsonRow) -> serde_json::Value {
     let view = ScriptView::new(row);
     serde_json::json!({
         "path": view.logical_path_value(),
@@ -436,7 +429,7 @@ pub(crate) fn used_by_row_to_json(row: &scat_core::core::db::JsonRow) -> serde_j
 }
 
 /// Serialize a folder-sibling row as a compact JSON object using canonical field names.
-pub(crate) fn sibling_row_to_json(row: &scat_core::core::db::JsonRow) -> serde_json::Value {
+pub fn sibling_row_to_json(row: &scat_core::core::db::JsonRow) -> serde_json::Value {
     let view = ScriptView::new(row);
     serde_json::json!({
         "path": view.logical_path_value(),
@@ -446,7 +439,7 @@ pub(crate) fn sibling_row_to_json(row: &scat_core::core::db::JsonRow) -> serde_j
     })
 }
 
-pub(crate) fn size_field(view: ScriptView) -> String {
+pub fn size_field(view: ScriptView) -> String {
     match view.size() {
         Some(n) if n >= 0 => format_size(n as u64),
         _ => "—".to_string(),
@@ -470,7 +463,7 @@ fn format_size(bytes: u64) -> String {
 
 /// Format a JSON-encoded list column for table/CSV display, joining its string
 /// elements with `, ` and substituting an em dash when empty.
-pub(crate) fn list_field_display(view: ScriptView, field: ListField) -> String {
+pub fn list_field_display(view: ScriptView, field: ListField) -> String {
     let values = view.string_list(field);
     if values.is_empty() {
         "—".to_string()
@@ -479,14 +472,15 @@ pub(crate) fn list_field_display(view: ScriptView, field: ListField) -> String {
     }
 }
 
-pub(crate) fn mtime_field(view: ScriptView) -> String {
+pub fn mtime_field(view: ScriptView) -> String {
     let secs = match view.mtime() {
         Some(s) => s,
         None => return "—".to_string(),
     };
-    chrono::DateTime::<chrono::Utc>::from_timestamp(secs as i64, 0)
-        .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
-        .unwrap_or_else(|| "—".to_string())
+    chrono::DateTime::<chrono::Utc>::from_timestamp(secs as i64, 0).map_or_else(
+        || "—".to_string(),
+        |dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+    )
 }
 
 #[cfg(test)]

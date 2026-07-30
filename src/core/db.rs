@@ -76,7 +76,7 @@ pub fn append_script_filters(
 // DDL (see SCHEMA_VERSION)
 // ---------------------------------------------------------------------------
 
-pub(crate) const DDL: &str = r#"
+pub(crate) const DDL: &str = r"
 PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS scripts (
@@ -226,7 +226,7 @@ CREATE TABLE IF NOT EXISTS index_metadata (
     build_timestamp TEXT    NOT NULL,
     schema_version  INTEGER NOT NULL
 );
-"#;
+";
 
 // ---------------------------------------------------------------------------
 // Bulk-build FTS trigger management
@@ -453,7 +453,7 @@ pub fn sanitize_fts_query(input: &str) -> String {
                 i += 1;
             }
             let word = &chars[start..i];
-            if word.len() > 1 && *word.last().unwrap() == '*' {
+            if word.len() > 1 && word.last() == Some(&'*') {
                 (word[..word.len() - 1].iter().collect(), true)
             } else {
                 (word.iter().collect(), false)
@@ -524,7 +524,11 @@ pub fn fts_query_filtered(
     params.push(SqlValue::Integer(lim));
 
     let mut stmt = conn.prepare(&sql)?;
-    let cols: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+    let cols: Vec<String> = stmt
+        .column_names()
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect();
     stmt.query_map(params_from_iter(params), |row| Ok(row_to_map(row, &cols)))?
         .map(|r| r.map_err(Error::from))
         .collect()
@@ -545,8 +549,7 @@ pub fn row_to_map(row: &rusqlite::Row, col_names: &[String]) -> JsonRow {
             ValueRef::Null => serde_json::Value::Null,
             ValueRef::Integer(n) => serde_json::Value::Number(n.into()),
             ValueRef::Real(f) => serde_json::Number::from_f64(f)
-                .map(serde_json::Value::Number)
-                .unwrap_or(serde_json::Value::Null),
+                .map_or(serde_json::Value::Null, serde_json::Value::Number),
             ValueRef::Text(s) => serde_json::Value::String(String::from_utf8_lossy(s).into_owned()),
             ValueRef::Blob(_) => serde_json::Value::Null,
         };
@@ -563,7 +566,11 @@ pub fn query_rows(
     params: &[&dyn rusqlite::ToSql],
 ) -> Result<Vec<JsonRow>> {
     let mut stmt = conn.prepare(sql)?;
-    let cols: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+    let cols: Vec<String> = stmt
+        .column_names()
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect();
     let rows: Result<Vec<JsonRow>> = stmt
         .query_map(params, |row| Ok(row_to_map(row, &cols)))?
         .map(|r| r.map_err(Error::from))

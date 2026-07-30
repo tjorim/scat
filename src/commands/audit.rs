@@ -5,7 +5,7 @@ use anyhow::Result;
 use crate::output::print_json;
 use crate::runtime::audit_exit_code;
 
-pub(crate) fn cmd_audit(
+pub fn cmd_audit(
     api: &scat_core::core::search::SearchApi,
     checks: &[String],
     strict: bool,

@@ -35,20 +35,26 @@ fn checkout_re() -> &'static regex::Regex {
 // ---------------------------------------------------------------------------
 
 fn default_develop_dirs() -> Vec<String> {
-    DEFAULT_DEVELOP_DIRS.iter().map(|s| s.to_string()).collect()
+    DEFAULT_DEVELOP_DIRS
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect()
 }
 
 fn default_archive_dirs() -> Vec<String> {
-    DEFAULT_ARCHIVE_DIRS.iter().map(|s| s.to_string()).collect()
+    DEFAULT_ARCHIVE_DIRS
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect()
 }
 
 #[derive(Debug, Deserialize)]
 struct VcConfigSection {
     executable: Option<String>,
-    /// Directory names treated as DEVELOP-type checkout containers (default: ["DEVELOP"]).
+    /// Directory names treated as DEVELOP-type checkout containers (default: `["DEVELOP"]`).
     #[serde(default = "default_develop_dirs")]
     develop_dirs: Vec<String>,
-    /// Directory names treated as ARCHIVE-type checkout containers (default: ["ARCHIVE"]).
+    /// Directory names treated as ARCHIVE-type checkout containers (default: `["ARCHIVE"]`).
     #[serde(default = "default_archive_dirs")]
     archive_dirs: Vec<String>,
 }
@@ -107,8 +113,14 @@ impl Default for VcConfig {
             scan_roots: Vec::new(),
             ignore_patterns: Vec::new(),
             vc_executable: None,
-            develop_dirs: DEFAULT_DEVELOP_DIRS.iter().map(|s| s.to_string()).collect(),
-            archive_dirs: DEFAULT_ARCHIVE_DIRS.iter().map(|s| s.to_string()).collect(),
+            develop_dirs: DEFAULT_DEVELOP_DIRS
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
+            archive_dirs: DEFAULT_ARCHIVE_DIRS
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
             bookmarks: std::collections::HashMap::new(),
         }
     }
@@ -125,7 +137,7 @@ impl VcConfig {
         self.develop_dirs
             .iter()
             .chain(self.archive_dirs.iter())
-            .map(|s| s.as_str())
+            .map(std::string::String::as_str)
     }
 }
 
@@ -225,19 +237,19 @@ fn revision_type_rank(revision_type: &str) -> u8 {
 
 /// Load vc configuration from optional file and environment overrides.
 pub fn load_vc_config(config_file: Option<&Path>) -> Result<VcConfig> {
-    let mut file_data = VcConfigFile::default();
-
-    if let Some(path) = config_file
+    let file_data = if let Some(path) = config_file
         && path.exists()
     {
         let text = std::fs::read_to_string(path)?;
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        file_data = if matches!(ext.to_lowercase().as_str(), "yml" | "yaml") {
+        if matches!(ext.to_lowercase().as_str(), "yml" | "yaml") {
             yaml_serde::from_str(&text)?
         } else {
             serde_json::from_str(&text).map_err(crate::error::Error::Json)?
-        };
-    }
+        }
+    } else {
+        VcConfigFile::default()
+    };
 
     let db_path = file_data.db_path.map(PathBuf::from);
     let scan_roots = match std::env::var("SCAT_SCAN_ROOTS").ok() {
@@ -381,8 +393,7 @@ pub fn scan_checkouts(config: &VcConfig, logical_prefix: &str) -> Vec<CheckoutRe
                     );
                 } else if subdir.is_symlink()
                     && !std::fs::canonicalize(&subdir)
-                        .map(|c| canonical_roots.iter().any(|r| c.starts_with(r)))
-                        .unwrap_or(false)
+                        .is_ok_and(|c| canonical_roots.iter().any(|r| c.starts_with(r)))
                 {
                     warn!(
                         path = %subdir.display(),
@@ -428,7 +439,7 @@ fn scan_revision_dir(
     let mut paths: Vec<PathBuf> = walkdir::WalkDir::new(dir)
         .follow_links(false)
         .into_iter()
-        .filter_map(|e| e.ok())
+        .filter_map(std::result::Result::ok)
         .filter(|e| e.file_type().is_file())
         .map(|e| e.path().to_path_buf())
         .collect();

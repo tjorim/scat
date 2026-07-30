@@ -18,7 +18,7 @@ const MAX_VISIBLE_LEVELS: usize = 6;
 /// Sibling names shown per level before windowing around the active entry.
 const MAX_SIBLINGS_PER_LEVEL: usize = 8;
 
-pub(crate) struct ScanTreeView {
+pub struct ScanTreeView {
     multi: MultiProgress,
     levels: Vec<ProgressBar>,
 }

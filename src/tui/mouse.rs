@@ -1,4 +1,8 @@
-use super::*;
+use super::{
+    ClickRegion, DOUBLE_CLICK_MS, Focus, Instant, KeyEvent, MouseButton, MouseEvent,
+    MouseEventKind, Rect, RegionKind, Result, TuiApp, ViewMode, apply_scroll_key, clipboard,
+    detail, hit_test, inner_rect, move_selection, scroll_by,
+};
 
 impl TuiApp {
     pub(super) fn scroll_target(&mut self) -> Option<&mut u16> {

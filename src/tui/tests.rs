@@ -170,7 +170,9 @@ fn live_source_view_resolves_mapped_path() {
             assert_eq!(logical_path, "/catalog/scripts/foo.py");
             assert_eq!(native_path, script);
         }
-        other => panic!("expected live source target, got {other:?}"),
+        other @ viewer::ViewTarget::Catalog(_) => {
+            panic!("expected live source target, got {other:?}")
+        }
     }
     assert!(app.error.is_none());
 }
@@ -204,7 +206,9 @@ fn live_source_view_opens_logical_path_without_mapping_when_file_exists() {
             assert_eq!(logical_path, logical);
             assert_eq!(native_path, script);
         }
-        other => panic!("expected live source target, got {other:?}"),
+        other @ viewer::ViewTarget::Catalog(_) => {
+            panic!("expected live source target, got {other:?}")
+        }
     }
 }
 
@@ -1145,7 +1149,7 @@ fn results_list_only_renders_the_visible_window() {
         .buffer()
         .content()
         .iter()
-        .map(|cell| cell.symbol())
+        .map(ratatui::buffer::Cell::symbol)
         .collect();
 
     // The selected row (the very last result) is on screen…
@@ -1249,7 +1253,7 @@ fn deps_pane_virtualizes_and_never_wraps_a_long_path() {
         .buffer()
         .content()
         .iter()
-        .map(|cell| cell.symbol())
+        .map(ratatui::buffer::Cell::symbol)
         .collect();
 
     assert!(rendered.contains(&format!("item_{:04}", total - 1)));
@@ -1309,7 +1313,7 @@ fn functions_pane_virtualizes_large_lists() {
         .buffer()
         .content()
         .iter()
-        .map(|cell| cell.symbol())
+        .map(ratatui::buffer::Cell::symbol)
         .collect();
 
     assert!(rendered.contains(&format!("func_{:04}", total - 1)));

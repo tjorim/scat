@@ -3,7 +3,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use ignore::WalkBuilder;
 use indicatif::ProgressBar;
-use once_cell::sync::Lazy;
 use rayon::prelude::*;
 use regex::Regex;
 use tracing::{debug, warn};
@@ -69,19 +68,20 @@ pub fn detect_language(path: &Path) -> &'static str {
     match path
         .extension()
         .and_then(|e| e.to_str())
-        .map(|e| e.to_lowercase())
+        .map(str::to_lowercase)
         .as_deref()
     {
         Some("py") => "python",
-        Some("sh") | Some("bash") | Some("ksh") => "shell",
-        Some("yml") | Some("yaml") => "yaml",
+        Some("sh" | "bash" | "ksh") => "shell",
+        Some("yml" | "yaml") => "yaml",
         Some("csv") => "csv",
         Some("json") => "json",
         _ => "unknown",
     }
 }
 
-static SHEBANG_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^#!\s*(\S+)(?:\s+(\S+))?").unwrap());
+static SHEBANG_RE: std::sync::LazyLock<Regex> =
+    std::sync::LazyLock::new(|| Regex::new(r"^#!\s*(\S+)(?:\s+(\S+))?").unwrap());
 
 /// Infer language from shebang line.
 pub fn shebang_language(first_line: &str) -> Option<&'static str> {
@@ -332,8 +332,7 @@ fn process_candidate(
         .modified()
         .ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0);
+        .map_or(0.0, |d| d.as_secs_f64());
 
     let logical_path = make_logical_path(filepath, root, logical_prefix);
 
@@ -453,7 +452,7 @@ fn scan_paths_with_revisions_impl(
     let checkout_dirs_set: std::sync::Arc<std::collections::HashSet<String>> = std::sync::Arc::new(
         effective_checkout_dirs
             .iter()
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
             .collect(),
     );
     // Symlinked directories are only followed if they resolve inside one of
@@ -477,7 +476,7 @@ fn scan_paths_with_revisions_impl(
         let croots = canonical_roots.clone();
         let mut walk = WalkBuilder::new(root);
         walk.follow_links(true)
-            .sort_by_file_path(|a, b| a.cmp(b))
+            .sort_by_file_path(std::cmp::Ord::cmp)
             .hidden(false)
             .ignore(false)
             .git_ignore(false)
@@ -488,7 +487,7 @@ fn scan_paths_with_revisions_impl(
             .filter_entry(move |e| {
                 // Prune checkout container directories before descending — avoids
                 // traversing large DEVELOP/ARCHIVE trees file by file.
-                if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                if e.file_type().is_some_and(|t| t.is_dir()) {
                     let name = e.file_name().to_str().unwrap_or("");
                     if cds.contains(name) {
                         return false;
@@ -554,13 +553,12 @@ fn scan_paths_with_revisions_impl(
                 }
             }
 
-            let file_type = match entry.file_type() {
-                Some(file_type) => file_type,
-                None => {
-                    skipped_in_root += 1;
-                    total_skipped += 1;
-                    continue;
-                }
+            let file_type = if let Some(file_type) = entry.file_type() {
+                file_type
+            } else {
+                skipped_in_root += 1;
+                total_skipped += 1;
+                continue;
             };
 
             if file_type.is_dir() {
@@ -726,7 +724,7 @@ pub fn max_mtime_in_roots_with_shutdown(
     let checkout_dirs_set: std::sync::Arc<std::collections::HashSet<String>> = std::sync::Arc::new(
         effective_checkout_dirs
             .iter()
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
             .collect(),
     );
 
@@ -747,7 +745,7 @@ pub fn max_mtime_in_roots_with_shutdown(
             .parents(false)
             .add_custom_ignore_filename(".catignore")
             .filter_entry(move |e| {
-                if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                if e.file_type().is_some_and(|t| t.is_dir()) {
                     let name = e.file_name().to_str().unwrap_or("");
                     if cds.contains(name) {
                         return false;
@@ -777,7 +775,7 @@ pub fn max_mtime_in_roots_with_shutdown(
                 }
             };
 
-            if !entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
+            if !entry.file_type().is_some_and(|ft| ft.is_file()) {
                 continue;
             }
 
@@ -797,8 +795,7 @@ pub fn max_mtime_in_roots_with_shutdown(
             };
             let secs = modified
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs_f64())
-                .unwrap_or(0.0);
+                .map_or(0.0, |d| d.as_secs_f64());
             max_mtime = Some(max_mtime.map_or(secs, |m: f64| m.max(secs)));
         }
     }
@@ -897,7 +894,7 @@ mod tests {
             .iter()
             .map(|r| r.timestamp.as_str())
             .collect();
-        timestamps.sort();
+        timestamps.sort_unstable();
         assert_eq!(timestamps, vec!["20260610_151550", "20260720_090000"]);
     }
 
@@ -1022,7 +1019,7 @@ mod tests {
         .unwrap();
 
         let mut paths: Vec<&str> = records.iter().map(|r| r.logical_path.as_str()).collect();
-        paths.sort();
+        paths.sort_unstable();
         assert_eq!(
             paths,
             vec![

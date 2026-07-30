@@ -1,7 +1,7 @@
 /// Integration tests for the vc pipeline: `scan_checkouts` and
 /// `infer_warnings`.
 ///
-/// Tests create temporary scan_root trees with embedded DEVELOP / ARCHIVE
+/// Tests create temporary `scan_root` trees with embedded DEVELOP / ARCHIVE
 /// directories, seed them with files whose names match the vc version naming
 /// convention (`<script>_<timestamp>[_<user>]`, timestamp at date, minute,
 /// or second precision; the user suffix only on DEVELOP checkouts), then
@@ -19,7 +19,7 @@ use tempfile::NamedTempFile;
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Build a config whose single scan_root lives under `<parent>/<os>/<root_name>`,
+/// Build a config whose single `scan_root` lives under `<parent>/<os>/<root_name>`,
 /// so that `os_flavor` derives to `<os>`.
 fn make_config(scan_root: &std::path::Path) -> VcConfig {
     VcConfig {
@@ -340,7 +340,7 @@ fn scan_checkouts_deduplicates_symlinked_scan_roots() {
     let alt_scripts = alt.join("scripts");
 
     let config = VcConfig {
-        scan_roots: vec![linux_scripts.clone(), alt_scripts],
+        scan_roots: vec![linux_scripts, alt_scripts],
         ..Default::default()
     };
     let records = scan_checkouts(&config, "/catalog/linux/scripts");
@@ -406,7 +406,7 @@ fn scan_checkouts_uses_configured_develop_dir_names() {
     touch_checkout(&working, "deploy_20240315_1430_jdoe");
 
     let config = VcConfig {
-        scan_roots: vec![scan_root.clone()],
+        scan_roots: vec![scan_root],
         develop_dirs: vec!["WORKING".to_string()],
         archive_dirs: vec![],
         ..Default::default()
@@ -428,7 +428,7 @@ fn scan_checkouts_uses_configured_archive_dir_names() {
     touch_checkout(&history, "tool_20240101_0900_bob");
 
     let config = VcConfig {
-        scan_roots: vec![scan_root.clone()],
+        scan_roots: vec![scan_root],
         develop_dirs: vec![],
         archive_dirs: vec!["HISTORY".to_string()],
         ..Default::default()
@@ -450,7 +450,7 @@ fn scan_checkouts_default_dirs_not_discovered_with_custom_config() {
     touch_checkout(&develop, "deploy_20240315_1430_jdoe");
 
     let config = VcConfig {
-        scan_roots: vec![scan_root.clone()],
+        scan_roots: vec![scan_root],
         develop_dirs: vec!["WORKING".to_string()],
         archive_dirs: vec![],
         ..Default::default()

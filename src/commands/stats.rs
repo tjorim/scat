@@ -2,7 +2,7 @@ use anyhow::Result;
 
 use crate::output::{print_json, render_table};
 
-pub(crate) fn cmd_stats(
+pub fn cmd_stats(
     api: &scat_core::core::search::SearchApi,
     json: bool,
     no_color: bool,
@@ -45,9 +45,7 @@ pub(crate) fn cmd_stats(
     Ok(())
 }
 
-pub(crate) fn render_revision_stats_lines(
-    stats: &scat_core::core::search::RevisionStats,
-) -> Vec<String> {
+pub fn render_revision_stats_lines(stats: &scat_core::core::search::RevisionStats) -> Vec<String> {
     vec![
         format!(
             "  Scripts with active checkouts: {}",

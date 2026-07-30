@@ -9,7 +9,7 @@ use clap::{ArgAction, Parser, Subcommand};
     about = "Script Catalog — discover, search, and understand scripts.",
     version
 )]
-pub(crate) struct Cli {
+pub struct Cli {
     /// Path to the catalog SQLite database.
     #[arg(long, env = "SCAT_DB", global = true)]
     pub(crate) db: Option<PathBuf>,
@@ -30,12 +30,12 @@ pub(crate) struct Cli {
     pub(crate) command: Commands,
 }
 
-pub(crate) fn resolve_no_color(flag: bool, no_color_env: Option<&OsStr>) -> bool {
+pub fn resolve_no_color(flag: bool, no_color_env: Option<&OsStr>) -> bool {
     flag || no_color_env.is_some_and(|value| !value.is_empty())
 }
 
 #[derive(Subcommand)]
-pub(crate) enum Commands {
+pub enum Commands {
     /// Full-text search across indexed scripts.
     Search {
         /// Full-text search query (omit to list all). Prefix with `@` to expand a config bookmark.
@@ -194,7 +194,7 @@ pub(crate) enum Commands {
 }
 
 #[derive(Subcommand)]
-pub(crate) enum CatalogCommands {
+pub enum CatalogCommands {
     /// Build (or rebuild) the catalog database by scanning script directories.
     Build {
         /// Root directories to scan recursively (repeatable).
@@ -286,7 +286,7 @@ pub(crate) enum CatalogCommands {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
-pub(crate) enum SearchOutput {
+pub enum SearchOutput {
     Table,
     Csv,
     Json,
@@ -294,7 +294,7 @@ pub(crate) enum SearchOutput {
 
 /// Output format for commands that support table and JSON output (but not CSV).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
-pub(crate) enum OutputFormat {
+pub enum OutputFormat {
     Table,
     Json,
 }

@@ -8,7 +8,7 @@ use tracing_subscriber::EnvFilter;
 
 use crate::output::print_json;
 
-pub(crate) fn cmd_vc(args: &[String], json: bool, vc_executable: Option<PathBuf>) -> Result<()> {
+pub fn cmd_vc(args: &[String], json: bool, vc_executable: Option<PathBuf>) -> Result<()> {
     let vc_exe = vc_executable.or_else(which_vc);
 
     let Some(vc_exe) = vc_exe else {
@@ -54,7 +54,7 @@ pub(crate) fn cmd_vc(args: &[String], json: bool, vc_executable: Option<PathBuf>
     Ok(())
 }
 
-pub(crate) fn init_tracing(verbose: u8) {
+pub fn init_tracing(verbose: u8) {
     let filter = EnvFilter::new(effective_log_spec(
         verbose,
         std::env::var_os(EnvFilter::DEFAULT_ENV).as_deref(),
@@ -69,14 +69,14 @@ pub(crate) fn init_tracing(verbose: u8) {
         .try_init();
 }
 
-pub(crate) fn effective_log_spec<'a>(verbose: u8, rust_log: Option<&'a OsStr>) -> Cow<'a, str> {
+pub fn effective_log_spec(verbose: u8, rust_log: Option<&OsStr>) -> Cow<'_, str> {
     match rust_log {
         Some(value) => value.to_string_lossy(),
         None => Cow::Borrowed(verbosity_directive(verbose)),
     }
 }
 
-pub(crate) fn verbosity_directive(verbose: u8) -> &'static str {
+pub fn verbosity_directive(verbose: u8) -> &'static str {
     match verbose {
         0 => "warn",
         1 => "debug",
@@ -151,16 +151,11 @@ fn is_executable_metadata(metadata: &std::fs::Metadata) -> bool {
     metadata.permissions().mode() & 0o111 != 0
 }
 
-pub(crate) fn audit_exit_code(
-    summary: &scat_core::core::search::AuditSummary,
-    strict: bool,
-) -> i32 {
+pub fn audit_exit_code(summary: &scat_core::core::search::AuditSummary, strict: bool) -> i32 {
     if summary.error > 0 {
         2
-    } else if strict && summary.warn > 0 {
-        1
     } else {
-        0
+        i32::from(strict && summary.warn > 0)
     }
 }
 

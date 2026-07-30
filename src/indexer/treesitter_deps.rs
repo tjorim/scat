@@ -1,6 +1,5 @@
 use std::collections::HashSet;
 
-use once_cell::sync::Lazy;
 use regex::Regex;
 use tree_sitter::Node;
 
@@ -192,18 +191,19 @@ fn extract_bash_commands(
 // Regex fallback
 // ---------------------------------------------------------------------------
 
-static PYTHON_IMPORT_RE: Lazy<Vec<Regex>> = Lazy::new(|| {
+static PYTHON_IMPORT_RE: std::sync::LazyLock<Vec<Regex>> = std::sync::LazyLock::new(|| {
     vec![
         Regex::new(r"(?m)^\s*import\s+([\w.]+)").unwrap(),
         Regex::new(r"(?m)^\s*from\s+([\w.]+)\s+import").unwrap(),
     ]
 });
 
-static BASH_SOURCE_RE: Lazy<Vec<Regex>> =
-    Lazy::new(|| vec![Regex::new(r#"(?m)^\s*(?:source|\.)\s+["']?([^\s"';]+)["']?"#).unwrap()]);
+static BASH_SOURCE_RE: std::sync::LazyLock<Vec<Regex>> = std::sync::LazyLock::new(|| {
+    vec![Regex::new(r#"(?m)^\s*(?:source|\.)\s+["']?([^\s"';]+)["']?"#).unwrap()]
+});
 
-static REFERENCE_PATH_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"[\w./\\-]+\.(?:py|sh|bash|ksh)\b").unwrap());
+static REFERENCE_PATH_RE: std::sync::LazyLock<Regex> =
+    std::sync::LazyLock::new(|| Regex::new(r"[\w./\\-]+\.(?:py|sh|bash|ksh)\b").unwrap());
 
 /// Extract path-shaped string literals that point at other scripts.
 ///

@@ -7,7 +7,7 @@ use crate::output::{
     selected_script_fields,
 };
 
-pub(crate) struct SearchOpts<'a> {
+pub struct SearchOpts<'a> {
     pub(crate) text: Option<String>,
     pub(crate) regex: Option<String>,
     pub(crate) function: Option<String>,
@@ -20,10 +20,7 @@ pub(crate) struct SearchOpts<'a> {
     pub(crate) no_color: bool,
 }
 
-pub(crate) fn cmd_search(
-    api: &scat_core::core::search::SearchApi,
-    opts: SearchOpts<'_>,
-) -> Result<()> {
+pub fn cmd_search(api: &scat_core::core::search::SearchApi, opts: SearchOpts<'_>) -> Result<()> {
     let SearchOpts {
         text,
         regex,
@@ -46,7 +43,7 @@ pub(crate) fn cmd_search(
                 owner.as_deref(),
                 tag.as_deref(),
             )
-            .with_context(|| format!("Function search failed for {:?}", name))?;
+            .with_context(|| format!("Function search failed for {name:?}"))?;
         (rows, false)
     } else if let Some(ref pattern) = regex {
         let rows = api
@@ -57,7 +54,7 @@ pub(crate) fn cmd_search(
                 owner.as_deref(),
                 tag.as_deref(),
             )
-            .with_context(|| format!("Regex search failed for pattern {:?}", pattern))?;
+            .with_context(|| format!("Regex search failed for pattern {pattern:?}"))?;
         (rows, false)
     } else if let Some(ref q) = text {
         let use_fts = query_uses_fts(q);
@@ -113,13 +110,13 @@ pub(crate) fn cmd_search(
 /// query looks like a (partial) path, since `/` and `.` are FTS5 syntax.
 /// Backslashes count as path separators so Windows-style path fragments
 /// (`scripts\foo`) route to path search too.
-pub(crate) fn query_uses_fts(query: &str) -> bool {
+pub fn query_uses_fts(query: &str) -> bool {
     !query.contains('/') && !query.contains('\\') && !query.contains('.')
 }
 
 /// Re-sort results so exact and prefix filename matches appear first.
 /// Preserves the original (BM25) order within each tier.
-pub(crate) fn sort_by_name_relevance(
+pub fn sort_by_name_relevance(
     mut results: Vec<scat_core::core::db::JsonRow>,
     query: &str,
 ) -> Vec<scat_core::core::db::JsonRow> {
@@ -129,10 +126,7 @@ pub(crate) fn sort_by_name_relevance(
         // Split on both separators so basenames resolve correctly even if a
         // path carries Windows-style backslashes.
         let basename = path.rsplit(['/', '\\']).next().unwrap_or(path);
-        let stem = basename
-            .rsplit_once('.')
-            .map(|(s, _)| s)
-            .unwrap_or(basename);
+        let stem = basename.rsplit_once('.').map_or(basename, |(s, _)| s);
         let stem_lower = stem.to_lowercase();
         let base_lower = basename.to_lowercase();
         if stem_lower == q {

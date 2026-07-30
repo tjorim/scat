@@ -1,4 +1,4 @@
-use super::*;
+use super::{DiffRequest, DiffResponse, Result, TuiApp};
 
 impl TuiApp {
     pub(super) fn dispatch_diff(&mut self) -> Result<()> {

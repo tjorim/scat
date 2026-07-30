@@ -90,7 +90,7 @@ impl PathResolver {
             Some(m) => {
                 let remainder = &logical_path[m.logical_prefix.len()..];
                 let root = m.linux.trim_end_matches('/');
-                format!("{}{}", root, remainder)
+                format!("{root}{remainder}")
             }
         }
     }

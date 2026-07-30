@@ -1,4 +1,4 @@
-/// Integration tests for SearchApi against an in-memory database
+/// Integration tests for `SearchApi` against an in-memory database
 /// built with the production schema (schema version 4).
 use scat_core::core::db::{SCHEMA_VERSION, create_db};
 use scat_core::core::search::{SearchApi, TreeDirection, compare_catalogs};

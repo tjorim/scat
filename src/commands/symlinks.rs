@@ -4,7 +4,7 @@ use scat_core::core::script_view::ScriptView;
 use crate::cli::OutputFormat;
 use crate::output::{canonicalize_row_keys, print_json, print_script_table};
 
-pub(crate) fn cmd_symlinks(
+pub fn cmd_symlinks(
     api: &scat_core::core::search::SearchApi,
     path: &str,
     output: OutputFormat,

@@ -1,4 +1,4 @@
-use super::*;
+use super::{Focus, FunctionCallSite, JsonRow, Result, ScriptView, TuiApp, Value};
 
 impl TuiApp {
     pub(super) fn xref_call_sites(&self) -> Option<&[FunctionCallSite]> {
@@ -11,7 +11,7 @@ impl TuiApp {
 
     pub(super) fn dependency_target_count(&self) -> usize {
         self.xref_call_sites()
-            .map_or_else(|| self.deps.len(), |sites| sites.len())
+            .map_or_else(|| self.deps.len(), <[FunctionCallSite]>::len)
     }
 
     pub(super) fn open_selected_dependency(&mut self) -> Result<()> {

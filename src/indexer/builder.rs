@@ -163,7 +163,7 @@ pub fn build_index(
 
     // The tmp_path: either the existing WIP (resume) or a fresh temp file.
     let tmp_path = if resume_checkpoint.is_some() {
-        wip.clone()
+        wip
     } else {
         let temp_file = NamedTempFile::new_in(parent)?;
         let tmp_path = temp_file.path().to_path_buf();
@@ -699,7 +699,7 @@ mod tests {
         // Bump mtime without changing content — e.g. a `touch`, or a VC
         // checkout that rewrites the file with identical bytes.
         let file = std::fs::File::open(root.join("a.py")).unwrap();
-        let new_mtime = std::time::SystemTime::now() + std::time::Duration::from_secs(120);
+        let new_mtime = std::time::SystemTime::now() + std::time::Duration::from_mins(2);
         file.set_modified(new_mtime).unwrap();
 
         let second =

@@ -1,7 +1,6 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use once_cell::sync::Lazy;
 use regex::Regex;
 use tracing::{trace, warn};
 
@@ -38,10 +37,11 @@ impl HistoryEntry {
     }
 }
 
-static HISTORY_DATE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\b(\d{4}-\d{2}-\d{2})\b").unwrap());
+static HISTORY_DATE_RE: std::sync::LazyLock<Regex> =
+    std::sync::LazyLock::new(|| Regex::new(r"\b(\d{4}-\d{2}-\d{2})\b").unwrap());
 
-static HISTORY_VERSION_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"\b(\d+\.\d+(?:\.\d+)*)\b").unwrap());
+static HISTORY_VERSION_RE: std::sync::LazyLock<Regex> =
+    std::sync::LazyLock::new(|| Regex::new(r"\b(\d+\.\d+(?:\.\d+)*)\b").unwrap());
 
 /// Parse a single raw `@history` value into a [`HistoryEntry`].
 ///
@@ -204,7 +204,7 @@ struct HeaderPattern {
     metadata_key: &'static str,
 }
 
-static HEADER_PATTERNS: Lazy<Vec<HeaderPattern>> = Lazy::new(|| {
+static HEADER_PATTERNS: std::sync::LazyLock<Vec<HeaderPattern>> = std::sync::LazyLock::new(|| {
     vec![
         HeaderPattern {
             re: Regex::new(r"(?i)(?:@brief|brief\s*:)\s*(.+)").unwrap(),
@@ -317,8 +317,8 @@ fn parse_header_comments(content: &str, meta: &mut ExtractedMetadata) {
 // Python docstring extraction
 // ---------------------------------------------------------------------------
 
-static DOCSTRING_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r#"(?s)^\s*(?:"""(.*?)"""|'''(.*?)''')"#).unwrap());
+static DOCSTRING_RE: std::sync::LazyLock<Regex> =
+    std::sync::LazyLock::new(|| Regex::new(r#"(?s)^\s*(?:"""(.*?)"""|'''(.*?)''')"#).unwrap());
 
 fn parse_python_docstring(content: &str, meta: &mut ExtractedMetadata) {
     if !meta.purpose.is_empty() {
@@ -328,8 +328,7 @@ fn parse_python_docstring(content: &str, meta: &mut ExtractedMetadata) {
         let doc = cap
             .get(1)
             .or_else(|| cap.get(2))
-            .map(|m| m.as_str())
-            .unwrap_or("")
+            .map_or("", |m| m.as_str())
             .trim();
         if let Some(first_line) = doc.lines().next() {
             let first = first_line.trim();

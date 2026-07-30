@@ -73,9 +73,8 @@ impl SearchApi {
         owner: Option<&str>,
         tag: Option<&str>,
     ) -> Result<Vec<JsonRow>> {
-        let re = Regex::new(pattern).map_err(|e| {
-            Error::Validation(format!("invalid regex pattern {:?}: {}", pattern, e))
-        })?;
+        let re = Regex::new(pattern)
+            .map_err(|e| Error::Validation(format!("invalid regex pattern {pattern:?}: {e}")))?;
 
         let mut sql = String::from("SELECT * FROM scripts WHERE 1=1");
         let mut params = Vec::new();
@@ -83,7 +82,11 @@ impl SearchApi {
         sql.push_str(" ORDER BY logical_path");
 
         let mut stmt = self.conn.prepare(&sql)?;
-        let cols: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+        let cols: Vec<String> = stmt
+            .column_names()
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
         let mut rows = stmt.query(params_from_iter(params))?;
 
         let mut results = Vec::new();

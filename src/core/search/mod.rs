@@ -76,7 +76,7 @@ pub struct DepsTreeNode {
     #[serde(rename = "via", skip_serializing_if = "Option::is_none")]
     pub via_kind: Option<String>,
     /// Expanded child nodes.
-    pub children: Vec<DepsTreeNode>,
+    pub children: Vec<Self>,
 }
 
 #[derive(Debug, Serialize)]
@@ -227,7 +227,11 @@ pub struct SearchApi {
 
 fn query_script_rows(conn: &Connection, sql: &str, params: Vec<SqlValue>) -> Result<Vec<JsonRow>> {
     let mut stmt = conn.prepare(sql)?;
-    let cols: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+    let cols: Vec<String> = stmt
+        .column_names()
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect();
     stmt.query_map(params_from_iter(params), |row| Ok(row_to_map(row, &cols)))?
         .map(|r| r.map_err(Error::from))
         .collect()

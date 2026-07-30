@@ -103,9 +103,7 @@ fn create_db_creates_new_indexes() {
     for exp in &expected {
         assert!(
             indexes.contains(&exp.to_string()),
-            "Index {} not found. Available: {:?}",
-            exp,
-            indexes
+            "Index {exp} not found. Available: {indexes:?}"
         );
     }
 }

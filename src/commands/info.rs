@@ -2,7 +2,7 @@ use anyhow::Result;
 
 use crate::output::print_json;
 
-pub(crate) fn cmd_info(api: &scat_core::core::search::SearchApi, json: bool) -> Result<()> {
+pub fn cmd_info(api: &scat_core::core::search::SearchApi, json: bool) -> Result<()> {
     let meta = api.index_metadata()?;
 
     if json {

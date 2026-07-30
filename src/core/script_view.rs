@@ -64,9 +64,9 @@ impl ListField {
     /// The underlying `scripts` column name.
     pub const fn column(self) -> &'static str {
         match self {
-            ListField::Tags => "tags",
-            ListField::EntryPoints => "entry_points",
-            ListField::Related => "related",
+            Self::Tags => "tags",
+            Self::EntryPoints => "entry_points",
+            Self::Related => "related",
         }
     }
 }
@@ -266,7 +266,7 @@ impl<'a> ScriptView<'a> {
     }
 
     /// Parse the `vc_warnings` column into the list of warning objects.
-    fn vc_warnings(&self) -> Vec<Value> {
+    fn vc_warnings(self) -> Vec<Value> {
         match serde_json::from_str::<Value>(row_str(self.row, "vc_warnings")) {
             Ok(Value::Array(warnings)) => warnings,
             _ => Vec::new(),

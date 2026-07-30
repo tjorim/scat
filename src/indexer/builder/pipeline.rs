@@ -37,7 +37,10 @@ thread_local! {
     );
 }
 
-#[allow(clippy::too_many_arguments)]
+// rusqlite's `FromSql` isn't implemented for `usize` (its width is
+// platform-dependent), so counts must be read as `i64` and cast, not read
+// directly as `usize`.
+#[allow(clippy::too_many_arguments, clippy::needless_type_cast)]
 pub(super) fn populate(
     conn: &mut Connection,
     scan_roots: &[PathBuf],
@@ -168,7 +171,6 @@ pub(super) fn populate(
 
     // Track newly indexed paths for checkpointing.
     let mut newly_indexed: HashSet<String> = already_indexed;
-    let mut processed = Vec::new();
 
     // When resuming or building incrementally, `scripts` already has rows
     // from before this run started, so seed the display counters from it —
@@ -182,6 +184,9 @@ pub(super) fn populate(
             let mut rows = stmt.query([])?;
             while let Some(row) = rows.next()? {
                 let lang: String = row.get(0)?;
+                // rusqlite's `FromSql` isn't implemented for `usize` (its
+                // width is platform-dependent), so this must read as `i64`
+                // and cast, not read directly as `usize`.
                 let count: i64 = row.get(1)?;
                 match lang.as_str() {
                     "python" => py_count = count as usize,
@@ -235,7 +240,7 @@ pub(super) fn populate(
 
             let outcome = extraction.and_then(|row| insert_extracted_row(&tx, &row, &build_ts));
             match outcome {
-                Ok((ps, dep_count)) => {
+                Ok((_ps, dep_count)) => {
                     result.scripts_indexed += 1;
                     result.dependencies_indexed += dep_count;
                     newly_indexed.insert(record.physical_path.clone());
@@ -244,7 +249,6 @@ pub(super) fn populate(
                         "shell" => shell_count += 1,
                         _ => {}
                     }
-                    processed.push(ps);
                 }
                 Err(e) => {
                     result
@@ -534,7 +538,12 @@ fn seed_from_existing_database(
             continue;
         };
         let size_matches = prev.size == record.size as i64;
-        if size_matches && prev.mtime == record.mtime {
+        // Exact equality is intentional: this detects whether the mtime read
+        // from disk differs from the value last persisted, not whether two
+        // independently computed floats are numerically close.
+        #[allow(clippy::float_cmp)]
+        let mtime_matches = prev.mtime == record.mtime;
+        if size_matches && mtime_matches {
             already_indexed.insert(record.physical_path.clone());
             continue;
         }

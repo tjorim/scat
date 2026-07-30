@@ -41,9 +41,7 @@ fn revision_row(os_flavor: &str, user: &str, timestamp: &str, age_seconds: Optio
     row.insert("timestamp".to_string(), timestamp.into());
     row.insert(
         "age_seconds".to_string(),
-        age_seconds
-            .map(serde_json::Value::from)
-            .unwrap_or(serde_json::Value::Null),
+        age_seconds.map_or(serde_json::Value::Null, serde_json::Value::from),
     );
     row
 }
