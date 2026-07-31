@@ -10,8 +10,12 @@ use std::io::{self, Write};
 /// Copy `text` to the system clipboard using OSC 52.
 ///
 /// Writes `ESC ] 52 ; c ; <base64> BEL` to stdout (the same stream ratatui
-/// draws to). The sequence renders nothing, so it interleaves harmlessly
-/// between frames.
+/// draws to). Compliant terminals swallow the sequence invisibly, but some
+/// respond with a visible permission prompt or don't parse it cleanly — and
+/// because this bypasses ratatui's `Terminal` entirely, ratatui has no way
+/// to know the physical screen may have moved. Callers must set
+/// `TuiApp::force_full_redraw` afterward so the run loop clears and fully
+/// repaints on the next frame to correct for that.
 pub(super) fn copy_to_clipboard(text: &str) -> io::Result<()> {
     let sequence = format!("\x1b]52;c;{}\x07", base64_encode(text.as_bytes()));
     let mut stdout = io::stdout();

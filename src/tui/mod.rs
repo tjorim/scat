@@ -205,6 +205,14 @@ struct TuiApp {
     /// redrawn every poll tick — a constant repaint wipes the terminal's
     /// own mouse text selection.
     needs_redraw: bool,
+    /// Set after a clipboard write: the OSC 52 escape sequence goes straight
+    /// to stdout, bypassing ratatui's `Terminal` (see `clipboard.rs`). Some
+    /// terminals respond to it with a visible permission prompt, or don't
+    /// swallow it cleanly, which can desync the physical screen from
+    /// ratatui's diffed idea of what's on it (seen as the whole TUI shifting
+    /// by a line). The run loop clears and fully repaints on the next frame
+    /// to self-correct regardless of the exact terminal quirk.
+    force_full_redraw: bool,
     /// Clickable panes recorded during the last render, for mouse hit-testing.
     click_regions: Vec<ClickRegion>,
     /// Position and time of the last left-click, for double-click detection.
@@ -275,6 +283,12 @@ pub fn run(db_path: &Path, resolver: PathResolver) -> Result<()> {
             app.needs_redraw = true;
         }
 
+        if app.force_full_redraw {
+            terminal.force_full_redraw()?;
+            app.force_full_redraw = false;
+            app.needs_redraw = true;
+        }
+
         if app.needs_redraw {
             terminal.draw(|frame| draw(frame, &mut app))?;
             app.needs_redraw = false;
@@ -325,6 +339,13 @@ impl TerminalGuard {
         F: FnOnce(&mut Frame<'_>),
     {
         self.terminal.draw(f)
+    }
+
+    /// Physically clear the screen and discard ratatui's diffed idea of
+    /// what's currently on it, so the next `draw` unconditionally rewrites
+    /// every cell instead of trusting a possibly-stale diff.
+    fn force_full_redraw(&mut self) -> io::Result<()> {
+        self.terminal.clear()
     }
 
     fn open_view(&mut self, target: &viewer::ViewTarget) -> Result<()> {
