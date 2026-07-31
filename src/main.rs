@@ -87,8 +87,9 @@ fn run(cli: Cli) -> Result<()> {
     // puts SQLite's locking on NFS for the whole life of the process. The
     // cache degrades to `db_path` itself whenever it can't be used, so this
     // is always a valid path to open (see `core::cache`).
+    let no_cache_env = std::env::var_os("SCAT_NO_CACHE");
     let cache_options = CacheOptions {
-        enabled: !cli.no_cache,
+        enabled: !cli::resolve_no_cache(cli.no_cache, no_cache_env.as_deref()),
         root: cli.cache_dir.clone().or(scat_config.cache_dir.clone()),
     };
 
