@@ -191,6 +191,42 @@ fn scan_checkouts_handles_seconds_and_userless_archive_names() {
 }
 
 #[test]
+fn scan_checkouts_skips_nested_double_timestamped_names() {
+    // A genuine vc revision carries exactly one timestamp suffix (see
+    // docs/VC_CONTRACT.md). A filename with two timestamp-shaped segments
+    // (e.g. left behind by some out-of-band copy/rename) is not a real
+    // single-hop revision: parsing it would fold the earlier segment into a
+    // fabricated "ownership_check.sh_20160323_100200" script identity that
+    // can never correspond to a real active script, generating a spurious
+    // checkout_without_catalog_entry warning. Such files must be skipped
+    // rather than turned into a revision record, while normal single-hop
+    // siblings of the same script are still picked up.
+    let dir = tempfile::TempDir::new().unwrap();
+    let scan_root = dir.path().join("linux").join("scripts");
+    let archive = scan_root.join("ARCHIVE");
+    std::fs::create_dir_all(&archive).unwrap();
+
+    touch_checkout(&archive, "ownership_check.sh_20160323_100200");
+    touch_checkout(
+        &archive,
+        "ownership_check.sh_20160323_100200_20170815_090000",
+    );
+
+    let config = make_config(&scan_root);
+    let records = scan_checkouts(&config, "/catalog/linux/scripts");
+
+    assert_eq!(
+        records.len(),
+        1,
+        "the nested double-timestamped file must not produce its own record"
+    );
+    assert_eq!(
+        records[0].logical_path,
+        "/catalog/linux/scripts/ownership_check.sh"
+    );
+}
+
+#[test]
 fn scan_checkouts_returns_empty_when_no_scan_roots() {
     let config = VcConfig::default();
     let records = scan_checkouts(&config, "/catalog/linux/scripts");

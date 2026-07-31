@@ -302,6 +302,23 @@ pub fn parse_checkout_filename(filename: &str) -> Option<(String, String, String
     ))
 }
 
+/// Whether `script` — the script-name portion already stripped of one
+/// timestamp suffix by [`parse_checkout_filename`] — is itself
+/// checkout-shaped (`<name>_<timestamp>[_<user>]`).
+///
+/// A genuine vc revision carries exactly one timestamp suffix: DEVELOP
+/// filenames are `<script>_<timestamp>_<user>` and ARCHIVE/working-directory
+/// filenames are `<script>_<timestamp>` (see docs/VC_CONTRACT.md). A
+/// filename with two timestamp-shaped segments (e.g.
+/// `job.sh_20160323_100200_20170815_090000`) doesn't fit that shape, and the
+/// regex's rightmost match would otherwise fold the earlier segment into a
+/// fabricated "script" identity that can never correspond to a real active
+/// script. Such files are treated as not a genuine single-hop revision
+/// rather than trusted to mint a new orphan logical path.
+pub(crate) fn is_nested_checkout_name(script: &str) -> bool {
+    parse_checkout_filename(script).is_some()
+}
+
 /// Scan DEVELOP and ARCHIVE directories embedded within each scan_root and return
 /// discovered revision records. Every script folder carries its own
 /// DEVELOP/ARCHIVE containers, at any nesting depth, so the walk recurses the
@@ -454,6 +471,9 @@ fn scan_revision_dir(
             Some(p) => p,
             None => continue,
         };
+        if is_nested_checkout_name(&script_name) {
+            continue;
+        }
 
         // Relative path of the file's parent within the DEVELOP/ARCHIVE dir
         // (e.g. "" for direct children, "subdir" for nested files).
@@ -776,6 +796,24 @@ mod tests {
         );
         let r = parse_checkout_filename("foo.sh_20240921_titd");
         assert_eq!(r, Some(("foo.sh".into(), "20240921".into(), "titd".into())));
+    }
+
+    #[test]
+    fn is_nested_checkout_name_true_for_double_timestamped_script() {
+        // The regex's rightmost match on a doubly-timestamped filename folds
+        // the earlier timestamp into "script" — that extracted name is
+        // itself checkout-shaped, which is the signal this helper checks for.
+        let r =
+            parse_checkout_filename("ownership_check.sh_20160323_100200_20170815_090000").unwrap();
+        assert_eq!(r.0, "ownership_check.sh_20160323_100200");
+        assert!(is_nested_checkout_name(&r.0));
+    }
+
+    #[test]
+    fn is_nested_checkout_name_false_for_ordinary_script() {
+        let r = parse_checkout_filename("update_board_firmware.sh_20240921_135312").unwrap();
+        assert_eq!(r.0, "update_board_firmware.sh");
+        assert!(!is_nested_checkout_name(&r.0));
     }
 
     #[test]

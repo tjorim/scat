@@ -7,7 +7,9 @@ use rayon::prelude::*;
 use regex::Regex;
 use tracing::{debug, warn};
 
-use crate::core::vc::{CheckoutRecord, REVISION_TYPE_WORKING, parse_checkout_filename};
+use crate::core::vc::{
+    CheckoutRecord, REVISION_TYPE_WORKING, is_nested_checkout_name, parse_checkout_filename,
+};
 use crate::error::{Error, Result};
 use crate::indexer::scan_tree::ScanTreeView;
 
@@ -261,6 +263,7 @@ fn process_candidate(
     // their own right.
     if let Some(filename) = filepath.file_name().and_then(|n| n.to_str())
         && let Some((script_name, timestamp, user)) = parse_checkout_filename(filename)
+        && !is_nested_checkout_name(&script_name)
     {
         let script_ext = Path::new(&script_name)
             .extension()
@@ -1026,6 +1029,39 @@ mod tests {
                 "/catalog/scripts/prepare_release",
                 "/catalog/scripts/release_backup.sh"
             ]
+        );
+    }
+
+    #[test]
+    fn nested_double_timestamped_name_is_not_recorded_as_a_working_revision() {
+        // A genuine vc-managed checked-in copy carries exactly one timestamp
+        // suffix (see docs/VC_CONTRACT.md). A filename with two
+        // timestamp-shaped segments doesn't fit that shape: treating it as a
+        // WORKING revision would fold the earlier segment into a fabricated
+        // "bar.py_20240101_090000" script identity that can never
+        // correspond to a real active script.
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("bar.py_20240101_090000_20250101_090000"),
+            "#!/usr/bin/env python3\n",
+        )
+        .unwrap();
+
+        let shutdown = AtomicBool::new(false);
+        let result = scan_paths_with_revisions(
+            &[dir.path().to_path_buf()],
+            "/catalog/scripts",
+            5,
+            &[],
+            &[],
+            None,
+            &shutdown,
+        )
+        .unwrap();
+
+        assert!(
+            result.revisions.is_empty(),
+            "nested double-timestamped name must not be recorded as a revision"
         );
     }
 
