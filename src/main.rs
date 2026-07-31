@@ -3,6 +3,7 @@ use std::process;
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use scat_core::core::cache::{CacheOptions, catalog_read_path};
 use scat_core::core::resolve::PathResolver;
 use scat_core::core::search::open_search_api;
 use scat_core::core::vc::load_vc_config;
@@ -81,6 +82,17 @@ fn run(cli: Cli) -> Result<()> {
         anyhow::bail!(no_db_hint);
     };
 
+    // Every read-only consumer below goes through the host-local cache: the
+    // published catalog lives on a network share, and reading it in place
+    // puts SQLite's locking on NFS for the whole life of the process. The
+    // cache degrades to `db_path` itself whenever it can't be used, so this
+    // is always a valid path to open (see `core::cache`).
+    let no_cache_env = std::env::var_os("SCAT_NO_CACHE");
+    let cache_options = CacheOptions {
+        enabled: !cli::resolve_no_cache(cli.no_cache, no_cache_env.as_deref()),
+        root: cli.cache_dir.clone().or(scat_config.cache_dir.clone()),
+    };
+
     match cli.command {
         Commands::Tui { mapping } => {
             let resolver = match mapping.as_deref() {
@@ -88,15 +100,16 @@ fn run(cli: Cli) -> Result<()> {
                     .with_context(|| format!("Failed to load mapping file: {}", path.display()))?,
                 None => PathResolver::new(),
             };
-            return tui::run(db_path, resolver);
+            return tui::run(&catalog_read_path(db_path, &cache_options), resolver);
         }
         Commands::Catalog { command } => {
-            return cmd_catalog(command, db_path, no_color, scat_config);
+            return cmd_catalog(command, db_path, &cache_options, no_color, scat_config);
         }
         _ => {}
     }
 
-    let api = open_search_api(db_path)
+    let read_path = catalog_read_path(db_path, &cache_options);
+    let api = open_search_api(&read_path)
         .with_context(|| format!("Failed to open database: {}", db_path.display()))?;
 
     match cli.command {
@@ -183,15 +196,18 @@ fn run(cli: Cli) -> Result<()> {
     }
 }
 
+/// `db_path` here is always the *published* catalog. `build` writes it, and
+/// `diff` addresses the rotated `.1`/`.2` copies sitting next to it; both
+/// need the real path rather than a host-local copy of the live file.
 fn cmd_catalog(
     command: CatalogCommands,
     db_path: &std::path::Path,
+    cache_options: &CacheOptions,
     no_color: bool,
     config: scat_core::core::vc::VcConfig,
 ) -> Result<()> {
     if let CatalogCommands::Build {
         ref scan_root,
-        ref logical_prefix,
         head_lines,
         ref ignore_file,
         keep_copies,
@@ -207,7 +223,6 @@ fn cmd_catalog(
         return cmd_index(
             scan_root,
             db_path,
-            logical_prefix,
             head_lines,
             ignore_file,
             keep_copies,
@@ -232,12 +247,13 @@ fn cmd_catalog(
         return cmd_diff(db_path, against, old, new, json);
     }
 
-    let api = open_search_api(db_path)
+    let read_path = catalog_read_path(db_path, cache_options);
+    let api = open_search_api(&read_path)
         .with_context(|| format!("Failed to open database: {}", db_path.display()))?;
 
     match command {
         CatalogCommands::Stats { json } => cmd_stats(&api, json, no_color, config.configured()),
-        CatalogCommands::Info { json } => cmd_info(&api, json),
+        CatalogCommands::Info { json } => cmd_info(&api, db_path, &read_path, json),
         CatalogCommands::Audit {
             checks,
             strict,

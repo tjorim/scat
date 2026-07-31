@@ -97,48 +97,32 @@ fn viewer_commands() -> Result<Vec<ViewerCommand>> {
 }
 
 fn default_viewer_commands() -> Vec<ViewerCommand> {
-    if cfg!(windows) {
-        vec![ViewerCommand {
-            program: "notepad".to_string(),
+    vec![
+        ViewerCommand {
+            program: "view".to_string(),
             args: Vec::new(),
             fallback: true,
-        }]
-    } else {
-        vec![
-            ViewerCommand {
-                program: "view".to_string(),
-                args: Vec::new(),
-                fallback: true,
-            },
-            ViewerCommand {
-                program: "vim".to_string(),
-                args: vec!["-R".to_string()],
-                fallback: true,
-            },
-            ViewerCommand {
-                program: "vi".to_string(),
-                args: vec!["-R".to_string()],
-                fallback: true,
-            },
-            ViewerCommand {
-                program: "less".to_string(),
-                args: Vec::new(),
-                fallback: true,
-            },
-        ]
-    }
+        },
+        ViewerCommand {
+            program: "vim".to_string(),
+            args: vec!["-R".to_string()],
+            fallback: true,
+        },
+        ViewerCommand {
+            program: "vi".to_string(),
+            args: vec!["-R".to_string()],
+            fallback: true,
+        },
+        ViewerCommand {
+            program: "less".to_string(),
+            args: Vec::new(),
+            fallback: true,
+        },
+    ]
 }
 
 fn parse_viewer_command(value: &str, fallback: bool) -> Result<ViewerCommand> {
-    // On Windows an unquoted program path like `C:\Tools\vim.exe` would have its
-    // backslashes consumed as shell escapes by `shell_words::split`, corrupting
-    // the path (`C:Toolsvim.exe`). Fall back to whitespace splitting there when
-    // the value carries no quoting that would need shell-aware parsing.
-    let parts: Vec<String> = if cfg!(windows) && !value.contains('"') && !value.contains('\'') {
-        value.split_whitespace().map(String::from).collect()
-    } else {
-        shell_words::split(value).map_err(|err| anyhow!(err))?
-    };
+    let parts: Vec<String> = shell_words::split(value).map_err(|err| anyhow!(err))?;
     let Some((program, args)) = parts.split_first() else {
         bail!("viewer command is empty");
     };
@@ -186,16 +170,23 @@ fn has_vim_readonly_arg(args: &[String]) -> bool {
         .any(|arg| matches!(arg.as_str(), "-R" | "-M" | "-m" | "-Z" | "-y"))
 }
 
+/// Derive a temp-file name for a logical path, preserving the script's own
+/// filename (and so its extension, for the viewer's syntax highlighting).
+///
+/// Only `/` and control characters are rewritten: those are the only
+/// characters that can't appear in a Linux filename, and rewriting them is
+/// what keeps the name from escaping the temp directory. Characters that are
+/// merely illegal on Windows (`:*?"<>|`) are left alone — a script really
+/// named `report:daily.py` opens under its own name.
 fn safe_view_filename(logical_path: &str) -> String {
     let raw_name = logical_path
-        .rsplit(['/', '\\'])
+        .rsplit('/')
         .find(|part| !part.is_empty())
         .unwrap_or("script");
     let mut name = raw_name
         .chars()
         .map(|ch| {
-            if ch.is_control() || matches!(ch, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
-            {
+            if ch.is_control() || ch == '/' {
                 '_'
             } else {
                 ch
@@ -222,14 +213,6 @@ mod tests {
         let command = parse_viewer_command("vim -R '+set number'", false).unwrap();
         assert_eq!(command.program, "vim");
         assert_eq!(command.args, vec!["-R", "+set number"]);
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn parse_viewer_command_preserves_unquoted_windows_path() {
-        let command = parse_viewer_command(r"C:\Tools\vim.exe -R", false).unwrap();
-        assert_eq!(command.program, r"C:\Tools\vim.exe");
-        assert_eq!(command.args, vec!["-R"]);
     }
 
     #[test]
@@ -260,9 +243,17 @@ mod tests {
 
     #[test]
     fn safe_view_filename_keeps_extension_and_sanitizes_name() {
+        // `:` is a perfectly good Linux filename character; keep it rather
+        // than mangling the name to satisfy a platform scat no longer targets.
         assert_eq!(
-            safe_view_filename("/catalog/scripts/bad:name.py"),
-            "bad_name.py"
+            safe_view_filename("/catalog/scripts/odd:name.py"),
+            "odd:name.py"
+        );
+        // Control characters still go — they are what could make the name
+        // unusable, or escape the temp directory.
+        assert_eq!(
+            safe_view_filename("/catalog/scripts/we\u{7}ird.py"),
+            "we_ird.py"
         );
         assert_eq!(safe_view_filename("/catalog/scripts/"), "scripts");
     }

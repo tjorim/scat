@@ -72,6 +72,7 @@ impl Default for VcConfigSection {
 #[derive(Debug, Deserialize, Default)]
 struct VcConfigFile {
     db_path: Option<String>,
+    cache_dir: Option<String>,
     scan_roots: Option<Vec<String>>,
     ignore_patterns: Option<Vec<String>>,
     vc: Option<VcConfigSection>,
@@ -92,6 +93,9 @@ pub const DEFAULT_ARCHIVE_DIRS: &[&str] = &["ARCHIVE"];
 pub struct VcConfig {
     /// Path to the catalog SQLite database.
     pub db_path: Option<PathBuf>,
+    /// Directory holding the host-local catalog cache. Falls back to
+    /// [`crate::core::cache::DEFAULT_CACHE_ROOT`] when unset.
+    pub cache_dir: Option<PathBuf>,
     /// Root directories to scan recursively when building the catalog.
     pub scan_roots: Vec<PathBuf>,
     /// Gitignore-style patterns applied during catalog scanning.
@@ -110,6 +114,7 @@ impl Default for VcConfig {
     fn default() -> Self {
         Self {
             db_path: None,
+            cache_dir: None,
             scan_roots: Vec::new(),
             ignore_patterns: Vec::new(),
             vc_executable: None,
@@ -252,6 +257,7 @@ pub fn load_vc_config(config_file: Option<&Path>) -> Result<VcConfig> {
     };
 
     let db_path = file_data.db_path.map(PathBuf::from);
+    let cache_dir = file_data.cache_dir.map(PathBuf::from);
     let scan_roots = match std::env::var("SCAT_SCAN_ROOTS").ok() {
         Some(s) => s
             .split(',')
@@ -270,6 +276,7 @@ pub fn load_vc_config(config_file: Option<&Path>) -> Result<VcConfig> {
 
     Ok(VcConfig {
         db_path,
+        cache_dir,
         scan_roots,
         ignore_patterns,
         vc_executable: vc.executable.map(PathBuf::from),
@@ -328,7 +335,7 @@ pub(crate) fn is_nested_checkout_name(script: &str) -> bool {
 /// outside all scan_roots are not followed.
 /// The `os_flavor` for each record is derived from the parent directory name of the
 /// scan_root (e.g. `linux` from `/catalog/linux/scripts`).
-pub fn scan_checkouts(config: &VcConfig, logical_prefix: &str) -> Vec<CheckoutRecord> {
+pub fn scan_checkouts(config: &VcConfig) -> Vec<CheckoutRecord> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -403,7 +410,6 @@ pub fn scan_checkouts(config: &VcConfig, logical_prefix: &str) -> Vec<CheckoutRe
                         rev_type,
                         &os_flavor,
                         scan_root,
-                        logical_prefix,
                         now,
                         &mut records,
                         &mut seen,
@@ -426,13 +432,11 @@ pub fn scan_checkouts(config: &VcConfig, logical_prefix: &str) -> Vec<CheckoutRe
     records
 }
 
-#[allow(clippy::too_many_arguments)]
 fn scan_revision_dir(
     dir: &Path,
     revision_type: &str,
     os_flavor: &str,
     scan_root: &Path,
-    logical_prefix: &str,
     now: f64,
     records: &mut Vec<CheckoutRecord>,
     seen: &mut std::collections::HashSet<PathBuf>,
@@ -447,7 +451,7 @@ fn scan_revision_dir(
     let container = dir.parent().unwrap_or(scan_root);
     let rel_container = container
         .strip_prefix(scan_root)
-        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_default();
 
     // Don't follow symlinks within the DEVELOP/ARCHIVE dir — circular links
@@ -480,23 +484,23 @@ fn scan_revision_dir(
         let rel_in_dir = path
             .parent()
             .and_then(|p| p.strip_prefix(dir).ok())
-            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default();
 
-        // Combine non-empty path segments: prefix / rel_container / rel_in_dir / script_name
+        // Combine non-empty path segments: scan_root / rel_container / rel_in_dir / script_name.
+        // Anchoring at scan_root's own absolute path (rather than at `/`)
+        // mirrors `scanner::make_logical_path`, so a DEVELOP/ARCHIVE
+        // revision's logical_path lines up with the active script's (built
+        // the same way) and the two join in the catalog.
         let sub_parts: Vec<&str> = [rel_container.as_str(), rel_in_dir.as_str(), &script_name]
             .into_iter()
             .filter(|s| !s.is_empty() && *s != ".")
             .collect();
-        let logical = if logical_prefix.is_empty() {
-            format!("/{}", sub_parts.join("/"))
-        } else {
-            format!(
-                "{}/{}",
-                logical_prefix.trim_end_matches('/'),
-                sub_parts.join("/")
-            )
-        };
+        let logical = format!(
+            "{}/{}",
+            scan_root.to_string_lossy().trim_end_matches('/'),
+            sub_parts.join("/")
+        );
 
         let age_seconds = path
             .metadata()

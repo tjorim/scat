@@ -44,7 +44,6 @@ thread_local! {
 pub(super) fn populate(
     conn: &mut Connection,
     scan_roots: &[PathBuf],
-    logical_prefix: &str,
     head_lines: usize,
     ignore_files: &[PathBuf],
     result: &mut IndexResult,
@@ -86,7 +85,6 @@ pub(super) fn populate(
     let checkout_dirs: Vec<&str> = vc_config.all_checkout_dirs().collect();
     let scan_result = scan_paths_with_revisions_and_tree(
         scan_roots,
-        logical_prefix,
         head_lines,
         ignore_files,
         &checkout_dirs,
@@ -312,7 +310,7 @@ pub(super) fn populate(
 
     set_finalize_msg("Recording checkouts…");
     debug!(phase = "scan_checkouts", "starting scan_checkouts phase");
-    let checkouts = scan_checkouts(vc_config, logical_prefix);
+    let checkouts = scan_checkouts(vc_config);
     debug!(
         phase = "scan_checkouts",
         checkout_count = checkouts.len(),

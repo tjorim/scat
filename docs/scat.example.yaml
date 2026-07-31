@@ -10,8 +10,16 @@
 # (.yml/.yaml -> YAML, anything else -> JSON). All fields are optional —
 # omit anything you don't need.
 
-# Path to the catalog SQLite database. Overridden by --db / SCAT_DB.
+# Path to the catalog SQLite database, as published on the shared drive.
+# Overridden by --db / SCAT_DB.
 db_path: /catalog/scat/scripts.sqlite
+
+# Where each host keeps its local copy of the published catalog. Every
+# read-only command copies the catalog here once per rebuild and queries
+# the copy, so the shared drive is never in the query hot path. Defaults to
+# /dev/shm (tmpfs, RAM-backed); overridden by --cache-dir / SCAT_CACHE_DIR.
+# Pass --no-cache (or SCAT_NO_CACHE=1) to read the shared drive directly.
+# cache_dir: /dev/shm
 
 # Root directories scanned recursively by `scat catalog build` when
 # --scan-root is not passed on the command line. Each root's *parent*
