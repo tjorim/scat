@@ -475,15 +475,18 @@ fn scan_revision_dir(
             .into_iter()
             .filter(|s| !s.is_empty() && *s != ".")
             .collect();
-        let logical = if logical_prefix.is_empty() {
-            format!("/{}", sub_parts.join("/"))
+        // Mirrors `scanner::make_logical_path`'s fallback: with no configured
+        // logical_prefix, the logical path is anchored at the scan_root's own
+        // absolute path rather than at `/`, so a DEVELOP/ARCHIVE revision's
+        // logical_path lines up with the active script's (which the main
+        // scanner builds the same way) and the two join in the catalog
+        // instead of silently never matching.
+        let prefix = if logical_prefix.is_empty() {
+            scan_root.to_string_lossy().into_owned()
         } else {
-            format!(
-                "{}/{}",
-                logical_prefix.trim_end_matches('/'),
-                sub_parts.join("/")
-            )
+            logical_prefix.to_string()
         };
+        let logical = format!("{}/{}", prefix.trim_end_matches('/'), sub_parts.join("/"));
 
         let age_seconds = path
             .metadata()

@@ -231,6 +231,38 @@ fn scan_checkouts_logical_prefix_in_path() {
     );
 }
 
+#[test]
+fn scan_checkouts_empty_logical_prefix_anchors_at_scan_root() {
+    // With no --logical-prefix configured (the default), the active script's
+    // logical_path is its absolute filesystem path (see
+    // scanner::make_logical_path's empty-prefix fallback). scan_checkouts
+    // must build the same logical_path for a DEVELOP/ARCHIVE revision of
+    // that script, or the revision never joins to the script row in the
+    // catalog and silently disappears from `show`/`search`/`status`.
+    let dir = tempfile::TempDir::new().unwrap();
+    let scan_root = dir.path().join("linux").join("scripts");
+    let develop = scan_root.join("DEVELOP");
+    let archive = scan_root.join("ARCHIVE");
+    std::fs::create_dir_all(&develop).unwrap();
+    std::fs::create_dir_all(&archive).unwrap();
+
+    touch_checkout(&develop, "source_scan.sh_20260729_150613_userA");
+    touch_checkout(&archive, "source_scan.sh_20220207_150200");
+
+    let config = make_config(&scan_root);
+    let records = scan_checkouts(&config, "");
+
+    assert_eq!(records.len(), 2);
+    let expected = format!("{}/source_scan.sh", scan_root.display());
+    for record in &records {
+        assert_eq!(
+            record.logical_path, expected,
+            "empty logical_prefix must anchor at the scan_root's absolute path, \
+             matching the active script's own logical_path"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // scan_checkouts – ARCHIVE tree
 // ---------------------------------------------------------------------------
