@@ -43,17 +43,20 @@ Concretely this means:
 
 Every client that consumes `scripts.sqlite` **must open it read-only**.
 
-Use SQLite URI mode with `mode=ro`.
+Open it with the `SQLITE_OPEN_READ_ONLY` flag (`core::db::open_db`), not by
+building a `file:…?mode=ro` URI. The two enforce identically, but the flag
+takes a path rather than a string, so a catalog path containing `?` or `#`
+can't be silently misparsed — and those paths come from user config.
 
 Benefits:
 - Prevents accidental schema or data mutations from client code.
 - Allows the file to be placed on a read-only network share.
 - Makes it safe to open the same database from multiple processes simultaneously.
 
-**Rule:** any read-only command that opens the database must use `mode=ro`.
-The `index` command is the sole exception — it opens the database read-write
-during the build step and then closes it before the file is made available to
-clients.
+**Rule:** any read-only command that opens the database must pass
+`SQLITE_OPEN_READ_ONLY`. The `index` command is the sole exception — it opens
+the database read-write during the build step and then closes it before the
+file is made available to clients.
 
 ---
 
@@ -79,6 +82,29 @@ Rationale:
 Writers and anything addressing files *beside* the catalog (`catalog build`,
 `catalog diff` and its rotated `.1`/`.2` copies) keep using the published
 path.
+
+### The WIP build file is on the share too
+
+The atomic swap is a `rename(2)`, which cannot cross filesystems, so the
+indexer's work-in-progress database is created beside the published catalog
+— on the share — and built there in WAL mode. That is the one remaining
+writer on a network filesystem, and it would need the `-shm` that the
+filesystem may not support.
+
+`core::db::create_build_db` sets `locking_mode = EXCLUSIVE` **before**
+entering WAL, which makes SQLite hold the WAL index in heap memory and never
+create a `-shm` at all. The exclusivity is sound precisely where it would not
+be for a shared database: the WIP file has one writer, no readers, and ends
+up either swapped into place or discarded.
+
+Ordering is the whole trick — the pragma has no effect once a connection has
+made its first WAL-mode access, which is why `create_build_db` sets it before
+the `journal_mode` switch and `apply_bulk_build_pragmas` sets it before
+anything else on a resumed build's reopened connection.
+
+**Rule:** `create_db` stays in normal locking mode. Only the indexer's own
+WIP connections are exclusive; a general caller holding a write connection
+must still be able to open the same file again.
 
 ---
 

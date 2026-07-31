@@ -7,7 +7,7 @@ use rusqlite::Connection;
 use tempfile::NamedTempFile;
 use tracing::{debug, warn};
 
-use crate::core::db::create_db;
+use crate::core::db::create_build_db;
 use crate::core::vc::{VcConfig, load_vc_config};
 use crate::error::{Error, Result};
 use crate::indexer::atomic::{atomic_swap, rotate_copies};
@@ -245,11 +245,11 @@ pub fn build_index(
                         error = %e,
                         "failed to seed incremental build from previous database, falling back to a full rebuild"
                     );
-                    (create_db(&tmp_path)?, false)
+                    (create_build_db(&tmp_path)?, false)
                 }
             }
         } else {
-            (create_db(&tmp_path)?, false)
+            (create_build_db(&tmp_path)?, false)
         };
         // Relax durability and grow caches for this throwaway build
         // connection — see `apply_bulk_build_pragmas` doc comment. Applied
@@ -407,6 +407,9 @@ fn stderr_is_tty() -> bool {
 fn seed_from_previous_build(db_path: &Path, tmp_path: &Path) -> Result<Connection> {
     let src = Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let mut dst = Connection::open(tmp_path)?;
+    // Before the WAL switch below, for the same reason `create_db` does it
+    // first — see `apply_exclusive_wal_locking`.
+    crate::core::db::apply_exclusive_wal_locking(&dst)?;
     {
         let backup = rusqlite::backup::Backup::new(&src, &mut dst)?;
         backup.step(-1)?;

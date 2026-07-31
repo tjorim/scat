@@ -317,18 +317,41 @@ pub fn open_db(path: &Path) -> Result<Connection> {
 /// Create (or open) a writable database at `path` and apply the schema.
 ///
 /// The database is created in WAL mode, which suits the only thing that ever
-/// writes one: the indexer's insert-heavy build into a local WIP file. It is
+/// writes one: the indexer's insert-heavy build into a WIP file. It is
 /// *not* the mode the catalog is published in — WAL needs an `mmap`-able
 /// `-shm` file even for read-only connections, which a network share
 /// generally can't provide — so `indexer::builder` switches the finished
 /// build back to a rollback journal before swapping it into place.
+///
+/// The connection is left in SQLite's default (normal) locking mode, so
+/// other connections can still open the database while this one lives. The
+/// indexer wants the opposite for its WIP file and uses
+/// [`create_build_db`] instead.
 pub fn create_db(path: &Path) -> Result<Connection> {
+    create_db_inner(path, false)
+}
+
+/// Create a database for the indexer to build into.
+///
+/// Same as [`create_db`], but the connection takes an exclusive lock so WAL
+/// needs no shared memory — see [`apply_exclusive_wal_locking`] for why the
+/// WIP file needs that, and why exclusivity is safe for it specifically.
+pub fn create_build_db(path: &Path) -> Result<Connection> {
+    create_db_inner(path, true)
+}
+
+fn create_db_inner(path: &Path, exclusive: bool) -> Result<Connection> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
         std::fs::create_dir_all(parent)?;
     }
     let conn = Connection::open(path)?;
+    if exclusive {
+        // Strictly before the WAL switch below: entering WAL is itself the
+        // first WAL-mode access, and it is what would create the `-shm`.
+        apply_exclusive_wal_locking(&conn)?;
+    }
     // journal_mode = WAL returns a row; must be consumed, not execute_batch'd.
     let wal_mode: String = conn.query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))?;
     // `synchronous = NORMAL` is the recommended pairing with WAL: SQLite
@@ -388,6 +411,10 @@ pub fn schema_version_of(path: &Path) -> Option<i64> {
 /// one and one reopened to resume a checkpointed build), not just once at
 /// schema-creation time.
 pub fn apply_bulk_build_pragmas(conn: &Connection) -> Result<()> {
+    // First, before anything touches the database: a resumed build reopens a
+    // WIP file that is *already* in WAL mode, and the locking mode only
+    // avoids the `-shm` file if it is set before the first WAL-mode access.
+    apply_exclusive_wal_locking(conn)?;
     conn.execute_batch(
         "
         PRAGMA synchronous = OFF;
@@ -396,6 +423,32 @@ pub fn apply_bulk_build_pragmas(conn: &Connection) -> Result<()> {
         ",
     )?;
     conn.set_prepared_statement_cache_capacity(64);
+    Ok(())
+}
+
+/// Put a build connection into exclusive locking mode, so WAL needs no
+/// shared memory.
+///
+/// The indexer's WIP database has to sit next to the published catalog —
+/// the atomic swap is a `rename(2)`, which can't cross filesystems — so the
+/// one process that writes a catalog is running WAL on the network share.
+/// WAL normally coordinates through an `mmap`-able `-shm` file, which is
+/// exactly what network filesystems generally don't provide.
+///
+/// `locking_mode = EXCLUSIVE` removes the requirement rather than working
+/// around it: SQLite keeps the WAL index in heap memory and never creates a
+/// `-shm` at all. That is sound here precisely because it would not be for a
+/// shared database — the WIP file has exactly one writer and no readers, and
+/// is either swapped into place or discarded.
+///
+/// **Ordering matters.** This has to be set before the connection's first
+/// WAL-mode read or write; afterwards SQLite has already created the `-shm`
+/// and the pragma no longer helps.
+pub fn apply_exclusive_wal_locking(conn: &Connection) -> Result<()> {
+    // Returns the resulting mode as a row, like `journal_mode`, so it can't
+    // go through `execute_batch`.
+    let mode: String = conn.query_row("PRAGMA locking_mode = EXCLUSIVE", [], |r| r.get(0))?;
+    trace!(locking_mode = %mode, "set exclusive locking on build connection");
     Ok(())
 }
 
@@ -598,6 +651,86 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn build_connection_uses_wal_without_a_shared_memory_file() {
+        // The WIP database is built next to the published catalog — on the
+        // network share — because the atomic swap is a `rename(2)`. WAL there
+        // must therefore not depend on an `mmap`-able `-shm` file, which is
+        // the thing network filesystems generally can't provide.
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("wip.sqlite");
+        let conn = create_build_db(&path).unwrap();
+        apply_bulk_build_pragmas(&conn).unwrap();
+
+        // Write enough to force real WAL activity rather than an empty file.
+        for i in 0..500 {
+            conn.execute(
+                "INSERT INTO scripts (logical_path, language) VALUES (?, 'python')",
+                rusqlite::params![format!("/catalog/scripts/s{i}.py")],
+            )
+            .unwrap();
+        }
+
+        let journal: String = conn
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
+        let locking: String = conn
+            .query_row("PRAGMA locking_mode", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(journal.to_lowercase(), "wal", "WAL is the point of this");
+        assert_eq!(locking.to_lowercase(), "exclusive");
+
+        // The `-wal` is expected while the connection is open; the `-shm` is
+        // the one that must never appear.
+        assert!(
+            !path.with_extension("sqlite-shm").exists(),
+            "exclusive locking should keep the WAL index in heap memory"
+        );
+    }
+
+    #[test]
+    fn resumed_build_connection_also_avoids_a_shared_memory_file() {
+        // A resumed build reopens a WIP that is already in WAL mode, so the
+        // locking mode has to be set before the first access rather than
+        // inherited from whichever call created the file.
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("wip.sqlite");
+        drop(create_build_db(&path).unwrap());
+
+        let conn = Connection::open(&path).unwrap();
+        apply_bulk_build_pragmas(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO scripts (logical_path, language) VALUES ('/catalog/scripts/a.py', 'python')",
+            [],
+        )
+        .unwrap();
+
+        assert!(!path.with_extension("sqlite-shm").exists());
+    }
+
+    #[test]
+    fn plain_create_db_stays_shareable() {
+        // The exclusive lock belongs to the indexer's private WIP file, not
+        // to every database this crate creates: `create_db` is public API,
+        // and a caller holding a write connection must still be able to open
+        // the same file again (as `catalog diff` does across two catalogs).
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("shared.sqlite");
+        let writer = create_db(&path).unwrap();
+        writer
+            .execute(
+                "INSERT INTO scripts (logical_path, language) VALUES ('/catalog/scripts/a.py', 'python')",
+                [],
+            )
+            .unwrap();
+
+        let reader = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let count: i64 = reader
+            .query_row("SELECT COUNT(*) FROM scripts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+    }
 
     #[test]
     fn row_str_returns_empty_for_missing_null_and_non_string_values() {
