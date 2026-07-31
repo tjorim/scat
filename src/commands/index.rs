@@ -13,7 +13,6 @@ use crate::output::print_json;
 pub fn cmd_index(
     scan_roots: &[PathBuf],
     db_path: &Path,
-    logical_prefix: &str,
     head_lines: usize,
     ignore_files: &[PathBuf],
     keep_copies: usize,
@@ -94,7 +93,6 @@ pub fn cmd_index(
     }
 
     let opts = BuildOptions {
-        logical_prefix: logical_prefix.to_string(),
         head_lines,
         ignore_files: effective_ignore,
         keep_copies,

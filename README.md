@@ -223,7 +223,11 @@ key. See
 *   Built nightly by the indexer
 *   **Read‑only for all users**
 
-The database contains **logical paths** (e.g. `/catalog/scripts/...`) that are resolved to real filesystem paths at runtime.
+The database contains **logical paths**, which by default are simply the
+absolute filesystem path the indexer scanned each script from (e.g.
+`/shared/tools/security/foo.sh`). Clients whose local mount doesn't match the
+indexing host's layout can resolve them through an optional path-mapping
+file instead — see [docs/scat-mapping.example.yaml](docs/scat-mapping.example.yaml).
 
 ### Local catalog cache
 

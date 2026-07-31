@@ -118,7 +118,7 @@ fn scan_checkouts_finds_develop_at_scan_root_level() {
     std::fs::write(develop.join("README.txt"), b"ignored").unwrap();
 
     let config = make_config(&scan_root);
-    let records = scan_checkouts(&config, "/catalog/linux/scripts");
+    let records = scan_checkouts(&config);
 
     assert_eq!(
         records.len(),
@@ -126,8 +126,8 @@ fn scan_checkouts_finds_develop_at_scan_root_level() {
         "only checkout-named files should be found"
     );
     let paths: Vec<&str> = records.iter().map(|r| r.logical_path.as_str()).collect();
-    assert!(paths.contains(&"/catalog/linux/scripts/deploy"));
-    assert!(paths.contains(&"/catalog/linux/scripts/health"));
+    assert!(paths.contains(&scan_root.join("deploy").to_string_lossy().as_ref()));
+    assert!(paths.contains(&scan_root.join("health").to_string_lossy().as_ref()));
 }
 
 #[test]
@@ -140,7 +140,7 @@ fn scan_checkouts_records_user_timestamp_and_os_flavor() {
     touch_checkout(&develop, "script_20240315_1430_jdoe");
 
     let config = make_config(&scan_root);
-    let records = scan_checkouts(&config, "/catalog/linux/scripts");
+    let records = scan_checkouts(&config);
 
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].user, "jdoe");
@@ -166,15 +166,16 @@ fn scan_checkouts_handles_seconds_and_userless_archive_names() {
     touch_checkout(&archive, "update_board_firmware.sh_20240610");
 
     let config = make_config(&scan_root);
-    let mut records = scan_checkouts(&config, "/catalog/linux/scripts");
+    let mut records = scan_checkouts(&config);
     records.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
 
     assert_eq!(records.len(), 3);
+    let expected = scan_root
+        .join("update_board_firmware.sh")
+        .to_string_lossy()
+        .into_owned();
     for record in &records {
-        assert_eq!(
-            record.logical_path,
-            "/catalog/linux/scripts/update_board_firmware.sh"
-        );
+        assert_eq!(record.logical_path, expected);
     }
 
     assert_eq!(records[0].timestamp, "20240610");
@@ -193,7 +194,7 @@ fn scan_checkouts_handles_seconds_and_userless_archive_names() {
 #[test]
 fn scan_checkouts_returns_empty_when_no_scan_roots() {
     let config = VcConfig::default();
-    let records = scan_checkouts(&config, "/catalog/linux/scripts");
+    let records = scan_checkouts(&config);
     assert!(records.is_empty());
 }
 
@@ -205,40 +206,17 @@ fn scan_checkouts_returns_empty_when_no_develop_or_archive() {
     // No DEVELOP or ARCHIVE dirs
 
     let config = make_config(&scan_root);
-    let records = scan_checkouts(&config, "/catalog/linux/scripts");
+    let records = scan_checkouts(&config);
     assert!(records.is_empty());
 }
 
 #[test]
-fn scan_checkouts_logical_prefix_in_path() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let scan_root = dir.path().join("linux").join("scripts");
-    let develop = scan_root.join("DEVELOP");
-    std::fs::create_dir_all(&develop).unwrap();
-
-    touch_checkout(&develop, "tool_20240101_0900_bob");
-
-    let config = make_config(&scan_root);
-    let records = scan_checkouts(&config, "/catalog/linux/scripts");
-
-    assert_eq!(records.len(), 1);
-    assert!(
-        records[0]
-            .logical_path
-            .starts_with("/catalog/linux/scripts/"),
-        "logical_path should carry the prefix, got: {}",
-        records[0].logical_path
-    );
-}
-
-#[test]
-fn scan_checkouts_empty_logical_prefix_anchors_at_scan_root() {
-    // With no --logical-prefix configured (the default), the active script's
-    // logical_path is its absolute filesystem path (see
-    // scanner::make_logical_path's empty-prefix fallback). scan_checkouts
-    // must build the same logical_path for a DEVELOP/ARCHIVE revision of
-    // that script, or the revision never joins to the script row in the
-    // catalog and silently disappears from `show`/`search`/`status`.
+fn scan_checkouts_anchors_logical_path_at_scan_root() {
+    // Every host that runs the indexer scans the same scan_root, so a
+    // DEVELOP/ARCHIVE revision's logical_path is anchored at scan_root's own
+    // absolute path — matching the active script's logical_path (built the
+    // same way by the main scanner), so the two join in the catalog instead
+    // of the revision silently disappearing from `show`/`search`/`status`.
     let dir = tempfile::TempDir::new().unwrap();
     let scan_root = dir.path().join("linux").join("scripts");
     let develop = scan_root.join("DEVELOP");
@@ -250,16 +228,15 @@ fn scan_checkouts_empty_logical_prefix_anchors_at_scan_root() {
     touch_checkout(&archive, "source_scan.sh_20220207_150200");
 
     let config = make_config(&scan_root);
-    let records = scan_checkouts(&config, "");
+    let records = scan_checkouts(&config);
 
     assert_eq!(records.len(), 2);
-    let expected = format!("{}/source_scan.sh", scan_root.display());
+    let expected = scan_root
+        .join("source_scan.sh")
+        .to_string_lossy()
+        .into_owned();
     for record in &records {
-        assert_eq!(
-            record.logical_path, expected,
-            "empty logical_prefix must anchor at the scan_root's absolute path, \
-             matching the active script's own logical_path"
-        );
+        assert_eq!(record.logical_path, expected);
     }
 }
 
@@ -278,10 +255,13 @@ fn scan_checkouts_includes_archive_records() {
     touch_checkout(&archive, "tool.py_20240101_0900_bob");
 
     let config = make_config(&scan_root);
-    let records = scan_checkouts(&config, "/catalog/linux/scripts");
+    let records = scan_checkouts(&config);
 
     assert_eq!(records.len(), 1);
-    assert_eq!(records[0].logical_path, "/catalog/linux/scripts/tool.py");
+    assert_eq!(
+        records[0].logical_path,
+        scan_root.join("tool.py").to_string_lossy()
+    );
     assert_eq!(records[0].revision_type, REVISION_TYPE_ARCHIVE);
     assert_eq!(records[0].user, "bob");
 }
@@ -301,12 +281,12 @@ fn scan_checkouts_finds_develop_in_subfolder() {
     touch_checkout(&subdir_develop, "report_20240315_1430_jdoe");
 
     let config = make_config(&scan_root);
-    let records = scan_checkouts(&config, "/catalog/linux/scripts");
+    let records = scan_checkouts(&config);
 
     assert_eq!(records.len(), 1);
     assert_eq!(
         records[0].logical_path,
-        "/catalog/linux/scripts/group1/report"
+        scan_root.join("group1/report").to_string_lossy()
     );
     assert_eq!(records[0].revision_type, REVISION_TYPE_DEVELOP);
 }
@@ -321,12 +301,12 @@ fn scan_checkouts_finds_archive_in_subfolder() {
     touch_checkout(&subdir_archive, "report_20240101_1000_alice");
 
     let config = make_config(&scan_root);
-    let records = scan_checkouts(&config, "/catalog/linux/scripts");
+    let records = scan_checkouts(&config);
 
     assert_eq!(records.len(), 1);
     assert_eq!(
         records[0].logical_path,
-        "/catalog/linux/scripts/group1/report"
+        scan_root.join("group1/report").to_string_lossy()
     );
     assert_eq!(records[0].revision_type, REVISION_TYPE_ARCHIVE);
 }
@@ -344,12 +324,12 @@ fn scan_checkouts_mixed_root_and_subfolder() {
     touch_checkout(&sub_develop, "helper_20240315_1430_alice");
 
     let config = make_config(&scan_root);
-    let records = scan_checkouts(&config, "/catalog/linux/scripts");
+    let records = scan_checkouts(&config);
 
     assert_eq!(records.len(), 2);
     let paths: Vec<&str> = records.iter().map(|r| r.logical_path.as_str()).collect();
-    assert!(paths.contains(&"/catalog/linux/scripts/deploy"));
-    assert!(paths.contains(&"/catalog/linux/scripts/utils/helper"));
+    assert!(paths.contains(&scan_root.join("deploy").to_string_lossy().as_ref()));
+    assert!(paths.contains(&scan_root.join("utils/helper").to_string_lossy().as_ref()));
 }
 
 // ---------------------------------------------------------------------------
@@ -374,7 +354,7 @@ fn scan_checkouts_deduplicates_symlinked_scan_roots() {
         scan_roots: vec![linux_scripts, alt_scripts],
         ..Default::default()
     };
-    let records = scan_checkouts(&config, "/catalog/linux/scripts");
+    let records = scan_checkouts(&config);
 
     assert_eq!(
         records.len(),
@@ -405,19 +385,21 @@ fn scan_checkouts_finds_deeply_nested_develop_and_archive() {
     touch_checkout(&deep_archive, "old.py_20240101_1000");
 
     let config = make_config(&scan_root);
-    let mut records = scan_checkouts(&config, "/catalog/linux/scripts");
+    let mut records = scan_checkouts(&config);
     records.sort_by(|a, b| a.logical_path.cmp(&b.logical_path));
 
     assert_eq!(records.len(), 2);
     assert_eq!(
         records[0].logical_path,
-        "/catalog/linux/scripts/level1/level2/level3/old.py"
+        scan_root
+            .join("level1/level2/level3/old.py")
+            .to_string_lossy()
     );
     assert_eq!(records[0].revision_type, REVISION_TYPE_ARCHIVE);
     assert_eq!(records[0].user, "");
     assert_eq!(
         records[1].logical_path,
-        "/catalog/linux/scripts/level1/level2/tool.py"
+        scan_root.join("level1/level2/tool.py").to_string_lossy()
     );
     assert_eq!(records[1].revision_type, REVISION_TYPE_DEVELOP);
     assert_eq!(records[1].user, "jdoe");
@@ -437,16 +419,19 @@ fn scan_checkouts_uses_configured_develop_dir_names() {
     touch_checkout(&working, "deploy_20240315_1430_jdoe");
 
     let config = VcConfig {
-        scan_roots: vec![scan_root],
+        scan_roots: vec![scan_root.clone()],
         develop_dirs: vec!["WORKING".to_string()],
         archive_dirs: vec![],
         ..Default::default()
     };
-    let records = scan_checkouts(&config, "/catalog/linux/scripts");
+    let records = scan_checkouts(&config);
 
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].revision_type, REVISION_TYPE_DEVELOP);
-    assert_eq!(records[0].logical_path, "/catalog/linux/scripts/deploy");
+    assert_eq!(
+        records[0].logical_path,
+        scan_root.join("deploy").to_string_lossy()
+    );
 }
 
 #[test]
@@ -459,16 +444,19 @@ fn scan_checkouts_uses_configured_archive_dir_names() {
     touch_checkout(&history, "tool_20240101_0900_bob");
 
     let config = VcConfig {
-        scan_roots: vec![scan_root],
+        scan_roots: vec![scan_root.clone()],
         develop_dirs: vec![],
         archive_dirs: vec!["HISTORY".to_string()],
         ..Default::default()
     };
-    let records = scan_checkouts(&config, "/catalog/linux/scripts");
+    let records = scan_checkouts(&config);
 
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].revision_type, REVISION_TYPE_ARCHIVE);
-    assert_eq!(records[0].logical_path, "/catalog/linux/scripts/tool");
+    assert_eq!(
+        records[0].logical_path,
+        scan_root.join("tool").to_string_lossy()
+    );
 }
 
 #[test]
@@ -486,7 +474,7 @@ fn scan_checkouts_default_dirs_not_discovered_with_custom_config() {
         archive_dirs: vec![],
         ..Default::default()
     };
-    let records = scan_checkouts(&config, "/catalog/linux/scripts");
+    let records = scan_checkouts(&config);
 
     assert!(
         records.is_empty(),

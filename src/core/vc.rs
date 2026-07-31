@@ -318,7 +318,7 @@ pub fn parse_checkout_filename(filename: &str) -> Option<(String, String, String
 /// outside all scan_roots are not followed.
 /// The `os_flavor` for each record is derived from the parent directory name of the
 /// scan_root (e.g. `linux` from `/catalog/linux/scripts`).
-pub fn scan_checkouts(config: &VcConfig, logical_prefix: &str) -> Vec<CheckoutRecord> {
+pub fn scan_checkouts(config: &VcConfig) -> Vec<CheckoutRecord> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -393,7 +393,6 @@ pub fn scan_checkouts(config: &VcConfig, logical_prefix: &str) -> Vec<CheckoutRe
                         rev_type,
                         &os_flavor,
                         scan_root,
-                        logical_prefix,
                         now,
                         &mut records,
                         &mut seen,
@@ -416,13 +415,11 @@ pub fn scan_checkouts(config: &VcConfig, logical_prefix: &str) -> Vec<CheckoutRe
     records
 }
 
-#[allow(clippy::too_many_arguments)]
 fn scan_revision_dir(
     dir: &Path,
     revision_type: &str,
     os_flavor: &str,
     scan_root: &Path,
-    logical_prefix: &str,
     now: f64,
     records: &mut Vec<CheckoutRecord>,
     seen: &mut std::collections::HashSet<PathBuf>,
@@ -470,23 +467,20 @@ fn scan_revision_dir(
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default();
 
-        // Combine non-empty path segments: prefix / rel_container / rel_in_dir / script_name
+        // Combine non-empty path segments: scan_root / rel_container / rel_in_dir / script_name.
+        // Anchoring at scan_root's own absolute path (rather than at `/`)
+        // mirrors `scanner::make_logical_path`, so a DEVELOP/ARCHIVE
+        // revision's logical_path lines up with the active script's (built
+        // the same way) and the two join in the catalog.
         let sub_parts: Vec<&str> = [rel_container.as_str(), rel_in_dir.as_str(), &script_name]
             .into_iter()
             .filter(|s| !s.is_empty() && *s != ".")
             .collect();
-        // Mirrors `scanner::make_logical_path`'s fallback: with no configured
-        // logical_prefix, the logical path is anchored at the scan_root's own
-        // absolute path rather than at `/`, so a DEVELOP/ARCHIVE revision's
-        // logical_path lines up with the active script's (which the main
-        // scanner builds the same way) and the two join in the catalog
-        // instead of silently never matching.
-        let prefix = if logical_prefix.is_empty() {
-            scan_root.to_string_lossy().into_owned()
-        } else {
-            logical_prefix.to_string()
-        };
-        let logical = format!("{}/{}", prefix.trim_end_matches('/'), sub_parts.join("/"));
+        let logical = format!(
+            "{}/{}",
+            scan_root.to_string_lossy().trim_end_matches('/'),
+            sub_parts.join("/")
+        );
 
         let age_seconds = path
             .metadata()

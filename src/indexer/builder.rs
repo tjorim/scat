@@ -44,8 +44,6 @@ pub struct IndexResult {
 #[derive(Debug, Default)]
 /// Options controlling index build behavior.
 pub struct BuildOptions {
-    /// Prefix prepended to logical paths.
-    pub logical_prefix: String,
     /// Number of head lines to read for language/shebang detection.
     pub head_lines: usize,
     /// Additional ignore files applied during scanning.
@@ -261,7 +259,6 @@ pub fn build_index(
         populate(
             &mut conn,
             scan_roots,
-            &opts.logical_prefix,
             head_lines,
             &opts.ignore_files,
             &mut result,
@@ -500,7 +497,6 @@ mod tests {
             std::slice::from_ref(&root),
             &db_path,
             BuildOptions {
-                logical_prefix: "/catalog/scripts".into(),
                 head_lines: 10,
                 keep_copies: 0,
                 ..Default::default()
@@ -525,7 +521,6 @@ mod tests {
             std::slice::from_ref(&root),
             &db_path,
             BuildOptions {
-                logical_prefix: "/catalog/scripts".into(),
                 head_lines: 10,
                 keep_copies: 0,
                 dry_run: true,
@@ -551,7 +546,6 @@ mod tests {
             std::slice::from_ref(&root),
             &db_path,
             BuildOptions {
-                logical_prefix: "/catalog/scripts".into(),
                 head_lines: 10,
                 keep_copies: 2,
                 ..Default::default()
@@ -565,7 +559,6 @@ mod tests {
             std::slice::from_ref(&root),
             &db_path,
             BuildOptions {
-                logical_prefix: "/catalog/scripts".into(),
                 head_lines: 10,
                 keep_copies: 2,
                 ..Default::default()
@@ -590,7 +583,6 @@ mod tests {
             std::slice::from_ref(&root),
             &db_path,
             BuildOptions {
-                logical_prefix: "/catalog/scripts".into(),
                 head_lines: 10,
                 keep_copies: 0,
                 threads: Some(2),
@@ -615,7 +607,6 @@ mod tests {
             std::slice::from_ref(&root),
             &db_path,
             BuildOptions {
-                logical_prefix: "/catalog/scripts".into(),
                 head_lines: 10,
                 keep_copies: 0,
                 threads: Some(0),
@@ -644,7 +635,6 @@ mod tests {
             std::slice::from_ref(&root),
             &db_dir,
             BuildOptions {
-                logical_prefix: "/catalog/scripts".into(),
                 head_lines: 10,
                 keep_copies: 2,
                 ..Default::default()
@@ -661,7 +651,6 @@ mod tests {
 
     fn incremental_opts(keep_copies: usize) -> BuildOptions {
         BuildOptions {
-            logical_prefix: "/catalog/scripts".into(),
             head_lines: 10,
             keep_copies,
             ..Default::default()

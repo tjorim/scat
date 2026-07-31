@@ -41,7 +41,6 @@ fn build_indexes_py_and_sh_scripts() {
         std::slice::from_ref(&root),
         &db_path,
         BuildOptions {
-            logical_prefix: "/catalog/scripts".into(),
             head_lines: 10,
             keep_copies: 0,
             vc_config: Some(VcConfig::default()),
@@ -101,7 +100,6 @@ fn build_extracts_author_and_brief_from_header() {
         std::slice::from_ref(&root),
         &db_path,
         BuildOptions {
-            logical_prefix: "/catalog/scripts".into(),
             head_lines: 10,
             keep_copies: 0,
             vc_config: Some(VcConfig::default()),
@@ -151,7 +149,6 @@ fn build_indexes_multiple_history_lines_into_metadata_json() {
         std::slice::from_ref(&root),
         &db_path,
         BuildOptions {
-            logical_prefix: "/catalog/scripts".into(),
             head_lines: 10,
             keep_copies: 0,
             vc_config: Some(VcConfig::default()),
@@ -231,7 +228,6 @@ fn build_history_with_version_field() {
         std::slice::from_ref(&root),
         &db_path,
         BuildOptions {
-            logical_prefix: "/catalog/scripts".into(),
             head_lines: 10,
             keep_copies: 0,
             vc_config: Some(VcConfig::default()),
@@ -278,7 +274,6 @@ fn build_history_summary_only_line_is_preserved() {
         std::slice::from_ref(&root),
         &db_path,
         BuildOptions {
-            logical_prefix: "/catalog/scripts".into(),
             head_lines: 10,
             keep_copies: 0,
             vc_config: Some(VcConfig::default()),
@@ -333,7 +328,6 @@ fn build_reads_header_metadata() {
         std::slice::from_ref(&root),
         &db_path,
         BuildOptions {
-            logical_prefix: "/catalog/scripts".into(),
             head_lines: 10,
             keep_copies: 0,
             vc_config: Some(VcConfig::default()),
@@ -375,7 +369,6 @@ fn build_records_python_import_dependencies() {
         std::slice::from_ref(&root),
         &db_path,
         BuildOptions {
-            logical_prefix: "/catalog/scripts".into(),
             head_lines: 10,
             keep_copies: 0,
             vc_config: Some(VcConfig::default()),
@@ -419,7 +412,6 @@ fn build_records_python_function_graph() {
         std::slice::from_ref(&root),
         &db_path,
         BuildOptions {
-            logical_prefix: "/catalog/scripts".into(),
             head_lines: 10,
             keep_copies: 0,
             vc_config: Some(VcConfig::default()),
@@ -450,12 +442,13 @@ fn build_records_python_function_graph() {
             .map(|r| r.unwrap())
             .collect()
     };
+    let helper_path = root.join("helper.py").to_string_lossy().into_owned();
     assert!(
         calls
             .iter()
             .any(|(caller, callee, target)| caller == "entry"
                 && callee == "helper.run"
-                && target.as_deref() == Some("/catalog/scripts/helper.py"))
+                && target.as_deref() == Some(helper_path.as_str()))
     );
 }
 
@@ -475,7 +468,6 @@ fn build_writes_index_metadata() {
         std::slice::from_ref(&root),
         &db_path,
         BuildOptions {
-            logical_prefix: "/catalog/scripts".into(),
             head_lines: 10,
             keep_copies: 0,
             vc_config: Some(VcConfig::default()),
@@ -513,7 +505,6 @@ fn published_catalog_is_a_single_file_in_rollback_journal_mode() {
         std::slice::from_ref(&root),
         &db_path,
         BuildOptions {
-            logical_prefix: "/catalog/scripts".into(),
             head_lines: 10,
             keep_copies: 0,
             vc_config: Some(VcConfig::default()),
@@ -554,7 +545,6 @@ fn a_built_catalog_round_trips_through_the_host_local_cache() {
             std::slice::from_ref(&root),
             db_path,
             BuildOptions {
-                logical_prefix: "/catalog/scripts".into(),
                 head_lines: 10,
                 keep_copies: 0,
                 vc_config: Some(VcConfig::default()),
@@ -599,7 +589,6 @@ fn dry_run_does_not_write_live_database() {
         std::slice::from_ref(&root),
         &db_path,
         BuildOptions {
-            logical_prefix: "/catalog/scripts".into(),
             head_lines: 10,
             keep_copies: 0,
             dry_run: true,
@@ -617,11 +606,11 @@ fn dry_run_does_not_write_live_database() {
 }
 
 // ---------------------------------------------------------------------------
-// logical_prefix in stored paths
+// logical_path == absolute scan path
 // ---------------------------------------------------------------------------
 
 #[test]
-fn build_stores_logical_prefix_in_paths() {
+fn build_stores_absolute_scan_path_as_logical_path() {
     let dir = tempfile::TempDir::new().unwrap();
     let root = dir.path().join("scripts");
     std::fs::create_dir(&root).unwrap();
@@ -632,7 +621,6 @@ fn build_stores_logical_prefix_in_paths() {
         std::slice::from_ref(&root),
         &db_path,
         BuildOptions {
-            logical_prefix: "/catalog/scripts/tools".into(),
             head_lines: 10,
             keep_copies: 0,
             vc_config: Some(VcConfig::default()),
@@ -646,10 +634,7 @@ fn build_stores_logical_prefix_in_paths() {
         .query_row("SELECT logical_path FROM scripts LIMIT 1", [], |r| r.get(0))
         .unwrap();
 
-    assert!(
-        path.starts_with("/catalog/scripts/tools/"),
-        "logical_path should start with the prefix, got: {path}"
-    );
+    assert_eq!(path, root.join("tool.py").to_string_lossy());
 }
 
 // ---------------------------------------------------------------------------
@@ -676,7 +661,6 @@ fn build_resolves_absolute_and_relative_dependency_paths() {
         std::slice::from_ref(&pkg),
         &db_path,
         BuildOptions {
-            logical_prefix: "/catalog/scripts/pkg".into(),
             head_lines: 5,
             keep_copies: 0,
             vc_config: Some(VcConfig::default()),
@@ -701,10 +685,11 @@ fn build_resolves_absolute_and_relative_dependency_paths() {
     );
 
     // Verify the resolved target is utils.py in both cases
+    let utils_path = pkg.join("utils.py").to_string_lossy().into_owned();
     let utils_id: i64 = conn
         .query_row(
-            "SELECT id FROM scripts WHERE logical_path = '/catalog/scripts/pkg/utils.py'",
-            [],
+            "SELECT id FROM scripts WHERE logical_path = ?1",
+            rusqlite::params![utils_path],
             |r| r.get(0),
         )
         .unwrap();
@@ -728,11 +713,14 @@ fn build_records_referenced_path_dependencies() {
     let root = dir.path().join("scripts");
     std::fs::create_dir(&root).unwrap();
 
+    let lib_path = root.join("lib.py").to_string_lossy().into_owned();
+    let missing_path = root.join("missing.py").to_string_lossy().into_owned();
+
     // Target script, invoked by other scripts via its full logical path.
     std::fs::write(
         root.join("lib.py"),
         // A script mentioning its own logical path must NOT create a self-edge.
-        "# defined at /catalog/scripts/lib.py\nprint('lib')\n",
+        format!("# defined at {lib_path}\nprint('lib')\n"),
     )
     .unwrap();
 
@@ -741,18 +729,20 @@ fn build_records_referenced_path_dependencies() {
     // unrelated temp path (must be dropped).
     std::fs::write(
         root.join("runner.sh"),
-        "#!/bin/bash\n\
-         scp /catalog/scripts/lib.py host:/tmp/\n\
-         ssh host python3 /catalog/scripts/lib.py\n\
-         python3 /catalog/scripts/missing.py\n\
-         cat /tmp/scratch.sh\n",
+        format!(
+            "#!/bin/bash\n\
+             scp {lib_path} host:/tmp/\n\
+             ssh host python3 {lib_path}\n\
+             python3 {missing_path}\n\
+             cat /tmp/scratch.sh\n"
+        ),
     )
     .unwrap();
 
     // A JSON manifest listing scripts to run in order.
     std::fs::write(
         root.join("pipeline.json"),
-        r#"{"steps": ["/catalog/scripts/lib.py"]}"#,
+        format!(r#"{{"steps": ["{lib_path}"]}}"#),
     )
     .unwrap();
 
@@ -761,7 +751,6 @@ fn build_records_referenced_path_dependencies() {
         std::slice::from_ref(&root),
         &db_path,
         BuildOptions {
-            logical_prefix: "/catalog/scripts".into(),
             head_lines: 5,
             keep_copies: 0,
             vc_config: Some(VcConfig::default()),
@@ -774,8 +763,8 @@ fn build_records_referenced_path_dependencies() {
 
     let lib_id: i64 = conn
         .query_row(
-            "SELECT id FROM scripts WHERE logical_path = '/catalog/scripts/lib.py'",
-            [],
+            "SELECT id FROM scripts WHERE logical_path = ?1",
+            rusqlite::params![lib_path],
             |r| r.get(0),
         )
         .unwrap();
@@ -831,6 +820,9 @@ fn build_resolves_relative_and_cross_language_references() {
     std::fs::create_dir_all(root.join("jobs")).unwrap();
     std::fs::create_dir_all(root.join("bin")).unwrap();
 
+    let common_py = root.join("lib/common.py").to_string_lossy().into_owned();
+    let task_sh = root.join("lib/task.sh").to_string_lossy().into_owned();
+
     std::fs::write(root.join("lib/common.py"), "def go():\n    pass\n").unwrap();
     std::fs::write(root.join("lib/task.sh"), "#!/bin/bash\necho hi\n").unwrap();
 
@@ -844,7 +836,7 @@ fn build_resolves_relative_and_cross_language_references() {
     // python → shell via an ABSOLUTE path (cross-language).
     std::fs::write(
         root.join("jobs/orchestrate.py"),
-        "import subprocess\nsubprocess.run([\"/catalog/lib/task.sh\"])\n",
+        format!("import subprocess\nsubprocess.run([\"{task_sh}\"])\n"),
     )
     .unwrap();
 
@@ -852,7 +844,9 @@ fn build_resolves_relative_and_cross_language_references() {
     // a .sh and a .py — both appear as literals, so both must be captured.
     std::fs::write(
         root.join("bin/dispatch"),
-        "#!/bin/bash\nif [ \"$(uname)\" = Linux ]; then\n  exec /catalog/lib/task.sh\nelse\n  exec python3 /catalog/lib/common.py\nfi\n",
+        format!(
+            "#!/bin/bash\nif [ \"$(uname)\" = Linux ]; then\n  exec {task_sh}\nelse\n  exec python3 {common_py}\nfi\n"
+        ),
     )
     .unwrap();
 
@@ -861,7 +855,6 @@ fn build_resolves_relative_and_cross_language_references() {
         std::slice::from_ref(&root),
         &db_path,
         BuildOptions {
-            logical_prefix: "/catalog".into(),
             head_lines: 5,
             keep_copies: 0,
             vc_config: Some(VcConfig::default()),
@@ -893,22 +886,20 @@ fn build_resolves_relative_and_cross_language_references() {
             .collect()
     };
 
+    let bin_dispatch = root.join("bin/dispatch").to_string_lossy().into_owned();
+    let jobs_run = root.join("jobs/run.sh").to_string_lossy().into_owned();
+    let jobs_orchestrate = root
+        .join("jobs/orchestrate.py")
+        .to_string_lossy()
+        .into_owned();
+
     // common.py is referenced by the relative shell ref and the dispatch branch.
     assert_eq!(
-        referrers_of("/catalog/lib/common.py"),
-        vec![
-            "/catalog/bin/dispatch".to_string(),
-            "/catalog/jobs/run.sh".to_string(),
-        ]
+        referrers_of(&common_py),
+        vec![bin_dispatch.clone(), jobs_run]
     );
     // task.sh is referenced cross-language by the python orchestrator and dispatch.
-    assert_eq!(
-        referrers_of("/catalog/lib/task.sh"),
-        vec![
-            "/catalog/bin/dispatch".to_string(),
-            "/catalog/jobs/orchestrate.py".to_string(),
-        ]
-    );
+    assert_eq!(referrers_of(&task_sh), vec![bin_dispatch, jobs_orchestrate]);
 }
 
 #[test]
@@ -918,13 +909,15 @@ fn build_source_by_path_resolves_cleanly_without_extension_collision() {
     std::fs::create_dir_all(root.join("lib")).unwrap();
     std::fs::create_dir_all(root.join("jobs")).unwrap();
 
+    let common_sh = root.join("lib/common.sh").to_string_lossy().into_owned();
+
     std::fs::write(root.join("lib/common.sh"), "#!/bin/bash\necho common\n").unwrap();
     // Absolute and relative `source` of a path — must resolve to common.sh as a
     // single `referenced` edge, with no import edge mis-resolved via the bare
     // `sh` module suffix (which previously produced a bogus self/cross edge).
     std::fs::write(
         root.join("jobs/a.sh"),
-        "#!/bin/bash\nsource /catalog/lib/common.sh\n",
+        format!("#!/bin/bash\nsource {common_sh}\n"),
     )
     .unwrap();
     std::fs::write(
@@ -938,7 +931,6 @@ fn build_source_by_path_resolves_cleanly_without_extension_collision() {
         std::slice::from_ref(&root),
         &db_path,
         BuildOptions {
-            logical_prefix: "/catalog".into(),
             head_lines: 5,
             keep_copies: 0,
             vc_config: Some(VcConfig::default()),
@@ -951,7 +943,9 @@ fn build_source_by_path_resolves_cleanly_without_extension_collision() {
 
     // a.sh and b.sh each have exactly one dependency edge: a referenced edge to
     // common.sh. No import edge, and no bogus self- or cross-edge.
-    for caller in ["/catalog/jobs/a.sh", "/catalog/jobs/b.sh"] {
+    let a_sh = root.join("jobs/a.sh").to_string_lossy().into_owned();
+    let b_sh = root.join("jobs/b.sh").to_string_lossy().into_owned();
+    for caller in [a_sh.as_str(), b_sh.as_str()] {
         let edges: Vec<(String, String, Option<i64>)> = {
             let caller_id: i64 = conn
                 .query_row(
@@ -988,8 +982,8 @@ fn build_source_by_path_resolves_cleanly_without_extension_collision() {
     // common.sh is used by both a.sh and b.sh.
     let common_id: i64 = conn
         .query_row(
-            "SELECT id FROM scripts WHERE logical_path = '/catalog/lib/common.sh'",
-            [],
+            "SELECT id FROM scripts WHERE logical_path = ?1",
+            rusqlite::params![common_sh],
             |r| r.get(0),
         )
         .unwrap();
@@ -1018,7 +1012,6 @@ fn build_empty_root_produces_zero_scripts() {
         std::slice::from_ref(&root),
         &db_path,
         BuildOptions {
-            logical_prefix: "/catalog/scripts".into(),
             head_lines: 10,
             keep_copies: 0,
             vc_config: Some(VcConfig::default()),
@@ -1053,7 +1046,6 @@ fn build_respects_catignore_and_explicit_ignore_files() {
         std::slice::from_ref(&root),
         &db_path,
         BuildOptions {
-            logical_prefix: "/catalog/scripts".into(),
             head_lines: 10,
             ignore_files: vec![explicit_ignore],
             keep_copies: 0,
@@ -1070,7 +1062,7 @@ fn build_respects_catignore_and_explicit_ignore_files() {
     let only_path: String = conn
         .query_row("SELECT logical_path FROM scripts LIMIT 1", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(only_path, "/catalog/scripts/keep.py");
+    assert_eq!(only_path, root.join("keep.py").to_string_lossy());
 }
 
 // ---------------------------------------------------------------------------
@@ -1120,7 +1112,6 @@ fn build_timestamp_after_index_is_newer_than_pre_build_mtime() {
         std::slice::from_ref(&root),
         &db_path,
         BuildOptions {
-            logical_prefix: "/scripts".into(),
             head_lines: 5,
             keep_copies: 0,
             vc_config: Some(VcConfig::default()),
@@ -1217,7 +1208,6 @@ fn build_indexes_a_vc_working_directory_as_one_script_per_tool() {
         std::slice::from_ref(&root),
         &db_path,
         BuildOptions {
-            logical_prefix: "/catalog/source".into(),
             head_lines: 10,
             keep_copies: 0,
             vc_config: Some(VcConfig {
@@ -1238,30 +1228,36 @@ fn build_indexes_a_vc_working_directory_as_one_script_per_tool() {
         .unwrap()
         .map(Result::unwrap)
         .collect();
+    let prepare_release = root.join("prepare_release").to_string_lossy().into_owned();
+    let release_backup_sh = root
+        .join("release_backup.sh")
+        .to_string_lossy()
+        .into_owned();
     assert_eq!(
         paths,
-        vec![
-            "/catalog/source/prepare_release".to_string(),
-            "/catalog/source/release_backup.sh".to_string(),
-        ],
+        vec![prepare_release.clone(), release_backup_sh],
         "version copies, editor backups, and container contents are not scripts"
     );
 
     // The symlink row carries the target the CLI and TUI render as an arrow.
     let target: String = conn
         .query_row(
-            "SELECT symlink_target FROM scripts WHERE logical_path = '/catalog/source/prepare_release'",
-            [],
+            "SELECT symlink_target FROM scripts WHERE logical_path = ?1",
+            rusqlite::params![prepare_release],
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(target, "/catalog/source/prepare_release_20260729_140513");
+    assert_eq!(
+        target,
+        root.join("prepare_release_20260729_140513")
+            .to_string_lossy()
+    );
 
     // Every non-script file is still catalogued, as a revision of its tool.
     let revisions: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM revisions WHERE logical_path = '/catalog/source/prepare_release'",
-            [],
+            "SELECT COUNT(*) FROM revisions WHERE logical_path = ?1",
+            rusqlite::params![prepare_release],
             |r| r.get(0),
         )
         .unwrap();
