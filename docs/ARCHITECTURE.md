@@ -54,9 +54,22 @@ Benefits:
 - Makes it safe to open the same database from multiple processes simultaneously.
 
 **Rule:** any read-only command that opens the database must pass
-`SQLITE_OPEN_READ_ONLY`. The `index` command is the sole exception — it opens
-the database read-write during the build step and then closes it before the
-file is made available to clients.
+`SQLITE_OPEN_READ_ONLY`.
+
+`catalog build` is not an exception to that rule — the rule simply never
+comes up, because **nothing opens the published `scripts.sqlite` read-write,
+ever.** The builder:
+
+- reads the previous build **read-only**, to seed an incremental rebuild;
+- writes an entirely separate WIP file (§3a), which is the only thing it
+  opens read-write;
+- replaces the published path with `rename(2)`;
+- hard-links (or copies) it for rotation, without opening it as a database.
+
+That is a stronger invariant than "the writer closes the file before clients
+use it", and it is what makes the nightly swap safe underneath live readers:
+a reader holding the old inode keeps reading it until it closes, and never
+observes a half-written database.
 
 ---
 
