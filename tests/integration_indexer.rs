@@ -498,6 +498,92 @@ fn build_writes_index_metadata() {
 }
 
 // ---------------------------------------------------------------------------
+// Publication: journal mode and the host-local cache
+// ---------------------------------------------------------------------------
+
+#[test]
+fn published_catalog_is_a_single_file_in_rollback_journal_mode() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path().join("scripts");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("x.py"), "pass\n").unwrap();
+
+    let db_path = dir.path().join("catalog.sqlite");
+    build_index(
+        std::slice::from_ref(&root),
+        &db_path,
+        BuildOptions {
+            logical_prefix: "/catalog/scripts".into(),
+            head_lines: 10,
+            keep_copies: 0,
+            vc_config: Some(VcConfig::default()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    // WAL needs an `mmap`-able `-shm` file — which network filesystems
+    // generally don't provide — even to open the catalog read-only. The
+    // published file must therefore carry a rollback journal and no sidecars.
+    let mode: String = open_ro(&db_path)
+        .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(mode.to_lowercase(), "delete");
+    assert!(!db_path.with_extension("sqlite-wal").exists());
+    assert!(!db_path.with_extension("sqlite-shm").exists());
+}
+
+#[test]
+fn a_built_catalog_round_trips_through_the_host_local_cache() {
+    use scat_core::core::cache::{CacheOptions, catalog_read_path};
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let cache_root = tempfile::TempDir::new().unwrap();
+    let root = dir.path().join("scripts");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("deploy.py"), "import os\n").unwrap();
+
+    let db_path = dir.path().join("catalog.sqlite");
+    let options = CacheOptions {
+        enabled: true,
+        root: Some(cache_root.path().to_path_buf()),
+    };
+
+    let build = |db_path: &std::path::Path| {
+        build_index(
+            std::slice::from_ref(&root),
+            db_path,
+            BuildOptions {
+                logical_prefix: "/catalog/scripts".into(),
+                head_lines: 10,
+                keep_copies: 0,
+                vc_config: Some(VcConfig::default()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    };
+
+    build(&db_path);
+    let cached = catalog_read_path(&db_path, &options);
+    assert_ne!(cached, db_path, "the build should be cached locally");
+    assert_eq!(
+        script_count(&scat_core::core::db::open_db(&cached).unwrap()),
+        1
+    );
+
+    // A second nightly build must be picked up, not served stale.
+    std::fs::write(root.join("rollback.sh"), "#!/bin/bash\necho ok\n").unwrap();
+    build(&db_path);
+    let refreshed = catalog_read_path(&db_path, &options);
+    assert_eq!(refreshed, cached);
+    assert_eq!(
+        script_count(&scat_core::core::db::open_db(&refreshed).unwrap()),
+        2
+    );
+}
+
+// ---------------------------------------------------------------------------
 // dry_run
 // ---------------------------------------------------------------------------
 
@@ -1072,7 +1158,6 @@ fn build_timestamp_after_index_is_newer_than_pre_build_mtime() {
 // vc working directories
 // ---------------------------------------------------------------------------
 
-#[cfg(unix)]
 #[test]
 fn build_indexes_a_vc_working_directory_as_one_script_per_tool() {
     // A vc working directory as it actually looks on disk: an active symlink

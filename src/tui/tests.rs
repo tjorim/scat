@@ -111,25 +111,15 @@ fn detail_row(logical_path: &str) -> Map<String, Value> {
     row
 }
 
-/// Build a `PathResolver` mapping `/catalog/scripts` onto `root` for the
-/// current platform (the other platform's field is a dummy value).
+/// Build a `PathResolver` mapping `/catalog/scripts` onto `root`.
 fn mapping_resolver(root: &std::path::Path) -> PathResolver {
     let root = root.display().to_string();
     let mut file = tempfile::Builder::new().suffix(".yml").tempfile().unwrap();
-    if cfg!(windows) {
-        let root_escaped = root.replace('\\', "\\\\");
-        writeln!(
-            file,
-            "mappings:\n  - logical_prefix: /catalog/scripts\n    windows: \"{root_escaped}\"\n    linux: /unused"
-        )
-        .unwrap();
-    } else {
-        writeln!(
-            file,
-            "mappings:\n  - logical_prefix: /catalog/scripts\n    linux: \"{root}\"\n    windows: \"Z:\\\\unused\""
-        )
-        .unwrap();
-    }
+    writeln!(
+        file,
+        "mappings:\n  - logical_prefix: /catalog/scripts\n    linux: \"{root}\""
+    )
+    .unwrap();
     PathResolver::from_file(file.path()).unwrap()
 }
 

@@ -315,6 +315,13 @@ pub fn open_db(path: &Path) -> Result<Connection> {
 }
 
 /// Create (or open) a writable database at `path` and apply the schema.
+///
+/// The database is created in WAL mode, which suits the only thing that ever
+/// writes one: the indexer's insert-heavy build into a local WIP file. It is
+/// *not* the mode the catalog is published in — WAL needs an `mmap`-able
+/// `-shm` file even for read-only connections, which a network share
+/// generally can't provide — so `indexer::builder` switches the finished
+/// build back to a rollback journal before swapping it into place.
 pub fn create_db(path: &Path) -> Result<Connection> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()

@@ -18,6 +18,14 @@ pub struct Cli {
     #[arg(long, env = "SCAT_CONFIG", global = true)]
     pub(crate) config: Option<PathBuf>,
 
+    /// Read the catalog directly instead of through the host-local cache.
+    #[arg(long, env = "SCAT_NO_CACHE", global = true)]
+    pub(crate) no_cache: bool,
+
+    /// Directory holding the host-local catalog cache (default: /dev/shm).
+    #[arg(long, env = "SCAT_CACHE_DIR", global = true)]
+    pub(crate) cache_dir: Option<PathBuf>,
+
     /// Disable color in output.
     #[arg(long, global = true)]
     pub(crate) no_color: bool,

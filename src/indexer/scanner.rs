@@ -947,7 +947,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     #[test]
     fn scan_records_version_copies_behind_an_active_symlink() {
         // vc's steady state: the script name is a symlink to the newest
@@ -1305,7 +1304,6 @@ mod tests {
         assert!(records[0].physical_path.ends_with("small.py"));
     }
 
-    #[cfg(unix)]
     #[test]
     fn scan_does_not_follow_symlinks_outside_scan_roots() {
         let root = tempfile::TempDir::new().unwrap();
@@ -1330,7 +1328,6 @@ mod tests {
         assert!(records[0].physical_path.ends_with("keep.py"));
     }
 
-    #[cfg(unix)]
     #[test]
     fn scan_follows_symlinks_within_scan_roots() {
         let root = tempfile::TempDir::new().unwrap();

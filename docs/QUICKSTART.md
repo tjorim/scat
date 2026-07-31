@@ -8,18 +8,19 @@
 
 | Requirement | Notes |
 |---|---|
-| `scat` or `scat.exe` | Compiled binary for your platform |
+| `scat` | Compiled binary (RHEL / Linux x86-64) |
 | `SCAT_DB` or `--db` | Path to the shared `scripts.sqlite` catalog |
 
 Set the environment variable once so you never need to type `--db` again:
 
 ```bash
-# Linux / RHEL
 export SCAT_DB=/catalog/scat/scripts.sqlite
-
-# Windows (PowerShell)
-$env:SCAT_DB = "C:\catalog\scat\scripts.sqlite"
 ```
+
+`scat` reads that catalog through a host-local copy in `/dev/shm`, refreshed
+automatically after each nightly rebuild — nothing to set up. Use
+`--cache-dir` / `SCAT_CACHE_DIR` to put the copy elsewhere, or `--no-cache` /
+`SCAT_NO_CACHE=1` to query the shared drive directly.
 
 ### Optional: config file
 
@@ -32,8 +33,8 @@ example. CLI flags and env vars always override config-file values.
 ### Optional: path-mapping file (TUI only)
 
 `scat tui --mapping <path>` / `SCAT_MAPPING` points at a separate file that
-maps logical catalog paths to real Windows/Linux filesystem paths, used by
-the `V` key to open a script's live source. See
+maps logical catalog paths to real filesystem paths, used by the `V` key to
+open a script's live source. See
 **[scat-mapping.example.yaml](scat-mapping.example.yaml)**.
 
 ---

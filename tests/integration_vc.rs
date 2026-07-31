@@ -324,7 +324,6 @@ fn scan_checkouts_mixed_root_and_subfolder() {
 // scan_checkouts – symlink deduplication
 // ---------------------------------------------------------------------------
 
-#[cfg(unix)]
 #[test]
 fn scan_checkouts_deduplicates_symlinked_scan_roots() {
     // alt/scripts is a symlink to linux/scripts — the DEVELOP dir should be scanned once.

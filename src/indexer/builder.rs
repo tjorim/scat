@@ -310,6 +310,7 @@ pub fn build_index(
     // Clean up checkpoint files now that we have a complete DB.
     delete_wip_pair(db_path);
 
+    finalize_journal_mode(&tmp_path)?;
     validate(&tmp_path)?;
     debug!(
         phase = "validate",
@@ -410,8 +411,45 @@ fn seed_from_previous_build(db_path: &Path, tmp_path: &Path) -> Result<Connectio
         let backup = rusqlite::backup::Backup::new(&src, &mut dst)?;
         backup.step(-1)?;
     }
+    // Whatever journal mode the seed carried, the WIP file wants WAL for the
+    // insert-heavy phase ahead of it — the same mode `create_db` sets on a
+    // from-scratch build, so both paths perform alike. The published
+    // database is switched back to a rollback journal by
+    // `finalize_journal_mode` just before the swap.
+    let _: String = dst.query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))?;
     dst.execute_batch(crate::core::db::DDL)?;
     Ok(dst)
+}
+
+// ---------------------------------------------------------------------------
+// Publication
+// ---------------------------------------------------------------------------
+
+/// Switch a finished WIP database out of WAL mode before it is published.
+///
+/// WAL is the right mode *during* a build — one writer, many small commits,
+/// no fsync per commit — but the wrong mode for the file that gets swapped
+/// onto the shared drive. WAL requires an `mmap`-able `-shm` file shared
+/// between connections, which network filesystems generally don't provide,
+/// and it needs one *even for read-only connections*: a reader that can't
+/// create `-shm` next to the catalog can't open it at all. A rollback-journal
+/// database is a single self-contained file that any reader can open with no
+/// sidecars and no write access to the directory holding it.
+///
+/// Switching modes here also checkpoints and removes the `-wal` file, so the
+/// atomic swap moves one complete file into place rather than a main file
+/// whose newest pages are still sitting in a sidecar left behind by the
+/// rename.
+fn finalize_journal_mode(db_path: &Path) -> Result<()> {
+    let conn = Connection::open(db_path)?;
+    let mode: String = conn.query_row("PRAGMA journal_mode = DELETE", [], |r| r.get(0))?;
+    debug!(
+        phase = "finalize_journal_mode",
+        path = %db_path.display(),
+        journal_mode = %mode,
+        "prepared database for publication"
+    );
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

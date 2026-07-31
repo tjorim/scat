@@ -7,33 +7,17 @@ use tracing::debug;
 // Atomic swap
 // ---------------------------------------------------------------------------
 
-/// Replace `dst` with `src` as atomically as possible.
+/// Replace `dst` with `src` atomically.
 ///
-/// On both Linux and Windows, `std::fs::rename` maps to an atomic
-/// replace-if-exists syscall (POSIX `rename(2)`, Windows `MoveFileExW` with
-/// `MOVEFILE_REPLACE_EXISTING`).
-///
-/// If the rename fails on Windows because the destination is locked, we fall
-/// back to: rename dst → `dst.old.<pid>`, rename src → dst, then attempt to
-/// delete the stale backup.
+/// `std::fs::rename` maps to POSIX `rename(2)`, which is unconditionally
+/// atomic and, crucially, succeeds even while readers hold `dst` open: they
+/// keep reading the old inode until they close it, and every process that
+/// opens the path afterwards sees the new build. No swap-time coordination
+/// with readers is needed, and none exists.
 pub fn atomic_swap(src: &Path, dst: &Path) -> Result<()> {
     debug!(src = %src.display(), dst = %dst.display(), "performing atomic database swap");
-    match std::fs::rename(src, dst) {
-        Ok(()) => Ok(()),
-        #[cfg(windows)]
-        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-            // File may be locked by a reader — try rename-aside fallback.
-            let backup = dst.with_extension(format!("old.{}", std::process::id()));
-            if dst.exists() {
-                std::fs::rename(dst, &backup)?;
-            }
-            std::fs::rename(src, dst)?;
-            // Best-effort cleanup; ignore failure (stale file is harmless).
-            let _ = std::fs::remove_file(&backup);
-            Ok(())
-        }
-        Err(e) => Err(e.into()),
-    }
+    std::fs::rename(src, dst)?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -46,7 +30,7 @@ pub fn atomic_swap(src: &Path, dst: &Path) -> Result<()> {
 /// The oldest copy that would exceed `keep_copies` is deleted first,
 /// then existing copies are shifted up, and the live DB is hard-linked
 /// to `<db_path>.1`.  Falls back to `fs::copy` if hard-link fails (e.g.
-/// cross-device or Windows NTFS restriction).
+/// the share is mounted with hard links disabled).
 pub fn rotate_copies(db_path: &Path, keep_copies: usize) -> Result<()> {
     if keep_copies == 0 {
         return Ok(());

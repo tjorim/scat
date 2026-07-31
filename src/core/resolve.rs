@@ -13,11 +13,15 @@ struct MappingFile {
     mappings: Vec<MappingEntry>,
 }
 
+/// One logical-prefix → filesystem-root mapping.
+///
+/// Mapping files written for the Windows-supporting releases also carry a
+/// `windows:` root per entry. Unknown keys are ignored rather than rejected,
+/// so those files keep loading unchanged; the Windows root is simply never
+/// consulted now that clients are Linux-only.
 #[derive(Debug, Deserialize)]
 struct MappingEntry {
     logical_prefix: String,
-    #[serde(default)]
-    windows: String,
     #[serde(default)]
     linux: String,
 }
@@ -66,23 +70,6 @@ impl PathResolver {
     // Resolution
     // ------------------------------------------------------------------
 
-    /// Translate a logical path to a Windows-style path (backslashes).
-    pub fn to_windows(&self, logical_path: &str) -> String {
-        match self.find_mapping(logical_path) {
-            None => logical_path.to_string(),
-            Some(m) => {
-                let remainder = &logical_path[m.logical_prefix.len()..];
-                let relative = remainder.trim_start_matches('/');
-                let root = m.windows.trim_end_matches('\\');
-                if relative.is_empty() {
-                    root.to_string()
-                } else {
-                    format!("{}\\{}", root, relative.replace('/', "\\"))
-                }
-            }
-        }
-    }
-
     /// Translate a logical path to a Linux/POSIX-style path (forward slashes).
     pub fn to_linux(&self, logical_path: &str) -> String {
         match self.find_mapping(logical_path) {
@@ -95,13 +82,12 @@ impl PathResolver {
         }
     }
 
-    /// Resolve to the native path for the current OS.
+    /// Resolve to the native filesystem path.
+    ///
+    /// An alias for [`Self::to_linux`] kept as the name call sites use for
+    /// "whatever this host calls that file"; clients are Linux-only.
     pub fn to_native(&self, logical_path: &str) -> String {
-        if cfg!(windows) {
-            self.to_windows(logical_path)
-        } else {
-            self.to_linux(logical_path)
-        }
+        self.to_linux(logical_path)
     }
 
     // ------------------------------------------------------------------
@@ -159,27 +145,12 @@ mappings:
 "#;
 
     #[test]
-    fn to_windows_single_mapping() {
-        let r = resolver_from_yaml(SINGLE_MAPPING);
-        assert_eq!(
-            r.to_windows("/catalog/scripts/tools/foo.py"),
-            r"Z:\scripts\tools\foo.py"
-        );
-    }
-
-    #[test]
     fn to_linux_single_mapping() {
         let r = resolver_from_yaml(SINGLE_MAPPING);
         assert_eq!(
             r.to_linux("/catalog/scripts/tools/foo.py"),
             "/net/scripts/tools/foo.py"
         );
-    }
-
-    #[test]
-    fn to_windows_exact_prefix() {
-        let r = resolver_from_yaml(SINGLE_MAPPING);
-        assert_eq!(r.to_windows("/catalog/scripts"), r"Z:\scripts");
     }
 
     #[test]
@@ -191,17 +162,12 @@ mappings:
     #[test]
     fn identity_fallback_no_match() {
         let r = resolver_from_yaml(SINGLE_MAPPING);
-        assert_eq!(r.to_windows("/other/path.py"), "/other/path.py");
         assert_eq!(r.to_linux("/other/path.py"), "/other/path.py");
     }
 
     #[test]
     fn identity_fallback_empty_resolver() {
         let r = PathResolver::new();
-        assert_eq!(
-            r.to_windows("/catalog/scripts/foo.py"),
-            "/catalog/scripts/foo.py"
-        );
         assert_eq!(
             r.to_linux("/catalog/scripts/foo.py"),
             "/catalog/scripts/foo.py"
@@ -234,22 +200,12 @@ mappings:
     }
 
     #[test]
-    fn windows_path_uses_backslash_separator() {
+    fn to_native_resolves_to_the_linux_root() {
         let r = resolver_from_yaml(SINGLE_MAPPING);
-        let result = r.to_windows("/catalog/scripts/a/b/c.py");
-        assert!(result.contains('\\'));
-        assert!(!result.contains('/'));
-    }
-
-    #[test]
-    fn to_native_matches_to_linux_on_non_windows() {
-        let r = resolver_from_yaml(SINGLE_MAPPING);
-        if !cfg!(windows) {
-            assert_eq!(
-                r.to_native("/catalog/scripts/tools/foo.py"),
-                r.to_linux("/catalog/scripts/tools/foo.py")
-            );
-        }
+        assert_eq!(
+            r.to_native("/catalog/scripts/tools/foo.py"),
+            "/net/scripts/tools/foo.py"
+        );
     }
 
     #[test]
@@ -261,10 +217,6 @@ mappings:
     linux: /net/scripts/
 "#;
         let r = resolver_from_yaml(yaml);
-        assert_eq!(
-            r.to_windows("/catalog/scripts/foo.py"),
-            r"Z:\scripts\foo.py"
-        );
         assert_eq!(r.to_linux("/catalog/scripts/foo.py"), "/net/scripts/foo.py");
     }
 
@@ -296,7 +248,6 @@ mappings:
     #[test]
     fn empty_input_path_falls_back_to_identity() {
         let r = resolver_from_yaml(SINGLE_MAPPING);
-        assert_eq!(r.to_windows(""), "");
         assert_eq!(r.to_linux(""), "");
     }
 
@@ -320,8 +271,23 @@ mappings:
         std::fs::write(&path, SINGLE_MAPPING).unwrap();
         let r = PathResolver::from_file(&path).unwrap();
         assert_eq!(
-            r.to_windows("/catalog/scripts/tools/foo.py"),
-            r"Z:\scripts\tools\foo.py"
+            r.to_linux("/catalog/scripts/tools/foo.py"),
+            "/net/scripts/tools/foo.py"
+        );
+    }
+
+    #[test]
+    fn from_file_still_loads_a_mapping_carrying_a_windows_root() {
+        // Mapping files predating the Linux-only move list a `windows:` root
+        // per entry. It's no longer read, but it must not make the file
+        // unloadable — every existing deployment has one.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mapping.yaml");
+        std::fs::write(&path, SINGLE_MAPPING).unwrap();
+        let r = PathResolver::from_file(&path).unwrap();
+        assert_eq!(
+            r.to_native("/catalog/scripts/foo.py"),
+            "/net/scripts/foo.py"
         );
     }
 
@@ -345,21 +311,9 @@ mappings:
 
     proptest! {
         #[test]
-        fn to_windows_never_panics_on_arbitrary_input(path in ".{0,200}") {
+        fn to_linux_never_panics_on_arbitrary_input(path in ".{0,200}") {
             let r = resolver_from_yaml(SINGLE_MAPPING);
-            let _ = r.to_windows(&path);
             let _ = r.to_linux(&path);
-        }
-
-        #[test]
-        fn windows_translation_of_a_matched_path_never_contains_forward_slash(
-            rel in "[a-zA-Z0-9/_.-]{0,40}"
-        ) {
-            let r = resolver_from_yaml(SINGLE_MAPPING);
-            let logical = format!("/catalog/scripts/{rel}");
-            let result = r.to_windows(&logical);
-            prop_assert!(!result.contains('/'));
-            prop_assert!(result.starts_with(r"Z:\scripts"));
         }
 
         #[test]

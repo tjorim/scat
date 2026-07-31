@@ -2,9 +2,9 @@
 #
 # Used only by `scat tui` to resolve a script's logical catalog path (as
 # stored in the database, e.g. /catalog/scripts/foo.py) to a real
-# OS-specific filesystem path, for the "V" (view live filesystem source)
-# key. It is unrelated to the main --config/SCAT_CONFIG file (see
-# scat.example.yaml) and is passed separately:
+# filesystem path, for the "V" (view live filesystem source) key. It is
+# unrelated to the main --config/SCAT_CONFIG file (see scat.example.yaml)
+# and is passed separately:
 #
 #   scat tui --mapping /path/to/mapping.yaml
 #   export SCAT_MAPPING=/path/to/mapping.yaml
@@ -13,14 +13,16 @@
 # (.yml/.yaml -> YAML, anything else -> JSON). Without a mapping file (or
 # for any logical path that matches no entry below), the logical path is
 # used as-is.
+#
+# Clients are Linux-only, so `linux:` is the only root that is read. Files
+# from older releases that also carry a `windows:` root per entry still
+# load unchanged — the extra key is simply ignored.
 
 mappings:
   # More specific prefixes should come first — the first matching entry
   # wins, so a narrower prefix like /catalog/scripts/tools must be listed
   # before the broader /catalog/scripts it would otherwise be shadowed by.
   - logical_prefix: /catalog/scripts/tools
-    windows: "Z:\\scripts\\tools"
     linux: /net/scripts/tools
   - logical_prefix: /catalog/scripts
-    windows: "Z:\\scripts"
     linux: /net/scripts
