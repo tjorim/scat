@@ -154,10 +154,9 @@ pub fn should_skip_catalog_rebuild(indexed_at_secs: f64, max_mtime: Option<f64>)
 /// epoch seconds, or `None` if the DB cannot be read, has no metadata row, or
 /// has a schema-version mismatch (all of which should trigger a rebuild).
 fn read_indexed_at(db_path: &Path) -> Option<f64> {
-    use rusqlite::{Connection, OpenFlags};
-    use scat_core::core::db::SCHEMA_VERSION;
+    use scat_core::core::db::{SCHEMA_VERSION, open_readonly};
 
-    let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    let conn = open_readonly(db_path).ok()?;
     let (ts, schema_ver): (Option<String>, i64) = conn
         .query_row(
             "SELECT build_timestamp, schema_version FROM index_metadata WHERE id = 1",

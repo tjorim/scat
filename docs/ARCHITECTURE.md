@@ -43,18 +43,29 @@ Concretely this means:
 
 Every client that consumes `scripts.sqlite` **must open it read-only**.
 
-Open it with the `SQLITE_OPEN_READ_ONLY` flag (`core::db::open_db`), not by
-building a `file:…?mode=ro` URI. The two enforce identically, but the flag
-takes a path rather than a string, so a catalog path containing `?` or `#`
-can't be silently misparsed — and those paths come from user config.
+Open it through `core::db::open_db` (schema-checked) or
+`core::db::open_readonly` (bare). Those two are the only places the
+`SQLITE_OPEN_READ_ONLY` flag is written; `open_db` is built on
+`open_readonly`, so the flag appears exactly once in the codebase.
+
+That matters more than it looks. Spelled out at each call site, "always
+read-only" would be a convention a new read path could silently break —
+opening an existing catalog read-write *succeeds*, and only misbehaves later
+by creating `-wal`/`-shm` sidecars on the share. Funnelled through one
+function, a bare `Connection::open` in a read path is visibly wrong.
+
+The flag, rather than a `file:…?mode=ro` URI: both enforce identically, but
+the flag takes a path instead of a string, so a catalog path containing `?`
+or `#` can't be silently misparsed — and those paths come from user config.
 
 Benefits:
 - Prevents accidental schema or data mutations from client code.
 - Allows the file to be placed on a read-only network share.
 - Makes it safe to open the same database from multiple processes simultaneously.
 
-**Rule:** any read-only command that opens the database must pass
-`SQLITE_OPEN_READ_ONLY`.
+**Rule:** any read-only command that opens the database must go through
+`open_db` or `open_readonly` — never `Connection::open`, and never a
+hand-written flag.
 
 `catalog build` is not an exception to that rule — the rule simply never
 comes up, because **nothing opens the published `scripts.sqlite` read-write,

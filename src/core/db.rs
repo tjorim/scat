@@ -275,13 +275,35 @@ END;
 // Public helpers
 // ---------------------------------------------------------------------------
 
+/// Open `path` read-only, without validating its schema.
+///
+/// **The one place the read-only flag is written.** Every read path goes
+/// through this or through [`open_db`] (which builds on it), so the
+/// "clients never open the catalog read-write" invariant lives in one
+/// function instead of being re-asserted at each call site — a raw
+/// `Connection::open` in a read path is then visibly wrong, rather than
+/// something that works today and quietly creates `-wal`/`-shm` sidecars on
+/// the share.
+///
+/// Prefer [`open_db`] when the caller needs a schema-checked catalog. This
+/// bare form is for the handful of readers that deliberately skip that
+/// check: reading `index_metadata` to *decide* whether a schema is usable
+/// (where validating first would be circular), and copying a database
+/// page-by-page (where a mismatch isn't this layer's problem).
+pub fn open_readonly(path: &Path) -> Result<Connection> {
+    Ok(Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?)
+}
+
 /// Open an existing database at `path` in **read-only** mode.
 pub fn open_db(path: &Path) -> Result<Connection> {
     if !path.exists() {
         return Err(Error::NotFound(path.display().to_string()));
     }
     debug!(path = %path.display(), "opening read-only database");
-    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let conn = open_readonly(path)?;
     // `temp_store = MEMORY` keeps temp b-trees (e.g. the `ORDER BY
     // bm25(...)` sort in `fts_query_filtered`) off disk; it's a
     // per-connection setting SQLite doesn't persist in the database file, so
@@ -383,7 +405,7 @@ fn create_db_inner(path: &Path, exclusive: bool) -> Result<Connection> {
 /// callers should treat any outcome other than `Some(SCHEMA_VERSION)` as
 /// ineligible and fall back to a full rebuild.
 pub fn schema_version_of(path: &Path) -> Option<i64> {
-    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    let conn = open_readonly(path).ok()?;
     conn.query_row(
         "SELECT schema_version FROM index_metadata WHERE id = 1",
         [],
@@ -710,6 +732,28 @@ mod tests {
     }
 
     #[test]
+    fn open_readonly_refuses_writes() {
+        // The whole read side funnels through this one function, so this is
+        // the single place that has to hold for the "clients never write the
+        // catalog" invariant to be real rather than conventional.
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("catalog.sqlite");
+        drop(create_db(&path).unwrap());
+
+        let conn = open_readonly(&path).unwrap();
+        let err = conn
+            .execute(
+                "INSERT INTO scripts (logical_path, language) VALUES ('/x.py', 'python')",
+                [],
+            )
+            .unwrap_err();
+        assert!(
+            err.to_string().to_lowercase().contains("readonly"),
+            "expected a readonly failure, got: {err}"
+        );
+    }
+
+    #[test]
     fn plain_create_db_stays_shareable() {
         // The exclusive lock belongs to the indexer's private WIP file, not
         // to every database this crate creates: `create_db` is public API,
@@ -725,7 +769,7 @@ mod tests {
             )
             .unwrap();
 
-        let reader = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let reader = open_readonly(&path).unwrap();
         let count: i64 = reader
             .query_row("SELECT COUNT(*) FROM scripts", [], |r| r.get(0))
             .unwrap();

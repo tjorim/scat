@@ -33,11 +33,12 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::{debug, warn};
 
+use crate::core::db::open_readonly;
 use crate::error::{Error, Result};
 
 /// Default cache root — tmpfs on every mainstream Linux distribution.
@@ -197,7 +198,7 @@ impl CacheEntry {
 
     /// Copy `source` into the cache and record `stamp` as what it holds.
     fn populate(&self, source: &Path, stamp: &SourceStamp) -> Result<()> {
-        let src = Connection::open_with_flags(source, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let src = open_readonly(source)?;
         let build_timestamp = build_timestamp(&src)?;
 
         // The published file changed identity (a rebuild, a rotation, a
@@ -340,7 +341,7 @@ fn build_timestamp(conn: &Connection) -> Result<String> {
 }
 
 fn cached_build_timestamp(path: &Path) -> Option<String> {
-    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    let conn = open_readonly(path).ok()?;
     build_timestamp(&conn).ok()
 }
 
@@ -525,7 +526,7 @@ mod tests {
 
         // WAL would require every read-only reader to create a `-shm`
         // alongside the entry; DELETE keeps readers strictly read-only.
-        let conn = Connection::open_with_flags(&cached, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let conn = open_readonly(&cached).unwrap();
         let mode: String = conn
             .query_row("PRAGMA journal_mode", [], |row| row.get(0))
             .unwrap();
@@ -569,8 +570,7 @@ mod tests {
         assert_eq!(refreshed, cached);
         assert_ne!(ino_of(&refreshed), before);
 
-        let conn =
-            Connection::open_with_flags(&refreshed, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let conn = open_readonly(&refreshed).unwrap();
         let stamp: String = conn
             .query_row(
                 "SELECT build_timestamp FROM index_metadata WHERE id = 1",

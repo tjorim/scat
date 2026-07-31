@@ -405,7 +405,7 @@ fn stderr_is_tty() -> bool {
 /// snapshot mechanism and copies page-by-page, so it's correct regardless of
 /// what's checkpointed versus what's still in the WAL.
 fn seed_from_previous_build(db_path: &Path, tmp_path: &Path) -> Result<Connection> {
-    let src = Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let src = crate::core::db::open_readonly(db_path)?;
     let mut dst = Connection::open(tmp_path)?;
     // Before the WAL switch below, for the same reason `create_db` does it
     // first — see `apply_exclusive_wal_locking`.
@@ -714,9 +714,7 @@ mod tests {
             "only the unchanged script should be reused"
         );
 
-        let conn =
-            Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-                .unwrap();
+        let conn = crate::core::db::open_readonly(&db_path).unwrap();
         let purpose: String = conn
             .query_row(
                 "SELECT purpose FROM scripts WHERE logical_path LIKE '%a.py'",
@@ -753,9 +751,7 @@ mod tests {
 
         // The stored mtime should have been refreshed to the new value so
         // the next build stays on the cheap size+mtime fast path.
-        let conn =
-            Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-                .unwrap();
+        let conn = crate::core::db::open_readonly(&db_path).unwrap();
         let stored_mtime: f64 = conn
             .query_row(
                 "SELECT mtime FROM scripts WHERE logical_path LIKE '%a.py'",
@@ -785,9 +781,7 @@ mod tests {
         build_index(std::slice::from_ref(&root), &db_path, incremental_opts(0)).unwrap();
 
         {
-            let conn =
-                Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-                    .unwrap();
+            let conn = crate::core::db::open_readonly(&db_path).unwrap();
             let resolved: Option<i64> = conn
                 .query_row(
                     "SELECT d.resolved_script_id FROM dependencies d
@@ -814,9 +808,7 @@ mod tests {
             "main.py's own content didn't change, so it should be reused"
         );
 
-        let conn =
-            Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-                .unwrap();
+        let conn = crate::core::db::open_readonly(&db_path).unwrap();
         let helper_count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM scripts WHERE logical_path LIKE '%helper.py'",
@@ -949,9 +941,7 @@ mod tests {
             "both scripts are unchanged on disk"
         );
 
-        let conn =
-            Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-                .unwrap();
+        let conn = crate::core::db::open_readonly(&db_path).unwrap();
         let resolved: Option<i64> = conn
             .query_row(
                 "SELECT resolved_script_id FROM dependencies WHERE script_id = ?1",
