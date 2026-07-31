@@ -43,9 +43,14 @@ Concretely this means:
 
 Every client that consumes `scripts.sqlite` **must open it read-only**.
 
+This is not configurable and is not meant to be: there is no config key, CLI
+flag, or environment variable that opens a catalog read-write. Read-only is
+unconditional for every client.
+
 Open it through `core::db::open_db` (schema-checked) or
-`core::db::open_readonly` (bare). Those two are the only places the
-`SQLITE_OPEN_READ_ONLY` flag is written; `open_db` is built on
+`core::db::open_readonly` (bare). Those two are the only places SQLite's own
+`SQLITE_OPEN_READ_ONLY` open flag (the `sqlite3_open_v2()` argument, surfaced
+by rusqlite as `Connection::open_with_flags`) is named; `open_db` is built on
 `open_readonly`, so the flag appears exactly once in the codebase.
 
 That matters more than it looks. Spelled out at each call site, "always
@@ -54,9 +59,10 @@ opening an existing catalog read-write *succeeds*, and only misbehaves later
 by creating `-wal`/`-shm` sidecars on the share. Funnelled through one
 function, a bare `Connection::open` in a read path is visibly wrong.
 
-The flag, rather than a `file:…?mode=ro` URI: both enforce identically, but
-the flag takes a path instead of a string, so a catalog path containing `?`
-or `#` can't be silently misparsed — and those paths come from user config.
+Why the flag rather than a `file:…?mode=ro` URI, which is the other way to
+say the same thing to SQLite: both enforce identically, but the flag takes a
+path instead of a string, so a catalog path containing `?` or `#` can't be
+silently misparsed — and those paths come from user config.
 
 Benefits:
 - Prevents accidental schema or data mutations from client code.
