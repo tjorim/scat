@@ -170,16 +170,23 @@ fn has_vim_readonly_arg(args: &[String]) -> bool {
         .any(|arg| matches!(arg.as_str(), "-R" | "-M" | "-m" | "-Z" | "-y"))
 }
 
+/// Derive a temp-file name for a logical path, preserving the script's own
+/// filename (and so its extension, for the viewer's syntax highlighting).
+///
+/// Only `/` and control characters are rewritten: those are the only
+/// characters that can't appear in a Linux filename, and rewriting them is
+/// what keeps the name from escaping the temp directory. Characters that are
+/// merely illegal on Windows (`:*?"<>|`) are left alone — a script really
+/// named `report:daily.py` opens under its own name.
 fn safe_view_filename(logical_path: &str) -> String {
     let raw_name = logical_path
-        .rsplit(['/', '\\'])
+        .rsplit('/')
         .find(|part| !part.is_empty())
         .unwrap_or("script");
     let mut name = raw_name
         .chars()
         .map(|ch| {
-            if ch.is_control() || matches!(ch, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
-            {
+            if ch.is_control() || ch == '/' {
                 '_'
             } else {
                 ch
@@ -236,9 +243,17 @@ mod tests {
 
     #[test]
     fn safe_view_filename_keeps_extension_and_sanitizes_name() {
+        // `:` is a perfectly good Linux filename character; keep it rather
+        // than mangling the name to satisfy a platform scat no longer targets.
         assert_eq!(
-            safe_view_filename("/catalog/scripts/bad:name.py"),
-            "bad_name.py"
+            safe_view_filename("/catalog/scripts/odd:name.py"),
+            "odd:name.py"
+        );
+        // Control characters still go — they are what could make the name
+        // unusable, or escape the temp directory.
+        assert_eq!(
+            safe_view_filename("/catalog/scripts/we\u{7}ird.py"),
+            "we_ird.py"
         );
         assert_eq!(safe_view_filename("/catalog/scripts/"), "scripts");
     }

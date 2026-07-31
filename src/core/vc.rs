@@ -437,7 +437,7 @@ fn scan_revision_dir(
     let container = dir.parent().unwrap_or(scan_root);
     let rel_container = container
         .strip_prefix(scan_root)
-        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_default();
 
     // Don't follow symlinks within the DEVELOP/ARCHIVE dir — circular links
@@ -467,7 +467,7 @@ fn scan_revision_dir(
         let rel_in_dir = path
             .parent()
             .and_then(|p| p.strip_prefix(dir).ok())
-            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default();
 
         // Combine non-empty path segments: prefix / rel_container / rel_in_dir / script_name

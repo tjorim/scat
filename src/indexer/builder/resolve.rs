@@ -7,8 +7,12 @@ use crate::core::db::query_rows;
 use crate::error::Result;
 
 pub(super) fn module_name_from_logical_path(logical_path: &str) -> String {
-    let mut path = logical_path.replace('\\', "/");
-    path = path.trim_start_matches('/').to_string();
+    // Logical paths are `/`-separated by construction (see
+    // `scanner::make_logical_path`), so there is no separator style to
+    // normalise here — unlike the *references inside* a script, which can
+    // legitimately be written with backslashes and are normalised where they
+    // are parsed.
+    let mut path = logical_path.trim_start_matches('/').to_string();
     // `path` is a catalog logical path (always lowercase `.py`), not a
     // filesystem path, so a case-sensitive suffix check is correct here.
     #[allow(clippy::case_sensitive_file_extension_comparisons)]

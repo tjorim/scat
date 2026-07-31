@@ -126,13 +126,18 @@ pub fn read_head(path: &Path, n: usize) -> Vec<String> {
 // Logical path builder
 // ---------------------------------------------------------------------------
 
+/// Build a script's logical catalog path from where it was scanned.
+///
+/// The indexer runs on Linux, so the path components here are already
+/// `/`-separated and a literal `\` in a name is just an (unusual but legal)
+/// filename character — not a separator to rewrite.
 fn make_logical_path(filepath: &Path, root: &Path, logical_prefix: &str) -> String {
     let relative = match filepath.strip_prefix(root) {
-        Ok(r) => r.to_string_lossy().replace('\\', "/"),
-        Err(_) => return filepath.to_string_lossy().replace('\\', "/"),
+        Ok(r) => r.to_string_lossy(),
+        Err(_) => return filepath.to_string_lossy().into_owned(),
     };
     if logical_prefix.is_empty() {
-        filepath.to_string_lossy().replace('\\', "/")
+        filepath.to_string_lossy().into_owned()
     } else {
         format!("{}/{}", logical_prefix.trim_end_matches('/'), relative)
     }
@@ -816,6 +821,34 @@ mod tests {
     fn detects_python_from_extension() {
         assert_eq!(detect_language(Path::new("foo.py")), "python");
         assert_eq!(detect_language(Path::new("FOO.PY")), "python");
+    }
+
+    #[test]
+    fn logical_path_joins_scan_relative_segments() {
+        assert_eq!(
+            make_logical_path(
+                Path::new("/net/scripts/tools/foo.py"),
+                Path::new("/net/scripts"),
+                "/catalog/scripts",
+            ),
+            "/catalog/scripts/tools/foo.py"
+        );
+    }
+
+    #[test]
+    fn logical_path_keeps_a_literal_backslash_in_a_filename() {
+        // `\` is an ordinary character in a Linux filename, not a separator.
+        // Rewriting it (as the Windows-era code did) invented a directory
+        // level that doesn't exist, and the logical path then matched nothing
+        // on disk.
+        assert_eq!(
+            make_logical_path(
+                Path::new(r"/net/scripts/od\d.py"),
+                Path::new("/net/scripts"),
+                "/catalog/scripts",
+            ),
+            r"/catalog/scripts/od\d.py"
+        );
     }
 
     #[test]
