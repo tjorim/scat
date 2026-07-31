@@ -7,19 +7,17 @@
 
 ## 1. Logical paths vs OS paths
 
-All paths stored in the SQLite database are **logical paths** — repository-relative
-POSIX-style paths (e.g. `/catalog/scripts/foo/bar.py`).
+The indexer runs on a single CRON server against a fixed set of scan roots,
+and every client reads the same shared database, so a script's **logical
+path** stored in the SQLite database is simply its absolute filesystem path
+on the indexing host (e.g. `/shared/tools/security/foo.sh`) — there is no
+separate portable-prefix scheme to keep in sync with it.
 
-Logical paths are:
-- Location-neutral (the same database is used from every client host).
-- Stable across machine boundaries.
-- Human-readable and copy-paste friendly.
-
-**OS-path resolution happens at runtime**, never at index time.  
-The Rust core resolves logical paths to local absolute paths through a
-configurable root prefix (a mount point on the client).
-
-**Rule:** never store absolute OS paths in the database.
+For the rarer case where a client's local mount doesn't match the indexing
+host's layout, `scat`'s client tools accept an optional mapping file
+(`--mapping`, see `docs/scat-mapping.example.yaml`) that translates a logical
+path's leading segment to that host's real root before opening the file.
+Absent a mapping, the logical path *is* the real path.
 
 ---
 

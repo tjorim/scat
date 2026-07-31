@@ -126,21 +126,12 @@ pub fn read_head(path: &Path, n: usize) -> Vec<String> {
 // Logical path builder
 // ---------------------------------------------------------------------------
 
-/// Build a script's logical catalog path from where it was scanned.
-///
-/// The indexer runs on Linux, so the path components here are already
-/// `/`-separated and a literal `\` in a name is just an (unusual but legal)
-/// filename character — not a separator to rewrite.
-fn make_logical_path(filepath: &Path, root: &Path, logical_prefix: &str) -> String {
-    let relative = match filepath.strip_prefix(root) {
-        Ok(r) => r.to_string_lossy(),
-        Err(_) => return filepath.to_string_lossy().into_owned(),
-    };
-    if logical_prefix.is_empty() {
-        filepath.to_string_lossy().into_owned()
-    } else {
-        format!("{}/{}", logical_prefix.trim_end_matches('/'), relative)
-    }
+/// Build a script's logical catalog path from where it was scanned: its
+/// absolute filesystem path. Every host that runs the indexer scans the same
+/// scan_root, so a logical path is already stable and portable without a
+/// separate relocatable-prefix scheme.
+fn make_logical_path(filepath: &Path) -> String {
+    filepath.to_string_lossy().into_owned()
 }
 
 /// Whether a working-directory file whose name parses as `<script>_<timestamp>`
@@ -254,8 +245,6 @@ const SCAN_PROCESS_BATCH_SIZE: usize = 500;
 fn process_candidate(
     filepath: &Path,
     is_symlink: bool,
-    root: &Path,
-    logical_prefix: &str,
     head_lines: usize,
     os_flavor: &str,
     now: f64,
@@ -273,8 +262,7 @@ fn process_candidate(
             .map(|e| format!(".{}", e.to_lowercase()))
             .unwrap_or_default();
         if is_working_dir_revision(filepath, &script_name, &script_ext) {
-            let logical_path =
-                make_logical_path(&filepath.with_file_name(&script_name), root, logical_prefix);
+            let logical_path = make_logical_path(&filepath.with_file_name(&script_name));
             let age_seconds = filepath
                 .metadata()
                 .ok()
@@ -339,12 +327,12 @@ fn process_candidate(
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map_or(0.0, |d| d.as_secs_f64());
 
-    let logical_path = make_logical_path(filepath, root, logical_prefix);
+    let logical_path = make_logical_path(filepath);
 
     let symlink_target = if is_symlink {
         std::fs::canonicalize(filepath)
             .ok()
-            .map(|resolved| make_logical_path(&resolved, root, logical_prefix))
+            .map(|resolved| make_logical_path(&resolved))
     } else {
         None
     };
@@ -375,7 +363,6 @@ fn process_candidate(
 /// scripts.
 pub fn scan_paths_with_revisions(
     roots: &[PathBuf],
-    logical_prefix: &str,
     head_lines: usize,
     ignore_files: &[PathBuf],
     checkout_dirs: &[&str],
@@ -384,7 +371,6 @@ pub fn scan_paths_with_revisions(
 ) -> Result<ScanResult> {
     scan_paths_with_revisions_impl(
         roots,
-        logical_prefix,
         head_lines,
         ignore_files,
         checkout_dirs,
@@ -398,10 +384,8 @@ pub fn scan_paths_with_revisions(
 /// directory tree view as the walk progresses — see [`ScanTreeView`]. Used
 /// only for interactive manual runs; unattended cron builds pass `None` to
 /// [`scan_paths_with_revisions`] instead and never construct one.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn scan_paths_with_revisions_and_tree(
     roots: &[PathBuf],
-    logical_prefix: &str,
     head_lines: usize,
     ignore_files: &[PathBuf],
     checkout_dirs: &[&str],
@@ -411,7 +395,6 @@ pub(crate) fn scan_paths_with_revisions_and_tree(
 ) -> Result<ScanResult> {
     scan_paths_with_revisions_impl(
         roots,
-        logical_prefix,
         head_lines,
         ignore_files,
         checkout_dirs,
@@ -421,10 +404,8 @@ pub(crate) fn scan_paths_with_revisions_and_tree(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn scan_paths_with_revisions_impl(
     roots: &[PathBuf],
-    logical_prefix: &str,
     head_lines: usize,
     ignore_files: &[PathBuf],
     checkout_dirs: &[&str],
@@ -619,17 +600,7 @@ fn scan_paths_with_revisions_impl(
 
             let outcomes: Vec<CandidateOutcome> = batch
                 .par_iter()
-                .map(|c| {
-                    process_candidate(
-                        &c.path,
-                        c.is_symlink,
-                        root,
-                        logical_prefix,
-                        head_lines,
-                        &os_flavor,
-                        now,
-                    )
-                })
+                .map(|c| process_candidate(&c.path, c.is_symlink, head_lines, &os_flavor, now))
                 .collect();
 
             for outcome in outcomes {
@@ -670,7 +641,6 @@ fn scan_paths_with_revisions_impl(
 /// Scan roots recursively and return indexable active script records.
 pub fn scan_paths(
     roots: &[PathBuf],
-    logical_prefix: &str,
     head_lines: usize,
     ignore_files: &[PathBuf],
     checkout_dirs: &[&str],
@@ -679,7 +649,6 @@ pub fn scan_paths(
 ) -> Result<Vec<ScriptRecord>> {
     Ok(scan_paths_with_revisions(
         roots,
-        logical_prefix,
         head_lines,
         ignore_files,
         checkout_dirs,
@@ -824,14 +793,10 @@ mod tests {
     }
 
     #[test]
-    fn logical_path_joins_scan_relative_segments() {
+    fn logical_path_is_the_absolute_filesystem_path() {
         assert_eq!(
-            make_logical_path(
-                Path::new("/net/scripts/tools/foo.py"),
-                Path::new("/net/scripts"),
-                "/catalog/scripts",
-            ),
-            "/catalog/scripts/tools/foo.py"
+            make_logical_path(Path::new("/net/scripts/tools/foo.py")),
+            "/net/scripts/tools/foo.py"
         );
     }
 
@@ -842,12 +807,8 @@ mod tests {
         // level that doesn't exist, and the logical path then matched nothing
         // on disk.
         assert_eq!(
-            make_logical_path(
-                Path::new(r"/net/scripts/od\d.py"),
-                Path::new("/net/scripts"),
-                "/catalog/scripts",
-            ),
-            r"/catalog/scripts/od\d.py"
+            make_logical_path(Path::new(r"/net/scripts/od\d.py")),
+            r"/net/scripts/od\d.py"
         );
     }
 
@@ -903,7 +864,6 @@ mod tests {
         let shutdown = AtomicBool::new(false);
         let result = scan_paths_with_revisions(
             std::slice::from_ref(&scan_root),
-            "/catalog/linux/scripts",
             5,
             &[],
             &[],
@@ -916,8 +876,9 @@ mod tests {
         assert!(result.scripts[0].physical_path.ends_with("bar.py"));
 
         assert_eq!(result.revisions.len(), 2);
+        let expected_logical_path = scan_root.join("bar.py").to_string_lossy().into_owned();
         for revision in &result.revisions {
-            assert_eq!(revision.logical_path, "/catalog/linux/scripts/bar.py");
+            assert_eq!(revision.logical_path, expected_logical_path);
             assert_eq!(revision.revision_type, REVISION_TYPE_WORKING);
             assert_eq!(revision.user, "");
             assert_eq!(revision.os_flavor, "linux");
@@ -954,7 +915,6 @@ mod tests {
         let shutdown = AtomicBool::new(false);
         let result = scan_paths_with_revisions(
             std::slice::from_ref(&scan_root),
-            "/catalog/linux/scripts",
             5,
             &[],
             &[],
@@ -968,14 +928,15 @@ mod tests {
             .iter()
             .map(|s| s.logical_path.as_str())
             .collect();
-        assert_eq!(paths, vec!["/catalog/linux/scripts/prepare_release"]);
+        let expected_logical_path = scan_root
+            .join("prepare_release")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(paths, vec![expected_logical_path.as_str()]);
 
         assert_eq!(result.revisions.len(), 2);
         for revision in &result.revisions {
-            assert_eq!(
-                revision.logical_path,
-                "/catalog/linux/scripts/prepare_release"
-            );
+            assert_eq!(revision.logical_path, expected_logical_path);
             assert_eq!(revision.revision_type, REVISION_TYPE_WORKING);
         }
     }
@@ -1007,7 +968,6 @@ mod tests {
         let shutdown = AtomicBool::new(false);
         let result = scan_paths_with_revisions(
             std::slice::from_ref(&scan_root),
-            "/catalog/linux/scripts",
             5,
             &[],
             &[],
@@ -1019,11 +979,16 @@ mod tests {
         assert_eq!(result.scripts.len(), 1);
         assert_eq!(
             result.scripts[0].logical_path,
-            "/catalog/linux/scripts/prepare_release"
+            scan_root.join("prepare_release").to_string_lossy()
         );
         assert_eq!(
             result.scripts[0].symlink_target.as_deref(),
-            Some("/catalog/linux/scripts/prepare_release_20260729_140513")
+            Some(
+                scan_root
+                    .join("prepare_release_20260729_140513")
+                    .to_string_lossy()
+                    .as_ref()
+            )
         );
         assert_eq!(result.revisions.len(), 2);
     }
@@ -1039,24 +1004,26 @@ mod tests {
         std::fs::write(dir.path().join("release_backup.sh~"), "#!/bin/bash\n").unwrap();
 
         let shutdown = AtomicBool::new(false);
-        let records = scan_paths(
-            &[dir.path().to_path_buf()],
-            "/catalog/scripts",
-            5,
-            &[],
-            &[],
-            None,
-            &shutdown,
-        )
-        .unwrap();
+        let records =
+            scan_paths(&[dir.path().to_path_buf()], 5, &[], &[], None, &shutdown).unwrap();
 
         let mut paths: Vec<&str> = records.iter().map(|r| r.logical_path.as_str()).collect();
         paths.sort_unstable();
+        let expected_prepare_release = dir
+            .path()
+            .join("prepare_release")
+            .to_string_lossy()
+            .into_owned();
+        let expected_release_backup = dir
+            .path()
+            .join("release_backup.sh")
+            .to_string_lossy()
+            .into_owned();
         assert_eq!(
             paths,
             vec![
-                "/catalog/scripts/prepare_release",
-                "/catalog/scripts/release_backup.sh"
+                expected_prepare_release.as_str(),
+                expected_release_backup.as_str(),
             ]
         );
     }
@@ -1070,16 +1037,9 @@ mod tests {
         std::fs::write(dir.path().join("backup_20240101"), "#!/bin/bash\n").unwrap();
 
         let shutdown = AtomicBool::new(false);
-        let result = scan_paths_with_revisions(
-            &[dir.path().to_path_buf()],
-            "/catalog/scripts",
-            5,
-            &[],
-            &[],
-            None,
-            &shutdown,
-        )
-        .unwrap();
+        let result =
+            scan_paths_with_revisions(&[dir.path().to_path_buf()], 5, &[], &[], None, &shutdown)
+                .unwrap();
 
         assert_eq!(result.scripts.len(), 1);
         assert!(result.revisions.is_empty());
@@ -1093,16 +1053,8 @@ mod tests {
         std::fs::write(dir.path().join("c.txt"), "ignored").unwrap();
 
         let shutdown = AtomicBool::new(false);
-        let records = scan_paths(
-            &[dir.path().to_path_buf()],
-            "/catalog/scripts",
-            5,
-            &[],
-            &[],
-            None,
-            &shutdown,
-        )
-        .unwrap();
+        let records =
+            scan_paths(&[dir.path().to_path_buf()], 5, &[], &[], None, &shutdown).unwrap();
         assert_eq!(records.len(), 2);
         let paths: Vec<&str> = records.iter().map(|r| r.language.as_str()).collect();
         assert!(paths.contains(&"python"));
@@ -1118,16 +1070,8 @@ mod tests {
         std::fs::write(dir.path().join("vendor").join("skip.py"), "# python").unwrap();
 
         let shutdown = AtomicBool::new(false);
-        let records = scan_paths(
-            &[dir.path().to_path_buf()],
-            "/catalog/scripts",
-            5,
-            &[],
-            &[],
-            None,
-            &shutdown,
-        )
-        .unwrap();
+        let records =
+            scan_paths(&[dir.path().to_path_buf()], 5, &[], &[], None, &shutdown).unwrap();
 
         assert_eq!(records.len(), 1);
         assert!(records[0].physical_path.ends_with("keep.py"));
@@ -1145,7 +1089,6 @@ mod tests {
         let shutdown = AtomicBool::new(false);
         let records = scan_paths(
             &[dir.path().to_path_buf()],
-            "/catalog/scripts",
             5,
             &[ignore_file],
             &[],
@@ -1172,7 +1115,6 @@ mod tests {
         let shutdown = AtomicBool::new(false);
         let result = scan_paths_with_revisions(
             &[dir.path().to_path_buf()],
-            "/catalog/scripts",
             5,
             &[],
             &["DEVELOP"],
@@ -1197,7 +1139,6 @@ mod tests {
         let shutdown = AtomicBool::new(false);
         let result = scan_paths_with_revisions(
             &[dir.path().to_path_buf()],
-            "/catalog/scripts",
             5,
             &[],
             &["ARCHIVE"],
@@ -1226,7 +1167,6 @@ mod tests {
         let shutdown = AtomicBool::new(false);
         let result = scan_paths_with_revisions(
             &[dir.path().to_path_buf()],
-            "/catalog/scripts",
             5,
             &[],
             &["WORKING"],
@@ -1322,16 +1262,8 @@ mod tests {
         std::fs::write(dir.path().join("huge.py"), &huge).unwrap();
 
         let shutdown = AtomicBool::new(false);
-        let records = scan_paths(
-            &[dir.path().to_path_buf()],
-            "/catalog/scripts",
-            5,
-            &[],
-            &[],
-            None,
-            &shutdown,
-        )
-        .unwrap();
+        let records =
+            scan_paths(&[dir.path().to_path_buf()], 5, &[], &[], None, &shutdown).unwrap();
 
         assert_eq!(records.len(), 1);
         assert!(records[0].physical_path.ends_with("small.py"));
@@ -1346,16 +1278,8 @@ mod tests {
         std::os::unix::fs::symlink(outside.path(), root.path().join("escape")).unwrap();
 
         let shutdown = AtomicBool::new(false);
-        let records = scan_paths(
-            &[root.path().to_path_buf()],
-            "/catalog/scripts",
-            5,
-            &[],
-            &[],
-            None,
-            &shutdown,
-        )
-        .unwrap();
+        let records =
+            scan_paths(&[root.path().to_path_buf()], 5, &[], &[], None, &shutdown).unwrap();
 
         assert_eq!(records.len(), 1);
         assert!(records[0].physical_path.ends_with("keep.py"));
@@ -1370,16 +1294,8 @@ mod tests {
         std::os::unix::fs::symlink(&real, root.path().join("alt")).unwrap();
 
         let shutdown = AtomicBool::new(false);
-        let records = scan_paths(
-            &[root.path().to_path_buf()],
-            "/catalog/scripts",
-            5,
-            &[],
-            &[],
-            None,
-            &shutdown,
-        )
-        .unwrap();
+        let records =
+            scan_paths(&[root.path().to_path_buf()], 5, &[], &[], None, &shutdown).unwrap();
 
         // Both the real path and the in-root symlink alias are indexed.
         assert_eq!(records.len(), 2);
@@ -1398,16 +1314,8 @@ mod tests {
         }
 
         let shutdown = AtomicBool::new(false);
-        let records = scan_paths(
-            &[dir.path().to_path_buf()],
-            "/catalog/scripts",
-            5,
-            &[],
-            &[],
-            None,
-            &shutdown,
-        )
-        .unwrap();
+        let records =
+            scan_paths(&[dir.path().to_path_buf()], 5, &[], &[], None, &shutdown).unwrap();
 
         assert_eq!(records.len(), file_count);
         let mut seen: HashSet<&str> = HashSet::new();
@@ -1427,16 +1335,9 @@ mod tests {
         std::fs::write(dir.path().join("a.py"), "# python").unwrap();
         let shutdown = AtomicBool::new(true);
 
-        let err = scan_paths_with_revisions(
-            &[dir.path().to_path_buf()],
-            "/catalog/scripts",
-            5,
-            &[],
-            &[],
-            None,
-            &shutdown,
-        )
-        .unwrap_err();
+        let err =
+            scan_paths_with_revisions(&[dir.path().to_path_buf()], 5, &[], &[], None, &shutdown)
+                .unwrap_err();
 
         assert!(matches!(err, Error::Interrupted));
     }
