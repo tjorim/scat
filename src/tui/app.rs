@@ -67,6 +67,7 @@ impl TuiApp {
             fullscreen: false,
             tick: 0,
             needs_redraw: true,
+            force_full_redraw: false,
             click_regions: Vec::new(),
             last_click: None,
             flash: None,

@@ -1310,3 +1310,25 @@ fn functions_pane_virtualizes_large_lists() {
     assert!(!rendered.contains("func_0000"));
     assert!(app.functions_state.offset() > 0);
 }
+
+#[test]
+fn copying_the_selected_path_requests_a_full_redraw() {
+    let db = super::make_test_db();
+    let mut app = make_app(db.path());
+    app.detail = Some(detail_row("/catalog/scripts/tools/foo.py"));
+    app.detail_loading = false;
+
+    assert!(!app.force_full_redraw);
+    app.copy_selected_path();
+
+    // The OSC 52 write bypasses ratatui's Terminal, so the run loop must be
+    // told to clear and fully repaint on the next frame — otherwise a
+    // terminal that reacts visibly to the escape sequence (a permission
+    // prompt, a byte it doesn't swallow) leaves the screen looking shifted,
+    // since ratatui's diffed redraw would otherwise trust its stale idea of
+    // what's already on screen.
+    assert!(
+        app.force_full_redraw,
+        "copying a path must request a full redraw"
+    );
+}

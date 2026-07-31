@@ -225,6 +225,12 @@ impl TuiApp {
         let Some(path) = self.selected_logical_path() else {
             return;
         };
+        // The OSC 52 write below goes straight to stdout, outside ratatui's
+        // rendering — force a full repaint next frame so any terminal quirk
+        // it triggers (a permission prompt, a byte or two it doesn't
+        // swallow) gets corrected rather than leaving the screen visibly
+        // shifted.
+        self.force_full_redraw = true;
         match clipboard::copy_to_clipboard(&path) {
             Ok(()) => self.flash = Some(format!("Copied {path}")),
             Err(err) => self.error = Some(format!("Copy failed: {err}")),
