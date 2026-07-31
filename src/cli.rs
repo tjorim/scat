@@ -18,6 +18,17 @@ pub struct Cli {
     #[arg(long, env = "SCAT_CONFIG", global = true)]
     pub(crate) config: Option<PathBuf>,
 
+    /// Read the catalog directly instead of through the host-local cache.
+    ///
+    /// `SCAT_NO_CACHE` is resolved by [`resolve_no_cache`] rather than clap's
+    /// `env`, which on a `bool` would reject everything but `true`/`false`.
+    #[arg(long, global = true)]
+    pub(crate) no_cache: bool,
+
+    /// Directory holding the host-local catalog cache (default: /dev/shm).
+    #[arg(long, env = "SCAT_CACHE_DIR", global = true)]
+    pub(crate) cache_dir: Option<PathBuf>,
+
     /// Disable color in output.
     #[arg(long, global = true)]
     pub(crate) no_color: bool,
@@ -32,6 +43,27 @@ pub struct Cli {
 
 pub fn resolve_no_color(flag: bool, no_color_env: Option<&OsStr>) -> bool {
     flag || no_color_env.is_some_and(|value| !value.is_empty())
+}
+
+/// Resolve `--no-cache` against `SCAT_NO_CACHE`.
+///
+/// Deliberately not clap's `env`: on a `bool` field that accepts only the
+/// literal values `true`/`false`, so the obvious `SCAT_NO_CACHE=1` would not
+/// disable the cache but abort the command with a parse error — and since the
+/// flag is global, it would abort *every* command until the variable was
+/// unset.
+///
+/// Read leniently instead. Unset, empty, and the usual "off" spellings leave
+/// the cache enabled; anything else disables it. Unlike `NO_COLOR` — whose
+/// "set to anything non-empty" rule comes from its published spec — this is
+/// scat's own variable, so `SCAT_NO_CACHE=0` means what it looks like.
+pub fn resolve_no_cache(flag: bool, no_cache_env: Option<&OsStr>) -> bool {
+    flag || no_cache_env.is_some_and(|value| {
+        !matches!(
+            value.to_string_lossy().trim().to_ascii_lowercase().as_str(),
+            "" | "0" | "false" | "no" | "off"
+        )
+    })
 }
 
 #[derive(Subcommand)]
@@ -469,6 +501,37 @@ mod tests {
     fn no_color_resolution_ignores_empty_env_without_flag() {
         assert!(!resolve_no_color(false, Some(OsStr::new(""))));
         assert!(resolve_no_color(true, Some(OsStr::new(""))));
+    }
+
+    #[test]
+    fn no_cache_env_accepts_the_spellings_a_user_actually_types() {
+        // Regression guard: as a clap `env` on a `bool`, every one of these
+        // but `true`/`false` aborted the command with a parse error instead
+        // of being interpreted — and the flag is global, so it broke every
+        // subcommand rather than just the cache.
+        for value in ["1", "true", "TRUE", "yes", "on", " 1 ", "banana"] {
+            assert!(
+                resolve_no_cache(false, Some(OsStr::new(value))),
+                "SCAT_NO_CACHE={value} should disable the cache"
+            );
+        }
+    }
+
+    #[test]
+    fn no_cache_env_leaves_the_cache_on_when_unset_or_switched_off() {
+        for value in ["", "0", "false", "FALSE", "no", "off", "  "] {
+            assert!(
+                !resolve_no_cache(false, Some(OsStr::new(value))),
+                "SCAT_NO_CACHE={value} should leave the cache enabled"
+            );
+        }
+        assert!(!resolve_no_cache(false, None));
+    }
+
+    #[test]
+    fn no_cache_flag_wins_over_any_env_value() {
+        assert!(resolve_no_cache(true, None));
+        assert!(resolve_no_cache(true, Some(OsStr::new("0"))));
     }
 
     #[test]

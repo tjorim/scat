@@ -9,7 +9,7 @@ It provides:
 - Code‑aware linking between scripts (imports, dependencies, entry points)
 - Offline support for RHEL environments (no internet required)
 
-The catalog is **indexed nightly** on a central CRON server and consumed **read‑only** by engineers on Windows and RHEL systems.
+The catalog is **indexed nightly** on a central CRON server and consumed **read‑only** by engineers on RHEL systems.
 
 ---
 
@@ -34,25 +34,27 @@ This tool provides a **single searchable index** without:
 ```
 
             ┌────────────────────┐
-            │  RHEL CRON server   │
+            │  RHEL CRON server  │
             │                    │
             │ Nightly index job  │
-            │  - scan scripts  │
-            │  - parse scripts  │
-            │  - run tree-sitter│
-            │  - build SQLite   │
+            │  - scan scripts    │
+            │  - parse scripts   │
+            │  - run tree-sitter │
+            │  - build SQLite    │
             └─────────┬──────────┘
                       │
-          scripts.sqlite (read-only)
+          scripts.sqlite (read-only,
+           on the shared drive)
                       │
     ┌─────────────────┴────────────────┐
-    │                                  │
+    │  one copy per host, per rebuild   │
 
 ┌───────────────┐                ┌───────────────┐
-│ Windows users │                │  RHEL users   │
+│ RHEL host A   │                │ RHEL host B   │
 │               │                │               │
-│ scat CLI      │                │ scat CLI      │
-│ scat TUI      │                │ scat TUI      │
+│ /dev/shm copy │                │ /dev/shm copy │
+│   ↑ scat CLI  │                │   ↑ scat CLI  │
+│   ↑ scat TUI  │                │   ↑ scat TUI  │
 └───────────────┘                └───────────────┘
 
 ````
@@ -91,9 +93,9 @@ This tool provides a **single searchable index** without:
     path mapping (or the logical path directly when it is already a real file),
     failing clearly when the source file cannot be found
   - The viewer command is taken from `$SCAT_EDITOR`, then `$VISUAL`, then
-    `$EDITOR`, falling back to `view`/`vim -R`/`vi -R`/`less` (or `notepad` on
-    Windows). Vim-compatible editors are opened read-only so you can search with
-    `/` without accidentally editing.
+    `$EDITOR`, falling back to `view`/`vim -R`/`vi -R`/`less`. Vim-compatible
+    editors are opened read-only so you can search with `/` without
+    accidentally editing.
 
 Example commands:
 ```bash
@@ -208,8 +210,8 @@ example covering every field.
 
 Separately, `scat tui` accepts an optional **path-mapping file** (`--mapping
 <path>` / `SCAT_MAPPING`) that resolves a script's logical catalog path to
-its real Windows/Linux filesystem path, used by the `V` (view live
-filesystem source) key. See
+its real filesystem path, used by the `V` (view live filesystem source)
+key. See
 **[docs/scat-mapping.example.yaml](docs/scat-mapping.example.yaml)**.
 
 ***
@@ -221,28 +223,57 @@ filesystem source) key. See
 *   Built nightly by the indexer
 *   **Read‑only for all users**
 
-The database contains **logical paths** (e.g. `/catalog/scripts/...`) and is resolved to OS‑specific paths at runtime.
+The database contains **logical paths** (e.g. `/catalog/scripts/...`) that are resolved to real filesystem paths at runtime.
+
+### Local catalog cache
+
+The published `scripts.sqlite` lives on a shared network drive, but no `scat`
+process queries it there. On first use after a rebuild, one process copies the
+catalog into tmpfs (`/dev/shm` by default) with SQLite's Online Backup API and
+every `scat` process on that host — TUI session or one-off CLI query — reads
+the local copy instead. Staleness is detected from the published file's
+identity and its `index_metadata.build_timestamp`, so the copy costs one read
+per host per nightly rebuild rather than one per invocation.
+
+This keeps SQLite's locking off the network filesystem entirely, which matters
+because NFS byte-range locks are a documented source of client/server bugs and
+WAL mode needs an `mmap`-able `-shm` file that network filesystems generally
+don't provide. For the same reason the published catalog is written in
+rollback-journal mode: a WAL database needs that `-shm` file even for
+read-only connections.
+
+The cache is never load-bearing. If `/dev/shm` is missing, full, or owned by
+another user, `scat` logs a warning and reads the shared drive directly.
+
+| Flag | Env | Effect |
+|---|---|---|
+| `--cache-dir <path>` | `SCAT_CACHE_DIR` | Cache root (default `/dev/shm`) |
+| `--no-cache` | `SCAT_NO_CACHE` | Query the shared drive directly |
+
+`scat catalog info` prints the cache path in use when one is active.
 
 ***
 
 ## Offline & platform support
 
-✅ Windows  
-✅ RHEL  
+✅ RHEL / Linux  
 ✅ No internet access required  
-✅ Single compiled binary per platform  
+✅ Single compiled binary  
 ✅ No background services  
 ✅ No open ports
 
-The release artifacts are compiled Rust binaries:
+❌ Windows — support was dropped; clients and the indexer are Linux-only.
+The build fails fast on non-Unix targets rather than producing a binary
+whose atomic swap and tmpfs cache have no working equivalent.
+
+The release artifact is a compiled Rust binary:
 
 | Platform | Artifact | Rust Target |
 |---|---|---|
 | RHEL / Linux x86-64 | `scat` | `x86_64-unknown-linux-musl` |
-| Windows x86-64 | `scat.exe` | `x86_64-pc-windows-msvc` |
 
-Copy the matching artifact to a directory on `PATH`, set `SCAT_DB` to the
-shared `scripts.sqlite` catalog, and run `scat`.
+Copy the artifact to a directory on `PATH`, set `SCAT_DB` to the shared
+`scripts.sqlite` catalog, and run `scat`.
 
 For deployment details, see **[docs/VENDORING.md](docs/VENDORING.md)**.
 
@@ -284,9 +315,9 @@ Typical flow:
 
 ## Implementation
 
-scat's CLI and indexer are implemented in Rust, producing compiled native
-binaries for Windows (x86-64) and RHEL (x86-64). This removes Python version
-constraints, vendored wheels, and the `scat.sh` bootstrap script.
+scat's CLI and indexer are implemented in Rust, producing a compiled native
+binary for RHEL (x86-64). This removes Python version constraints, vendored
+wheels, and the `scat.sh` bootstrap script.
 
 ### Technical stack
 
@@ -304,7 +335,7 @@ constraints, vendored wheels, and the `scat.sh` bootstrap script.
 - **CLI**: Commands for search, inspection, dependencies, symlinks, diffs, vc pass-through, TUI browsing, and catalog management (`catalog build/stats/info/audit/diff`)
 - **Indexer**: Metadata extraction, dependency detection (AST + tree-sitter), atomic operations
 - **TUI**: Multi-pane navigation with search, results, metadata, preview, and related scripts
-- **Cross-compilation**: CI builds for Linux (musl) and Windows (MSVC)
+- **Deployment**: CI builds a static `x86_64-unknown-linux-musl` binary
 
 ***
 

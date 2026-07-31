@@ -7,7 +7,7 @@ use rusqlite::Connection;
 use tempfile::NamedTempFile;
 use tracing::{debug, warn};
 
-use crate::core::db::create_db;
+use crate::core::db::create_build_db;
 use crate::core::vc::{VcConfig, load_vc_config};
 use crate::error::{Error, Result};
 use crate::indexer::atomic::{atomic_swap, rotate_copies};
@@ -245,11 +245,11 @@ pub fn build_index(
                         error = %e,
                         "failed to seed incremental build from previous database, falling back to a full rebuild"
                     );
-                    (create_db(&tmp_path)?, false)
+                    (create_build_db(&tmp_path)?, false)
                 }
             }
         } else {
-            (create_db(&tmp_path)?, false)
+            (create_build_db(&tmp_path)?, false)
         };
         // Relax durability and grow caches for this throwaway build
         // connection — see `apply_bulk_build_pragmas` doc comment. Applied
@@ -310,6 +310,7 @@ pub fn build_index(
     // Clean up checkpoint files now that we have a complete DB.
     delete_wip_pair(db_path);
 
+    finalize_journal_mode(&tmp_path)?;
     validate(&tmp_path)?;
     debug!(
         phase = "validate",
@@ -404,14 +405,54 @@ fn stderr_is_tty() -> bool {
 /// snapshot mechanism and copies page-by-page, so it's correct regardless of
 /// what's checkpointed versus what's still in the WAL.
 fn seed_from_previous_build(db_path: &Path, tmp_path: &Path) -> Result<Connection> {
-    let src = Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let src = crate::core::db::open_readonly(db_path)?;
     let mut dst = Connection::open(tmp_path)?;
+    // Before the WAL switch below, for the same reason `create_db` does it
+    // first — see `apply_exclusive_wal_locking`.
+    crate::core::db::apply_exclusive_wal_locking(&dst)?;
     {
         let backup = rusqlite::backup::Backup::new(&src, &mut dst)?;
         backup.step(-1)?;
     }
+    // Whatever journal mode the seed carried, the WIP file wants WAL for the
+    // insert-heavy phase ahead of it — the same mode `create_db` sets on a
+    // from-scratch build, so both paths perform alike. The published
+    // database is switched back to a rollback journal by
+    // `finalize_journal_mode` just before the swap.
+    let _: String = dst.query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))?;
     dst.execute_batch(crate::core::db::DDL)?;
     Ok(dst)
+}
+
+// ---------------------------------------------------------------------------
+// Publication
+// ---------------------------------------------------------------------------
+
+/// Switch a finished WIP database out of WAL mode before it is published.
+///
+/// WAL is the right mode *during* a build — one writer, many small commits,
+/// no fsync per commit — but the wrong mode for the file that gets swapped
+/// onto the shared drive. WAL requires an `mmap`-able `-shm` file shared
+/// between connections, which network filesystems generally don't provide,
+/// and it needs one *even for read-only connections*: a reader that can't
+/// create `-shm` next to the catalog can't open it at all. A rollback-journal
+/// database is a single self-contained file that any reader can open with no
+/// sidecars and no write access to the directory holding it.
+///
+/// Switching modes here also checkpoints and removes the `-wal` file, so the
+/// atomic swap moves one complete file into place rather than a main file
+/// whose newest pages are still sitting in a sidecar left behind by the
+/// rename.
+fn finalize_journal_mode(db_path: &Path) -> Result<()> {
+    let conn = Connection::open(db_path)?;
+    let mode: String = conn.query_row("PRAGMA journal_mode = DELETE", [], |r| r.get(0))?;
+    debug!(
+        phase = "finalize_journal_mode",
+        path = %db_path.display(),
+        journal_mode = %mode,
+        "prepared database for publication"
+    );
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -673,9 +714,7 @@ mod tests {
             "only the unchanged script should be reused"
         );
 
-        let conn =
-            Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-                .unwrap();
+        let conn = crate::core::db::open_readonly(&db_path).unwrap();
         let purpose: String = conn
             .query_row(
                 "SELECT purpose FROM scripts WHERE logical_path LIKE '%a.py'",
@@ -712,9 +751,7 @@ mod tests {
 
         // The stored mtime should have been refreshed to the new value so
         // the next build stays on the cheap size+mtime fast path.
-        let conn =
-            Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-                .unwrap();
+        let conn = crate::core::db::open_readonly(&db_path).unwrap();
         let stored_mtime: f64 = conn
             .query_row(
                 "SELECT mtime FROM scripts WHERE logical_path LIKE '%a.py'",
@@ -744,9 +781,7 @@ mod tests {
         build_index(std::slice::from_ref(&root), &db_path, incremental_opts(0)).unwrap();
 
         {
-            let conn =
-                Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-                    .unwrap();
+            let conn = crate::core::db::open_readonly(&db_path).unwrap();
             let resolved: Option<i64> = conn
                 .query_row(
                     "SELECT d.resolved_script_id FROM dependencies d
@@ -773,9 +808,7 @@ mod tests {
             "main.py's own content didn't change, so it should be reused"
         );
 
-        let conn =
-            Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-                .unwrap();
+        let conn = crate::core::db::open_readonly(&db_path).unwrap();
         let helper_count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM scripts WHERE logical_path LIKE '%helper.py'",
@@ -908,9 +941,7 @@ mod tests {
             "both scripts are unchanged on disk"
         );
 
-        let conn =
-            Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-                .unwrap();
+        let conn = crate::core::db::open_readonly(&db_path).unwrap();
         let resolved: Option<i64> = conn
             .query_row(
                 "SELECT resolved_script_id FROM dependencies WHERE script_id = ?1",

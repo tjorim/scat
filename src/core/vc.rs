@@ -72,6 +72,7 @@ impl Default for VcConfigSection {
 #[derive(Debug, Deserialize, Default)]
 struct VcConfigFile {
     db_path: Option<String>,
+    cache_dir: Option<String>,
     scan_roots: Option<Vec<String>>,
     ignore_patterns: Option<Vec<String>>,
     vc: Option<VcConfigSection>,
@@ -92,6 +93,9 @@ pub const DEFAULT_ARCHIVE_DIRS: &[&str] = &["ARCHIVE"];
 pub struct VcConfig {
     /// Path to the catalog SQLite database.
     pub db_path: Option<PathBuf>,
+    /// Directory holding the host-local catalog cache. Falls back to
+    /// [`crate::core::cache::DEFAULT_CACHE_ROOT`] when unset.
+    pub cache_dir: Option<PathBuf>,
     /// Root directories to scan recursively when building the catalog.
     pub scan_roots: Vec<PathBuf>,
     /// Gitignore-style patterns applied during catalog scanning.
@@ -110,6 +114,7 @@ impl Default for VcConfig {
     fn default() -> Self {
         Self {
             db_path: None,
+            cache_dir: None,
             scan_roots: Vec::new(),
             ignore_patterns: Vec::new(),
             vc_executable: None,
@@ -252,6 +257,7 @@ pub fn load_vc_config(config_file: Option<&Path>) -> Result<VcConfig> {
     };
 
     let db_path = file_data.db_path.map(PathBuf::from);
+    let cache_dir = file_data.cache_dir.map(PathBuf::from);
     let scan_roots = match std::env::var("SCAT_SCAN_ROOTS").ok() {
         Some(s) => s
             .split(',')
@@ -270,6 +276,7 @@ pub fn load_vc_config(config_file: Option<&Path>) -> Result<VcConfig> {
 
     Ok(VcConfig {
         db_path,
+        cache_dir,
         scan_roots,
         ignore_patterns,
         vc_executable: vc.executable.map(PathBuf::from),
@@ -430,7 +437,7 @@ fn scan_revision_dir(
     let container = dir.parent().unwrap_or(scan_root);
     let rel_container = container
         .strip_prefix(scan_root)
-        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_default();
 
     // Don't follow symlinks within the DEVELOP/ARCHIVE dir — circular links
@@ -460,7 +467,7 @@ fn scan_revision_dir(
         let rel_in_dir = path
             .parent()
             .and_then(|p| p.strip_prefix(dir).ok())
-            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default();
 
         // Combine non-empty path segments: prefix / rel_container / rel_in_dir / script_name
