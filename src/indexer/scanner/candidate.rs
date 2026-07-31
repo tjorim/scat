@@ -38,21 +38,12 @@ pub(super) enum CandidateOutcome {
     Skip,
 }
 
-/// Build a script's logical catalog path from where it was scanned.
-///
-/// The indexer runs on Linux, so the path components here are already
-/// `/`-separated and a literal `\` in a name is just an (unusual but legal)
-/// filename character — not a separator to rewrite.
-fn make_logical_path(filepath: &Path, root: &Path, logical_prefix: &str) -> String {
-    let relative = match filepath.strip_prefix(root) {
-        Ok(r) => r.to_string_lossy(),
-        Err(_) => return filepath.to_string_lossy().into_owned(),
-    };
-    if logical_prefix.is_empty() {
-        filepath.to_string_lossy().into_owned()
-    } else {
-        format!("{}/{}", logical_prefix.trim_end_matches('/'), relative)
-    }
+/// Build a script's logical catalog path from where it was scanned: its
+/// absolute filesystem path. Every host that runs the indexer scans the same
+/// scan_root, so a logical path is already stable and portable without a
+/// separate relocatable-prefix scheme.
+fn make_logical_path(filepath: &Path) -> String {
+    filepath.to_string_lossy().into_owned()
 }
 
 /// Whether a working-directory file whose name parses as `<script>_<timestamp>`
@@ -93,8 +84,6 @@ fn is_working_dir_revision(filepath: &Path, script_name: &str, script_ext: &str)
 pub(super) fn process_candidate(
     filepath: &Path,
     is_symlink: bool,
-    root: &Path,
-    logical_prefix: &str,
     head_lines: usize,
     os_flavor: &str,
     now: f64,
@@ -112,8 +101,7 @@ pub(super) fn process_candidate(
             .map(|e| format!(".{}", e.to_lowercase()))
             .unwrap_or_default();
         if is_working_dir_revision(filepath, &script_name, &script_ext) {
-            let logical_path =
-                make_logical_path(&filepath.with_file_name(&script_name), root, logical_prefix);
+            let logical_path = make_logical_path(&filepath.with_file_name(&script_name));
             let age_seconds = filepath
                 .metadata()
                 .ok()
@@ -178,12 +166,12 @@ pub(super) fn process_candidate(
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map_or(0.0, |d| d.as_secs_f64());
 
-    let logical_path = make_logical_path(filepath, root, logical_prefix);
+    let logical_path = make_logical_path(filepath);
 
     let symlink_target = if is_symlink {
         std::fs::canonicalize(filepath)
             .ok()
-            .map(|resolved| make_logical_path(&resolved, root, logical_prefix))
+            .map(|resolved| make_logical_path(&resolved))
     } else {
         None
     };
@@ -203,14 +191,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn logical_path_joins_scan_relative_segments() {
+    fn logical_path_is_the_absolute_filesystem_path() {
         assert_eq!(
-            make_logical_path(
-                Path::new("/net/scripts/tools/foo.py"),
-                Path::new("/net/scripts"),
-                "/catalog/scripts",
-            ),
-            "/catalog/scripts/tools/foo.py"
+            make_logical_path(Path::new("/net/scripts/tools/foo.py")),
+            "/net/scripts/tools/foo.py"
         );
     }
 
@@ -221,12 +205,8 @@ mod tests {
         // level that doesn't exist, and the logical path then matched nothing
         // on disk.
         assert_eq!(
-            make_logical_path(
-                Path::new(r"/net/scripts/od\d.py"),
-                Path::new("/net/scripts"),
-                "/catalog/scripts",
-            ),
-            r"/catalog/scripts/od\d.py"
+            make_logical_path(Path::new(r"/net/scripts/od\d.py")),
+            r"/net/scripts/od\d.py"
         );
     }
 }

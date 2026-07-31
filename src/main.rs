@@ -208,7 +208,6 @@ fn cmd_catalog(
 ) -> Result<()> {
     if let CatalogCommands::Build {
         ref scan_root,
-        ref logical_prefix,
         head_lines,
         ref ignore_file,
         keep_copies,
@@ -224,7 +223,6 @@ fn cmd_catalog(
         return cmd_index(
             scan_root,
             db_path,
-            logical_prefix,
             head_lines,
             ignore_file,
             keep_copies,

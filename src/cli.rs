@@ -233,9 +233,6 @@ pub enum CatalogCommands {
         /// If omitted, scan_roots from the vc config file are used.
         #[arg(long = "scan-root")]
         scan_root: Vec<PathBuf>,
-        /// Logical path prefix applied to all discovered scripts (e.g. /catalog/scripts).
-        #[arg(long, default_value = "")]
-        logical_prefix: String,
         /// Number of header lines to read per file.
         #[arg(long, default_value = "10")]
         head_lines: usize,

@@ -69,7 +69,6 @@ pub struct ScanResult {
 /// scripts.
 pub fn scan_paths_with_revisions(
     roots: &[PathBuf],
-    logical_prefix: &str,
     head_lines: usize,
     ignore_files: &[PathBuf],
     checkout_dirs: &[&str],
@@ -78,7 +77,6 @@ pub fn scan_paths_with_revisions(
 ) -> Result<ScanResult> {
     scan_paths_with_revisions_impl(
         roots,
-        logical_prefix,
         head_lines,
         ignore_files,
         checkout_dirs,
@@ -92,10 +90,8 @@ pub fn scan_paths_with_revisions(
 /// directory tree view as the walk progresses — see [`ScanTreeView`]. Used
 /// only for interactive manual runs; unattended cron builds pass `None` to
 /// [`scan_paths_with_revisions`] instead and never construct one.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn scan_paths_with_revisions_and_tree(
     roots: &[PathBuf],
-    logical_prefix: &str,
     head_lines: usize,
     ignore_files: &[PathBuf],
     checkout_dirs: &[&str],
@@ -105,7 +101,6 @@ pub(crate) fn scan_paths_with_revisions_and_tree(
 ) -> Result<ScanResult> {
     scan_paths_with_revisions_impl(
         roots,
-        logical_prefix,
         head_lines,
         ignore_files,
         checkout_dirs,
@@ -115,10 +110,8 @@ pub(crate) fn scan_paths_with_revisions_and_tree(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn scan_paths_with_revisions_impl(
     roots: &[PathBuf],
-    logical_prefix: &str,
     head_lines: usize,
     ignore_files: &[PathBuf],
     checkout_dirs: &[&str],
@@ -313,17 +306,7 @@ fn scan_paths_with_revisions_impl(
 
             let outcomes: Vec<CandidateOutcome> = batch
                 .par_iter()
-                .map(|c| {
-                    process_candidate(
-                        &c.path,
-                        c.is_symlink,
-                        root,
-                        logical_prefix,
-                        head_lines,
-                        &os_flavor,
-                        now,
-                    )
-                })
+                .map(|c| process_candidate(&c.path, c.is_symlink, head_lines, &os_flavor, now))
                 .collect();
 
             for outcome in outcomes {
@@ -364,7 +347,6 @@ fn scan_paths_with_revisions_impl(
 /// Scan roots recursively and return indexable active script records.
 pub fn scan_paths(
     roots: &[PathBuf],
-    logical_prefix: &str,
     head_lines: usize,
     ignore_files: &[PathBuf],
     checkout_dirs: &[&str],
@@ -373,7 +355,6 @@ pub fn scan_paths(
 ) -> Result<Vec<ScriptRecord>> {
     Ok(scan_paths_with_revisions(
         roots,
-        logical_prefix,
         head_lines,
         ignore_files,
         checkout_dirs,
