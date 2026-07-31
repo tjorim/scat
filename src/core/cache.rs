@@ -416,7 +416,7 @@ fn current_uid() -> Option<u32> {
 fn cache_key(source: &Path) -> String {
     let canonical = fs::canonicalize(source).unwrap_or_else(|_| source.to_path_buf());
     let digest = Sha256::digest(canonical.as_os_str().as_bytes());
-    format!("{digest:x}")[..16].to_string()
+    hex::encode(digest)[..16].to_string()
 }
 
 // ---------------------------------------------------------------------------
