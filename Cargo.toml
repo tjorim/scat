@@ -46,7 +46,7 @@ rayon = "1"
 similar = "3"
 shell-words = "1"
 clap_complete = "4.6.7"
-sha2 = "0.10"
+sha2 = "0.11"
 
 [dev-dependencies]
 rusqlite = { version = "0.40", features = ["bundled-full"] }
