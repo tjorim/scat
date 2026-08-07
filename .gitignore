@@ -21,6 +21,9 @@ env/
 # Rust build artifacts
 target/
 
+# fastembed model cache (scat-embed)
+.fastembed_cache/
+
 # Local scratch
 .tmp/
 
