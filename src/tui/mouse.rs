@@ -27,6 +27,7 @@ impl TuiApp {
         (self.search_in_flight && self.results.is_empty())
             || self.detail_loading
             || self.detail_diff_loading
+            || self.stats_loading
     }
 
     /// Record a clickable pane for this frame. `outer` is the bordered rect;

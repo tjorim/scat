@@ -3542,6 +3542,7 @@ dependencies = [
  "similar",
  "tempfile",
  "thiserror 2.0.19",
+ "time",
  "tracing",
  "tracing-subscriber",
  "tree-sitter",

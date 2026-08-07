@@ -36,6 +36,7 @@ mod helpers;
 mod mouse;
 mod render;
 mod search_worker;
+mod stats_worker;
 #[cfg(test)]
 mod tests;
 mod viewer;
@@ -54,6 +55,7 @@ use self::helpers::{
 };
 use self::render::draw;
 use self::search_worker::{SearchRequest, SearchWorker};
+use self::stats_worker::{StatsRequest, StatsResponse, StatsWorker};
 
 // The results list only builds `ListItem`s for the rows visible in the pane
 // (see `render::draw_results`), so this can be well beyond a single screen
@@ -66,6 +68,9 @@ const HALF_PAGE_SCROLL_LINES: i16 = 20;
 const FULL_PAGE_SCROLL_LINES: i16 = 40;
 /// Two left-clicks within this window on the same row count as a double-click.
 const DOUBLE_CLICK_MS: u128 = 400;
+/// Number of pages in the full-screen stats view (`ViewMode::Stats`); see
+/// `render::stats_view`.
+const STATS_PAGE_COUNT: usize = 3;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Focus {
     Search,
@@ -125,6 +130,8 @@ enum ViewMode {
     Browse,
     Detail,
     DetailDiff,
+    Stats,
+    DepGraph,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -223,6 +230,18 @@ struct TuiApp {
     file_check_worker: FileCheckWorker,
     inflight_filecheck_id: Option<u64>,
     next_filecheck_id: u64,
+    stats_worker: stats_worker::StatsWorker,
+    /// Result of the most recent `stats` fetch, shown by the full-screen
+    /// stats view (`ViewMode::Stats`). `None` before the first fetch
+    /// completes or after a failed one.
+    stats: Option<scat_core::core::search::StatsResult>,
+    stats_error: Option<String>,
+    stats_loading: bool,
+    inflight_stats_id: Option<u64>,
+    next_stats_id: u64,
+    /// Which of the stats view's pages is showing (0-indexed). Reset to `0`
+    /// each time the view is opened; see `render::stats_view`.
+    stats_page: usize,
 }
 fn inner_rect(outer: Rect) -> Rect {
     Rect {
@@ -237,11 +256,13 @@ pub fn run(db_path: &Path, resolver: PathResolver) -> Result<()> {
     let detail_worker = DetailWorker::new(db_path)?;
     let diff_worker = DiffWorker::new(db_path)?;
     let folder_worker = FolderWorker::new(db_path)?;
+    let stats_worker = StatsWorker::new(db_path)?;
     let mut app = TuiApp::new(
         search_worker,
         detail_worker,
         diff_worker,
         folder_worker,
+        stats_worker,
         resolver,
     )?;
     let mut terminal = TerminalGuard::enter()?;
@@ -254,6 +275,7 @@ pub fn run(db_path: &Path, resolver: PathResolver) -> Result<()> {
         app.drain_diff_channel();
         app.drain_file_check_channel();
         app.drain_folder_channel();
+        app.drain_stats_channel();
         if app
             .last_keystroke_at
             .is_some_and(|keystroke| keystroke.elapsed() >= debounce)

@@ -1,6 +1,6 @@
 use super::{
-    Focus, KeyCode, KeyEvent, KeyModifiers, Result, TuiApp, ViewMode, apply_scroll_key,
-    move_selection, next_focus, previous_focus,
+    Focus, KeyCode, KeyEvent, KeyModifiers, Result, STATS_PAGE_COUNT, TuiApp, ViewMode,
+    apply_scroll_key, move_selection, next_focus, previous_focus,
 };
 
 impl TuiApp {
@@ -10,6 +10,12 @@ impl TuiApp {
         }
         if self.mode == ViewMode::DetailDiff {
             return self.handle_detail_diff_key(key);
+        }
+        if self.mode == ViewMode::Stats {
+            return self.handle_stats_key(key);
+        }
+        if self.mode == ViewMode::DepGraph {
+            return self.handle_dep_graph_key(key);
         }
 
         match key {
@@ -223,6 +229,21 @@ impl TuiApp {
                 self.queue_live_source_view();
             }
             KeyEvent {
+                code: KeyCode::Char('s'),
+                modifiers: KeyModifiers::NONE,
+                ..
+            } if self.focus != Focus::Search => {
+                self.dispatch_stats()?;
+                self.mode = ViewMode::Stats;
+            }
+            KeyEvent {
+                code: KeyCode::Char('d'),
+                modifiers: KeyModifiers::NONE,
+                ..
+            } if self.focus != Focus::Search => {
+                self.mode = ViewMode::DepGraph;
+            }
+            KeyEvent {
                 code: KeyCode::Char(ch),
                 modifiers,
                 ..
@@ -402,6 +423,127 @@ impl TuiApp {
             _ => {
                 apply_scroll_key(&mut self.detail_diff_scroll, key);
             }
+        }
+        Ok(false)
+    }
+
+    /// Key handling for the full-screen catalog stats view
+    /// (`ViewMode::Stats`, opened with `s`). No scroll state: the bar charts
+    /// are capped to a fixed top-N per chart (see
+    /// `render::stats_view::MAX_BARS`) so the view always fits one screen.
+    ///
+    /// Matches the `Result<bool>` signature of its sibling `handle_*_key`
+    /// handlers so `handle_key` can dispatch to any of them uniformly, even
+    /// though this one never actually errors.
+    #[allow(clippy::unnecessary_wraps)]
+    pub(super) fn handle_stats_key(&mut self, key: KeyEvent) -> Result<bool> {
+        match key {
+            KeyEvent {
+                code: KeyCode::Char('q'),
+                modifiers: KeyModifiers::NONE,
+                ..
+            } => return Ok(true),
+            KeyEvent {
+                code: KeyCode::Char('c'),
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            } => return Ok(true),
+            KeyEvent {
+                code: KeyCode::Esc, ..
+            }
+            | KeyEvent {
+                code: KeyCode::Backspace,
+                ..
+            } => {
+                self.mode = ViewMode::Browse;
+            }
+            KeyEvent {
+                code: KeyCode::Right,
+                ..
+            }
+            | KeyEvent {
+                code: KeyCode::Char('l'),
+                ..
+            } => {
+                self.stats_page = (self.stats_page + 1) % STATS_PAGE_COUNT;
+            }
+            KeyEvent {
+                code: KeyCode::Left,
+                ..
+            }
+            | KeyEvent {
+                code: KeyCode::Char('h'),
+                ..
+            } => {
+                self.stats_page = (self.stats_page + STATS_PAGE_COUNT - 1) % STATS_PAGE_COUNT;
+            }
+            _ => {}
+        }
+        Ok(false)
+    }
+
+    /// Key handling for the full-screen dependency graph view
+    /// (`ViewMode::DepGraph`, opened with `d`). Shares `deps_selected` and
+    /// `open_selected_dependency`/`navigate_to_path` with the Deps pane, so
+    /// selecting and opening a node here behaves exactly like the pane does.
+    pub(super) fn handle_dep_graph_key(&mut self, key: KeyEvent) -> Result<bool> {
+        match key {
+            KeyEvent {
+                code: KeyCode::Char('q'),
+                modifiers: KeyModifiers::NONE,
+                ..
+            } => return Ok(true),
+            KeyEvent {
+                code: KeyCode::Char('c'),
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            } => return Ok(true),
+            KeyEvent {
+                code: KeyCode::Esc, ..
+            }
+            | KeyEvent {
+                code: KeyCode::Backspace,
+                ..
+            } => {
+                self.mode = ViewMode::Browse;
+            }
+            KeyEvent {
+                code: KeyCode::Up, ..
+            }
+            | KeyEvent {
+                code: KeyCode::Char('k'),
+                ..
+            } => {
+                self.deps_selected =
+                    move_selection(self.deps_selected, self.dependency_target_count(), -1);
+            }
+            KeyEvent {
+                code: KeyCode::Down,
+                ..
+            }
+            | KeyEvent {
+                code: KeyCode::Char('j'),
+                ..
+            } => {
+                self.deps_selected =
+                    move_selection(self.deps_selected, self.dependency_target_count(), 1);
+            }
+            KeyEvent {
+                code: KeyCode::Enter,
+                ..
+            } => {
+                self.open_selected_dependency()?;
+            }
+            KeyEvent {
+                code: KeyCode::Char('['),
+                modifiers: KeyModifiers::NONE,
+                ..
+            } => {
+                if let Some(previous) = self.dep_backstack.pop() {
+                    self.navigate_to_path(&previous)?;
+                }
+            }
+            _ => {}
         }
         Ok(false)
     }

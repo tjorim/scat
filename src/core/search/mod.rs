@@ -4,6 +4,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 use crate::core::db::{JsonRow, row_to_map};
+use crate::core::embeddings::EmbeddingsSidecar;
 use crate::error::{Error, Result};
 
 mod checkout;
@@ -88,10 +89,49 @@ pub struct StatsResult {
     pub by_language: Vec<LangCount>,
     /// Script counts grouped by owner.
     pub by_owner: Vec<OwnerCount>,
+    /// Scripts with the most dependents, highest in-degree first
+    /// (capped at [`STATS_RANKING_LIMIT`]).
+    pub most_depended_upon: Vec<DependentCount>,
+    /// Most common tags across the catalog, highest count first
+    /// (capped at [`STATS_RANKING_LIMIT`]).
+    pub top_tags: Vec<TagCount>,
+    /// Scripts with the most defined functions, highest count first
+    /// (capped at [`STATS_RANKING_LIMIT`]).
+    pub most_functions: Vec<DependentCount>,
+    /// Active (DEVELOP) checkout counts grouped by OS flavor, highest count
+    /// first (capped at [`STATS_RANKING_LIMIT`]).
+    pub checkout_by_os: Vec<OsFlavorCount>,
+    /// Users with the most active (DEVELOP) checkouts, highest count first
+    /// (capped at [`STATS_RANKING_LIMIT`]).
+    pub most_active_checkout_users: Vec<CheckoutUserCount>,
+    /// Script byte-size distribution, bucketed into fixed ranges in
+    /// ascending order (not sorted by count — a histogram's bucket order is
+    /// the point, unlike the ranking fields above). Empty buckets are
+    /// included so the shape is accurate.
+    pub size_histogram: Vec<HistogramBucket>,
+    /// Active (DEVELOP) checkout-age distribution, bucketed into fixed
+    /// day ranges in ascending order (same "ascending, not by count"
+    /// reasoning as `size_histogram`).
+    pub checkout_staleness_histogram: Vec<HistogramBucket>,
+    /// `scat catalog audit`'s findings tallied by check name, highest count
+    /// first. Runs every check with its default thresholds (no embeddings
+    /// sidecar — `near-duplicates`/`outliers` are silently absent here, same
+    /// as an unselected `audit` run without one); a glance at which checks
+    /// are noisiest, not a substitute for `scat catalog audit` itself.
+    pub findings_by_check: Vec<CheckCount>,
+    /// Active (DEVELOP) checkout counts per calendar day, ascending by date.
+    /// Reflects only *currently observed* checkouts (the `revisions` table
+    /// isn't a permanent history log — see `core::vc::scan_checkouts`), so
+    /// this is naturally bounded and never capped.
+    pub checkout_activity_by_day: Vec<DailyCount>,
     /// Revision statistics when vc data has been indexed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub revisions: Option<RevisionStats>,
 }
+
+/// Cap shared by every `StatsResult` ranking field — each is a "what's
+/// dominant" glance, not a full dump of the catalog.
+pub const STATS_RANKING_LIMIT: usize = 10;
 
 #[derive(Debug, Serialize)]
 /// Count bucket for a language.
@@ -108,6 +148,74 @@ pub struct OwnerCount {
     /// Owner value.
     pub owner: String,
     /// Script count for `owner`.
+    pub count: i64,
+}
+
+#[derive(Debug, Serialize)]
+/// Count bucket for a tag.
+pub struct TagCount {
+    /// Tag value.
+    pub tag: String,
+    /// Number of scripts carrying this tag.
+    pub count: i64,
+}
+
+#[derive(Debug, Serialize)]
+/// A script and a per-script count — either how many other scripts depend
+/// on it (in-degree, for `most_depended_upon`) or how many functions it
+/// defines (for `most_functions`); the shape is identical either way.
+pub struct DependentCount {
+    /// Logical path of the script.
+    pub logical_path: String,
+    /// The count this ranking sorts by.
+    pub count: i64,
+}
+
+#[derive(Debug, Serialize)]
+/// Count bucket for a vc checkout OS flavor (`LINUX`, `ZOS`, etc.).
+pub struct OsFlavorCount {
+    /// OS flavor value.
+    pub os_flavor: String,
+    /// Number of active (DEVELOP) checkouts on this OS flavor.
+    pub count: i64,
+}
+
+#[derive(Debug, Serialize)]
+/// Count bucket for a vc checkout user.
+pub struct CheckoutUserCount {
+    /// Checkout user.
+    pub user: String,
+    /// Number of active (DEVELOP) checkouts held by this user.
+    pub count: i64,
+}
+
+#[derive(Debug, Serialize)]
+/// Count bucket for `scat catalog audit`'s findings, grouped by check name.
+pub struct CheckCount {
+    /// Audit check name (see [`SearchApi::audit`]'s `ALL_CHECKS`).
+    pub check: String,
+    /// Number of findings this check reported.
+    pub count: i64,
+}
+
+#[derive(Debug, Serialize)]
+/// One bucket of a fixed-range histogram (`size_histogram`,
+/// `checkout_staleness_histogram`). Generic over both: neither has a more
+/// specific field name than "label" for what the bucket represents.
+pub struct HistogramBucket {
+    /// Human-readable bucket range, e.g. `"1-5KB"` or `"30-90d"`.
+    pub label: String,
+    /// Number of items falling in this bucket.
+    pub count: i64,
+}
+
+#[derive(Debug, Serialize)]
+/// Active (DEVELOP) checkout count for one calendar day.
+pub struct DailyCount {
+    /// Date in `YYYYMMDD` form (the same precision `revisions.timestamp`
+    /// stores at minimum, so this needs no time-of-day component).
+    pub date: String,
+    /// Number of DEVELOP checkouts observed on this date.
     pub count: i64,
 }
 
@@ -178,6 +286,35 @@ pub struct AuditResult {
     pub findings: Vec<AuditFinding>,
     /// Aggregated finding counts.
     pub summary: AuditSummary,
+}
+
+/// Extra inputs to [`SearchApi::audit`] beyond the catalog database itself.
+///
+/// Grouped into one struct, rather than added as more positional
+/// parameters, because `sidecar` is optional (the embeddings sidecar isn't
+/// always published) while the two thresholds have sane defaults most
+/// callers won't want to think about.
+pub struct AuditOptions<'a> {
+    /// Embeddings sidecar backing the `near-duplicates` and `outliers`
+    /// checks. `None` disables both checks unless explicitly requested, in
+    /// which case `audit` returns a validation error.
+    pub sidecar: Option<&'a EmbeddingsSidecar>,
+    /// Cosine-similarity threshold at/above which a script pair counts as
+    /// a near-duplicate.
+    pub near_duplicate_threshold: f32,
+    /// Cosine-similarity threshold below which a script's best match
+    /// counts as an outlier.
+    pub outlier_threshold: f32,
+}
+
+impl Default for AuditOptions<'_> {
+    fn default() -> Self {
+        Self {
+            sidecar: None,
+            near_duplicate_threshold: 0.97,
+            outlier_threshold: 0.3,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]

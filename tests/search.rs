@@ -1,7 +1,8 @@
 /// Integration tests for `SearchApi` against an in-memory database
 /// built with the production schema (schema version 4).
 use scat_core::core::db::{SCHEMA_VERSION, create_db};
-use scat_core::core::search::{SearchApi, TreeDirection, compare_catalogs};
+use scat_core::core::embeddings::EmbeddingsSidecar;
+use scat_core::core::search::{AuditOptions, SearchApi, TreeDirection, compare_catalogs};
 use scat_core::core::vc::REVISION_TYPE_DEVELOP;
 use tempfile::NamedTempFile;
 
@@ -97,6 +98,31 @@ fn insert_revision(
             rusqlite::params![logical_path, physical_path, revision_type, age_seconds],
         )
         .unwrap();
+}
+
+/// Write a standalone `embeddings.sqlite` sidecar for [`EmbeddingsSidecar::open`],
+/// independent of the catalog database under test.
+fn write_embeddings_sidecar(path: &std::path::Path, rows: &[(i64, &str, &[f32])]) {
+    let conn = rusqlite::Connection::open(path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE script_embeddings (
+            script_id     INTEGER PRIMARY KEY,
+            logical_path  TEXT    NOT NULL,
+            model         TEXT    NOT NULL,
+            dim           INTEGER NOT NULL,
+            embedding     BLOB    NOT NULL
+        );",
+    )
+    .unwrap();
+    for (id, path, vector) in rows {
+        let bytes: Vec<u8> = vector.iter().flat_map(|f| f.to_le_bytes()).collect();
+        conn.execute(
+            "INSERT INTO script_embeddings (script_id, logical_path, model, dim, embedding)
+             VALUES (?1, ?2, 'test-model', ?3, ?4)",
+            rusqlite::params![id, path, vector.len() as i64, bytes],
+        )
+        .unwrap();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -402,6 +428,254 @@ fn stats_counts_by_language() {
     );
     let json = serde_json::to_value(&stats).unwrap();
     assert!(json.get("revisions").is_none());
+}
+
+#[test]
+fn stats_most_depended_upon_ranks_scripts_by_dependent_count() {
+    let (api, _f) = make_api();
+    insert(&api, "/catalog/scripts/lib.py", "", "python", "", "");
+    insert(&api, "/catalog/scripts/util.py", "", "python", "", "");
+    insert(&api, "/catalog/scripts/leaf.py", "", "python", "", "");
+    insert_dep(&api, "/catalog/scripts/util.py", "/catalog/scripts/lib.py");
+    insert_dep(&api, "/catalog/scripts/leaf.py", "/catalog/scripts/lib.py");
+    insert_dep(&api, "/catalog/scripts/leaf.py", "/catalog/scripts/util.py");
+
+    let stats = api.stats().unwrap();
+    assert_eq!(stats.most_depended_upon.len(), 2);
+    assert_eq!(
+        stats.most_depended_upon[0].logical_path,
+        "/catalog/scripts/lib.py"
+    );
+    assert_eq!(stats.most_depended_upon[0].count, 2);
+    assert_eq!(
+        stats.most_depended_upon[1].logical_path,
+        "/catalog/scripts/util.py"
+    );
+    assert_eq!(stats.most_depended_upon[1].count, 1);
+}
+
+#[test]
+fn stats_most_depended_upon_is_empty_without_dependencies() {
+    let (api, _f) = make_api();
+    insert(&api, "/catalog/scripts/a.py", "", "python", "", "");
+
+    let stats = api.stats().unwrap();
+    assert!(stats.most_depended_upon.is_empty());
+}
+
+#[test]
+fn stats_top_tags_ranks_by_frequency() {
+    let (api, _f) = make_api();
+    insert(&api, "/catalog/scripts/a.py", "", "python", "", "");
+    insert(&api, "/catalog/scripts/b.py", "", "python", "", "");
+    insert(&api, "/catalog/scripts/c.py", "", "python", "", "");
+    api.conn
+        .execute(
+            "UPDATE scripts SET tags = '[\"deploy\",\"prod\"]' WHERE logical_path='/catalog/scripts/a.py'",
+            [],
+        )
+        .unwrap();
+    api.conn
+        .execute(
+            "UPDATE scripts SET tags = '[\"deploy\"]' WHERE logical_path='/catalog/scripts/b.py'",
+            [],
+        )
+        .unwrap();
+    api.conn
+        .execute(
+            "UPDATE scripts SET tags = '[]' WHERE logical_path='/catalog/scripts/c.py'",
+            [],
+        )
+        .unwrap();
+
+    let stats = api.stats().unwrap();
+    assert_eq!(stats.top_tags.len(), 2);
+    assert_eq!(stats.top_tags[0].tag, "deploy");
+    assert_eq!(stats.top_tags[0].count, 2);
+    assert_eq!(stats.top_tags[1].tag, "prod");
+    assert_eq!(stats.top_tags[1].count, 1);
+}
+
+#[test]
+fn stats_top_tags_is_empty_without_any_tags() {
+    let (api, _f) = make_api();
+    insert(&api, "/catalog/scripts/a.py", "", "python", "", "");
+
+    let stats = api.stats().unwrap();
+    assert!(stats.top_tags.is_empty());
+}
+
+#[test]
+fn stats_most_functions_ranks_scripts_by_function_count() {
+    let (api, _f) = make_api();
+    insert(&api, "/catalog/scripts/big.py", "", "python", "", "");
+    insert(&api, "/catalog/scripts/small.py", "", "python", "", "");
+    insert(&api, "/catalog/scripts/none.py", "", "python", "", "");
+    let big_id = id_for(&api, "/catalog/scripts/big.py");
+    let small_id = id_for(&api, "/catalog/scripts/small.py");
+    for (script_id, name) in [(big_id, "a"), (big_id, "b"), (small_id, "c")] {
+        api.conn
+            .execute(
+                "INSERT INTO function_definitions (script_id, name, kind, line)
+                 VALUES (?1, ?2, 'function', 1)",
+                rusqlite::params![script_id, name],
+            )
+            .unwrap();
+    }
+
+    let stats = api.stats().unwrap();
+    assert_eq!(stats.most_functions.len(), 2);
+    assert_eq!(
+        stats.most_functions[0].logical_path,
+        "/catalog/scripts/big.py"
+    );
+    assert_eq!(stats.most_functions[0].count, 2);
+    assert_eq!(
+        stats.most_functions[1].logical_path,
+        "/catalog/scripts/small.py"
+    );
+    assert_eq!(stats.most_functions[1].count, 1);
+}
+
+#[test]
+fn stats_most_functions_is_empty_without_any_functions() {
+    let (api, _f) = make_api();
+    insert(&api, "/catalog/scripts/a.py", "", "python", "", "");
+
+    let stats = api.stats().unwrap();
+    assert!(stats.most_functions.is_empty());
+}
+
+#[test]
+fn stats_checkout_by_os_and_most_active_users_count_only_develop_revisions() {
+    let (api, _f) = make_api();
+    api.conn
+        .execute(
+            "INSERT INTO revisions (logical_path, physical_path, revision_type, os_flavor, user, timestamp, age_seconds)
+             VALUES
+                ('/catalog/scripts/a.py', '/dev/LINUX/a_1', 'DEVELOP', 'LINUX', 'alice', '20260101', 1.0),
+                ('/catalog/scripts/b.py', '/dev/LINUX/b_1', 'DEVELOP', 'LINUX', 'alice', '20260102', 1.0),
+                ('/catalog/scripts/c.py', '/dev/ZOS/c_1',   'DEVELOP', 'ZOS',   'bob',   '20260103', 1.0),
+                ('/catalog/scripts/d.py', '/arc/LINUX/d_1', 'ARCHIVE', 'LINUX', 'carla', '20260104', 1.0)",
+            [],
+        )
+        .unwrap();
+
+    let stats = api.stats().unwrap();
+
+    assert_eq!(stats.checkout_by_os.len(), 2);
+    assert_eq!(stats.checkout_by_os[0].os_flavor, "LINUX");
+    assert_eq!(stats.checkout_by_os[0].count, 2);
+    assert_eq!(stats.checkout_by_os[1].os_flavor, "ZOS");
+    assert_eq!(stats.checkout_by_os[1].count, 1);
+
+    assert_eq!(stats.most_active_checkout_users.len(), 2);
+    assert_eq!(stats.most_active_checkout_users[0].user, "alice");
+    assert_eq!(stats.most_active_checkout_users[0].count, 2);
+    assert_eq!(stats.most_active_checkout_users[1].user, "bob");
+    assert_eq!(stats.most_active_checkout_users[1].count, 1);
+}
+
+#[test]
+fn stats_size_histogram_buckets_ascending_including_empty_buckets() {
+    let (api, _f) = make_api();
+    insert(&api, "/catalog/scripts/tiny.py", "", "python", "", "");
+    insert(&api, "/catalog/scripts/big.py", "", "python", "", "");
+    api.conn
+        .execute(
+            "UPDATE scripts SET size = 100 WHERE logical_path = '/catalog/scripts/tiny.py'",
+            [],
+        )
+        .unwrap();
+    api.conn
+        .execute(
+            "UPDATE scripts SET size = 2_000_000 WHERE logical_path = '/catalog/scripts/big.py'",
+            [],
+        )
+        .unwrap();
+
+    let stats = api.stats().unwrap();
+    // Fixed bucket order, ascending, always the same length regardless of data.
+    assert_eq!(stats.size_histogram.first().unwrap().label, "<1KB");
+    assert_eq!(stats.size_histogram.first().unwrap().count, 1);
+    assert_eq!(stats.size_histogram.last().unwrap().label, ">1MB");
+    assert_eq!(stats.size_histogram.last().unwrap().count, 1);
+    assert!(
+        stats
+            .size_histogram
+            .iter()
+            .any(|b| b.label == "1-5KB" && b.count == 0),
+        "empty buckets should still appear, with a zero count"
+    );
+}
+
+#[test]
+fn stats_checkout_staleness_histogram_buckets_only_develop_ages() {
+    const DAY: f64 = 86_400.0;
+    let (api, _f) = make_api();
+    api.conn
+        .execute(
+            "INSERT INTO revisions (logical_path, physical_path, revision_type, os_flavor, user, timestamp, age_seconds)
+             VALUES
+                ('/catalog/scripts/a.py', '/dev/LINUX/a_1', 'DEVELOP', 'LINUX', 'alice', '20260101', ?1),
+                ('/catalog/scripts/b.py', '/dev/LINUX/b_1', 'DEVELOP', 'LINUX', 'alice', '20260101', ?2)",
+            rusqlite::params![2.0 * DAY, 400.0 * DAY],
+        )
+        .unwrap();
+
+    let stats = api.stats().unwrap();
+    let bucket = |label: &str| {
+        stats
+            .checkout_staleness_histogram
+            .iter()
+            .find(|b| b.label == label)
+            .unwrap()
+            .count
+    };
+    assert_eq!(bucket("0-7d"), 1);
+    assert_eq!(bucket(">365d"), 1);
+    assert_eq!(bucket("30-90d"), 0);
+}
+
+#[test]
+fn stats_findings_by_check_tallies_audit_findings() {
+    let (api, _f) = make_api();
+    insert(&api, "/catalog/scripts/a.py", "", "python", "", "");
+    insert(&api, "/catalog/scripts/b.py", "", "python", "", "");
+
+    let stats = api.stats().unwrap();
+    // Both scripts are unowned and have no purpose, so both checks fire twice.
+    let find = |check: &str| {
+        stats
+            .findings_by_check
+            .iter()
+            .find(|c| c.check == check)
+            .map(|c| c.count)
+    };
+    assert_eq!(find("unowned"), Some(2));
+    assert_eq!(find("no-purpose"), Some(2));
+}
+
+#[test]
+fn stats_checkout_activity_by_day_groups_develop_checkouts_by_date() {
+    let (api, _f) = make_api();
+    api.conn
+        .execute(
+            "INSERT INTO revisions (logical_path, physical_path, revision_type, os_flavor, user, timestamp)
+             VALUES
+                ('/catalog/scripts/a.py', '/dev/LINUX/a_1', 'DEVELOP', 'LINUX', 'alice', '20260101_0900'),
+                ('/catalog/scripts/b.py', '/dev/LINUX/b_1', 'DEVELOP', 'LINUX', 'bob',   '20260101_1400'),
+                ('/catalog/scripts/c.py', '/dev/LINUX/c_1', 'DEVELOP', 'LINUX', 'carla', '20260102')",
+            [],
+        )
+        .unwrap();
+
+    let stats = api.stats().unwrap();
+    assert_eq!(stats.checkout_activity_by_day.len(), 2);
+    assert_eq!(stats.checkout_activity_by_day[0].date, "20260101");
+    assert_eq!(stats.checkout_activity_by_day[0].count, 2);
+    assert_eq!(stats.checkout_activity_by_day[1].date, "20260102");
+    assert_eq!(stats.checkout_activity_by_day[1].count, 1);
 }
 
 #[test]
@@ -1241,7 +1515,9 @@ fn audit_unowned_reports_missing_tech_and_func_owner() {
         .unwrap();
 
     let checks = vec!["unowned".to_string()];
-    let result = api.audit(Some(&checks), 90).unwrap();
+    let result = api
+        .audit(Some(&checks), 90, AuditOptions::default())
+        .unwrap();
     assert_eq!(result.findings.len(), 1);
     assert_eq!(result.findings[0].check, "unowned");
     assert_eq!(result.findings[0].severity, "warn");
@@ -1265,7 +1541,9 @@ fn audit_no_purpose_reports_empty_purpose() {
     );
 
     let checks = vec!["no-purpose".to_string()];
-    let result = api.audit(Some(&checks), 90).unwrap();
+    let result = api
+        .audit(Some(&checks), 90, AuditOptions::default())
+        .unwrap();
     assert_eq!(result.findings.len(), 1);
     assert_eq!(result.findings[0].logical_path, "/catalog/scripts/empty.py");
 }
@@ -1288,7 +1566,9 @@ fn audit_broken_deps_reports_missing_targets() {
     );
 
     let checks = vec!["broken-deps".to_string()];
-    let result = api.audit(Some(&checks), 90).unwrap();
+    let result = api
+        .audit(Some(&checks), 90, AuditOptions::default())
+        .unwrap();
     assert_eq!(result.findings.len(), 1);
     assert_eq!(result.findings[0].severity, "error");
     assert_eq!(
@@ -1314,7 +1594,9 @@ fn audit_orphan_checkouts_reports_unindexed_checkout_paths() {
     );
 
     let checks = vec!["orphan-checkouts".to_string()];
-    let result = api.audit(Some(&checks), 90).unwrap();
+    let result = api
+        .audit(Some(&checks), 90, AuditOptions::default())
+        .unwrap();
     assert_eq!(result.findings.len(), 1);
     assert_eq!(
         result.findings[0].logical_path,
@@ -1358,7 +1640,9 @@ fn audit_stale_checkouts_respects_threshold() {
     );
 
     let checks = vec!["stale-checkouts".to_string()];
-    let result = api.audit(Some(&checks), 90).unwrap();
+    let result = api
+        .audit(Some(&checks), 90, AuditOptions::default())
+        .unwrap();
     assert_eq!(result.findings.len(), 1);
     assert_eq!(result.findings[0].logical_path, "/catalog/scripts/stale.py");
 }
@@ -1397,7 +1681,9 @@ fn audit_dead_scripts_reports_isolated_scripts() {
     );
 
     let checks = vec!["dead-scripts".to_string()];
-    let result = api.audit(Some(&checks), 90).unwrap();
+    let result = api
+        .audit(Some(&checks), 90, AuditOptions::default())
+        .unwrap();
     assert_eq!(result.findings.len(), 2);
     assert!(
         result
@@ -1460,7 +1746,9 @@ fn audit_no_description_requires_brief_or_docstring_metadata() {
         .unwrap();
 
     let checks = vec!["no-description".to_string()];
-    let result = api.audit(Some(&checks), 90).unwrap();
+    let result = api
+        .audit(Some(&checks), 90, AuditOptions::default())
+        .unwrap();
     assert_eq!(result.findings.len(), 1);
     assert_eq!(result.findings[0].logical_path, "/catalog/scripts/none.py");
 }
@@ -1471,7 +1759,9 @@ fn audit_check_filter_runs_only_selected_checks() {
     insert(&api, "/catalog/scripts/a.py", "", "python", "alice", "");
     insert(&api, "/catalog/scripts/b.py", "", "python", "alice", "ok");
     let checks = vec!["no-purpose".to_string()];
-    let result = api.audit(Some(&checks), 90).unwrap();
+    let result = api
+        .audit(Some(&checks), 90, AuditOptions::default())
+        .unwrap();
     assert!(result.findings.iter().all(|f| f.check == "no-purpose"));
 }
 
@@ -1481,7 +1771,7 @@ fn audit_summary_counts_severities() {
     insert(&api, "/catalog/scripts/a.py", "", "python", "", "");
     insert_dep(&api, "/catalog/scripts/a.py", "/catalog/scripts/missing.py");
 
-    let result = api.audit(None, 90).unwrap();
+    let result = api.audit(None, 90, AuditOptions::default()).unwrap();
     assert!(result.summary.error >= 1);
     assert!(result.summary.warn >= 1);
     assert!(result.summary.info >= 1);
@@ -1491,8 +1781,129 @@ fn audit_summary_counts_severities() {
 fn audit_rejects_unknown_check_name() {
     let (api, _f) = make_api();
     let checks = vec!["not-a-check".to_string()];
-    let err = api.audit(Some(&checks), 90).unwrap_err();
+    let err = api
+        .audit(Some(&checks), 90, AuditOptions::default())
+        .unwrap_err();
     assert!(err.to_string().contains("unknown audit check"));
+}
+
+#[test]
+fn audit_near_duplicates_reports_pairs_above_threshold() {
+    let (api, _f) = make_api();
+    insert(&api, "/catalog/scripts/a.py", "", "python", "alice", "a");
+    insert(&api, "/catalog/scripts/b.py", "", "python", "alice", "b");
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let sidecar_path = dir.path().join("embeddings.sqlite");
+    write_embeddings_sidecar(
+        &sidecar_path,
+        &[
+            (1, "/catalog/scripts/a.py", &[1.0, 0.0]),
+            (2, "/catalog/scripts/b.py", &[0.999, 0.001]),
+        ],
+    );
+    let sidecar = EmbeddingsSidecar::open(&sidecar_path).unwrap();
+
+    let checks = vec!["near-duplicates".to_string()];
+    let result = api
+        .audit(
+            Some(&checks),
+            90,
+            AuditOptions {
+                sidecar: Some(&sidecar),
+                near_duplicate_threshold: 0.99,
+                outlier_threshold: 0.3,
+            },
+        )
+        .unwrap();
+
+    assert_eq!(result.findings.len(), 1);
+    assert_eq!(result.findings[0].check, "near-duplicates");
+    assert_eq!(result.findings[0].severity, "warn");
+    assert_eq!(result.findings[0].logical_path, "/catalog/scripts/a.py");
+    assert!(result.findings[0].detail.contains("/catalog/scripts/b.py"));
+}
+
+#[test]
+fn audit_outliers_reports_scripts_with_no_close_match() {
+    let (api, _f) = make_api();
+    insert(&api, "/catalog/scripts/a.py", "", "python", "alice", "a");
+    insert(&api, "/catalog/scripts/b.py", "", "python", "alice", "b");
+    insert(
+        &api,
+        "/catalog/scripts/lonely.py",
+        "",
+        "python",
+        "alice",
+        "lonely",
+    );
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let sidecar_path = dir.path().join("embeddings.sqlite");
+    write_embeddings_sidecar(
+        &sidecar_path,
+        &[
+            (1, "/catalog/scripts/a.py", &[1.0, 0.0]),
+            (2, "/catalog/scripts/b.py", &[0.99, 0.14]),
+            (3, "/catalog/scripts/lonely.py", &[0.0, 1.0]),
+        ],
+    );
+    let sidecar = EmbeddingsSidecar::open(&sidecar_path).unwrap();
+
+    let checks = vec!["outliers".to_string()];
+    let result = api
+        .audit(
+            Some(&checks),
+            90,
+            AuditOptions {
+                sidecar: Some(&sidecar),
+                near_duplicate_threshold: 0.97,
+                outlier_threshold: 0.5,
+            },
+        )
+        .unwrap();
+
+    assert_eq!(result.findings.len(), 1);
+    assert_eq!(result.findings[0].check, "outliers");
+    assert_eq!(result.findings[0].severity, "info");
+    assert_eq!(
+        result.findings[0].logical_path,
+        "/catalog/scripts/lonely.py"
+    );
+}
+
+#[test]
+fn audit_near_duplicates_without_a_sidecar_skips_silently_when_running_all_checks() {
+    let (api, _f) = make_api();
+    insert(&api, "/catalog/scripts/a.py", "", "python", "alice", "ok");
+
+    let result = api.audit(None, 90, AuditOptions::default()).unwrap();
+    assert!(
+        result
+            .findings
+            .iter()
+            .all(|f| f.check != "near-duplicates" && f.check != "outliers")
+    );
+}
+
+#[test]
+fn audit_near_duplicates_without_a_sidecar_errors_when_explicitly_requested() {
+    let (api, _f) = make_api();
+    let checks = vec!["near-duplicates".to_string()];
+    let err = api
+        .audit(Some(&checks), 90, AuditOptions::default())
+        .unwrap_err();
+    assert!(err.to_string().contains("embeddings sidecar"));
+}
+
+#[test]
+fn audit_outliers_without_a_sidecar_errors_when_explicitly_requested() {
+    let (api, _f) = make_api();
+    let checks = vec!["outliers".to_string()];
+    let err = api
+        .audit(Some(&checks), 90, AuditOptions::default())
+        .unwrap_err();
+    assert!(err.to_string().contains("embeddings sidecar"));
 }
 
 // ---------------------------------------------------------------------------

@@ -1,7 +1,8 @@
 use super::{
     DetailPayload, DetailRequest, DetailResponse, DetailWorker, DiffWorker, FileCheckWorker, Focus,
     FolderWorker, Instant, JsonRow, ListState, PathResolver, RESULT_LIMIT, Result, ScriptView,
-    SearchRequest, SearchWorker, TuiApp, Value, ViewMode, search_worker, sort_checkouts,
+    SearchRequest, SearchWorker, StatsRequest, StatsResponse, StatsWorker, TuiApp, Value, ViewMode,
+    search_worker, sort_checkouts,
 };
 
 impl TuiApp {
@@ -10,6 +11,7 @@ impl TuiApp {
         detail_worker: DetailWorker,
         diff_worker: DiffWorker,
         folder_worker: FolderWorker,
+        stats_worker: StatsWorker,
         resolver: PathResolver,
     ) -> Result<Self> {
         let mut app = Self {
@@ -75,9 +77,67 @@ impl TuiApp {
             file_check_worker: FileCheckWorker::new()?,
             inflight_filecheck_id: None,
             next_filecheck_id: 0,
+            stats_worker,
+            stats: None,
+            stats_error: None,
+            stats_loading: false,
+            inflight_stats_id: None,
+            next_stats_id: 0,
+            stats_page: 0,
         };
         app.dispatch_query()?;
         Ok(app)
+    }
+
+    /// Fetch catalog stats for the full-screen stats view. Dispatched fresh
+    /// each time the view is opened (see `handle_key`'s `s` binding) rather
+    /// than cached indefinitely, so stats reflect the current catalog build
+    /// even across a long-lived TUI session.
+    pub(super) fn dispatch_stats(&mut self) -> Result<()> {
+        let id = self.next_stats_id;
+        self.next_stats_id = self.next_stats_id.saturating_add(1);
+        self.stats_loading = true;
+        self.stats_error = None;
+        self.stats_page = 0;
+        self.inflight_stats_id = Some(id);
+        self.stats_worker.send(StatsRequest { id })?;
+        Ok(())
+    }
+
+    pub(super) fn drain_stats_channel(&mut self) {
+        loop {
+            match self.stats_worker.try_recv() {
+                Ok(Some(response)) => {
+                    self.apply_stats_response(response);
+                    self.needs_redraw = true;
+                }
+                Ok(None) => break,
+                Err(_) => {
+                    self.inflight_stats_id = None;
+                    self.stats_loading = false;
+                    self.stats_error = Some("Stats worker disconnected unexpectedly".to_string());
+                    self.needs_redraw = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    pub(super) fn apply_stats_response(&mut self, response: StatsResponse) {
+        if Some(response.id) != self.inflight_stats_id {
+            return;
+        }
+        self.inflight_stats_id = None;
+        self.stats_loading = false;
+        match response.result {
+            Ok(stats) => {
+                self.stats = Some(stats);
+                self.stats_error = None;
+            }
+            Err(err) => {
+                self.stats_error = Some(err);
+            }
+        }
     }
 
     pub(super) fn dispatch_query(&mut self) -> Result<()> {

@@ -9,6 +9,7 @@ use ratatui::layout::{Constraint, Direction, Layout};
 use super::{Focus, RegionKind, TuiApp, ViewMode};
 
 mod common;
+mod dep_graph;
 mod deps;
 mod detail_view;
 mod footer;
@@ -19,7 +20,9 @@ mod preview;
 mod results;
 mod revisions;
 mod search;
+mod stats_view;
 
+use dep_graph::draw_dep_graph_view;
 use deps::draw_deps;
 use detail_view::{draw_detail_diff_view, draw_detail_view};
 use footer::draw_footer;
@@ -30,6 +33,7 @@ use preview::draw_preview;
 use results::draw_results;
 use revisions::draw_revisions;
 use search::draw_search;
+use stats_view::draw_stats_view;
 
 pub(super) fn draw(frame: &mut Frame<'_>, app: &mut TuiApp) {
     // Rebuilt every frame; the mouse handler hit-tests against the panes as
@@ -42,6 +46,14 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut TuiApp) {
         }
         ViewMode::DetailDiff => {
             draw_detail_diff_view(frame, app);
+            return;
+        }
+        ViewMode::Stats => {
+            draw_stats_view(frame, app);
+            return;
+        }
+        ViewMode::DepGraph => {
+            draw_dep_graph_view(frame, app);
             return;
         }
         ViewMode::Browse => {}
