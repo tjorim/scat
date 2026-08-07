@@ -4,6 +4,8 @@ pub mod cache;
 pub mod db;
 /// Script-level diff: compare active catalog content against vc checkouts or files.
 pub mod diff;
+/// Reads the optional `embeddings.sqlite` sidecar produced by `crates/scat-embed`.
+pub mod embeddings;
 /// Path mapping and logical/physical path resolution utilities.
 pub mod resolve;
 /// Typed, read-only view over a queried `scripts` table row.

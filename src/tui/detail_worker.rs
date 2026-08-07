@@ -49,8 +49,8 @@ pub struct DetailPayload {
     /// Immediate subdirectory names of the script's parent folder.
     pub sibling_dirs: Vec<String>,
     pub cached_preview: String,
-    /// Total number of lines in the indexed content (before the
-    /// `PREVIEW_LINES` cap); `cached_preview` is truncated when this exceeds it.
+    /// Total number of lines in the indexed content, shown in the preview
+    /// pane's title alongside the current scroll position.
     pub preview_total_lines: usize,
     pub error: Option<String>,
 }
@@ -317,18 +317,16 @@ fn load_detail(api: &SearchApi, path: &str) -> DetailPayload {
         .as_ref()
         .map(|row| ScriptView::new(row).content().to_string())
         .unwrap_or_default();
+    result.preview_total_lines = content.lines().count();
     result.cached_preview = if content.is_empty() {
         "No content indexed.".to_string()
     } else {
-        content
-            .lines()
-            .take(super::PREVIEW_LINES)
-            .collect::<Vec<_>>()
-            .join("\n")
+        // `str::lines` strips `\r`, so this also normalizes CRLF content
+        // (e.g. from a Windows-authored script) to LF for consistent
+        // rendering — a stray `\r` can otherwise show up as a rendering
+        // artifact in some terminals.
+        content.lines().collect::<Vec<_>>().join("\n")
     };
-    // Total line count of the indexed content, so the UI can flag when the
-    // preview is capped at `PREVIEW_LINES` and the full script is longer.
-    result.preview_total_lines = content.lines().count();
 
     result
 }

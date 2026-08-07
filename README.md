@@ -77,6 +77,13 @@ This tool provides a **single searchable index** without:
 - Suitable for power users and CI jobs
 - Transitive dependency trees: `scat deps <path> --tree [--depth N]`
 - Shell completions: `scat completions bash|zsh|fish|powershell|elvish`
+- Find related scripts by embedding similarity: `scat similar <path> [--limit N]`
+  — requires an `embeddings.sqlite` sidecar built separately by `scat-embed`
+  (see [crates/scat-embed](crates/scat-embed)) and published next to the
+  catalog (or wherever `embeddings_path`/`--embeddings`/`SCAT_EMBEDDINGS`
+  points); ranks scripts already in the catalog against each other and never
+  embeds a typed query — see
+  [tjorim/scat#73](https://github.com/tjorim/scat/issues/73) for why.
 
 ### TUI
 - Interactive search and filtering
@@ -255,6 +262,14 @@ another user, `scat` logs a warning and reads the shared drive directly.
 | `--no-cache` | `SCAT_NO_CACHE` | Query the shared drive directly |
 
 `scat catalog info` prints the cache path in use when one is active.
+
+The `embeddings.sqlite` sidecar `scat similar` reads goes through the same
+host-local cache, under its own entry — it's a separate file, published
+separately (a `scat-embed` run, not the nightly indexer), but it lands on the
+same kind of shared drive and gets the same treatment. It has no
+`index_metadata.build_timestamp` the way the catalog does, so a changed
+sidecar is always recopied rather than sometimes re-stamped in place; that's
+a fine tradeoff for a file this much smaller than the catalog.
 
 ***
 

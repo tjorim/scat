@@ -1003,7 +1003,10 @@ fn functions_enter_jumps_preview_and_enables_xref() {
 #[test]
 fn v_key_queues_full_catalog_content_for_viewer() {
     let db = super::make_test_db();
-    let full_content = (0..=super::PREVIEW_LINES)
+    // Large enough that a formerly-truncated preview cap would have clipped
+    // it; the preview pane and the external viewer must now agree exactly,
+    // since the in-app preview is no longer capped either.
+    let full_content = (0..2000)
         .map(|line| format!("line {line}"))
         .collect::<Vec<_>>()
         .join("\n");
@@ -1044,14 +1047,9 @@ fn v_key_queues_full_catalog_content_for_viewer() {
     };
     assert_eq!(view.logical_path, "/catalog/scripts/a.py");
     assert_eq!(view.content, full_content);
-    assert!(
-        view.content
-            .contains(&format!("line {}", super::PREVIEW_LINES))
-    );
-    assert!(
-        !app.cached_preview
-            .contains(&format!("line {}", super::PREVIEW_LINES))
-    );
+    assert!(view.content.contains("line 1999"));
+    assert_eq!(app.cached_preview, full_content);
+    assert_eq!(app.preview_total_lines, 2000);
 }
 
 #[test]

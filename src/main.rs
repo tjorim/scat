@@ -18,7 +18,8 @@ mod tui;
 use crate::cli::{CatalogCommands, Cli, Commands};
 use crate::commands::{
     SearchOpts, cmd_audit, cmd_deps, cmd_diff, cmd_index, cmd_info, cmd_script_diff_catalog,
-    cmd_script_diff_explicit, cmd_search, cmd_show, cmd_stats, cmd_status, cmd_symlinks,
+    cmd_script_diff_explicit, cmd_search, cmd_show, cmd_similar, cmd_stats, cmd_status,
+    cmd_symlinks,
 };
 use crate::runtime::{cmd_vc, init_tracing};
 
@@ -92,6 +93,17 @@ fn run(cli: Cli) -> Result<()> {
         enabled: !cli::resolve_no_cache(cli.no_cache, no_cache_env.as_deref()),
         root: cli.cache_dir.clone().or(scat_config.cache_dir.clone()),
     };
+
+    // Resolve the embeddings sidecar path the same way as db_path: CLI/env,
+    // then config file, then the conventional location next to the catalog.
+    // It's read through the same host-local cache as the catalog — it's
+    // published to the same kind of shared drive, by a separate scat-embed
+    // run (see crates/scat-embed) rather than by the nightly indexer.
+    let embeddings_path = cli
+        .embeddings
+        .clone()
+        .or_else(|| scat_config.embeddings_path.clone())
+        .unwrap_or_else(|| scat_core::core::embeddings::sidecar_path(db_path));
 
     match cli.command {
         Commands::Tui { mapping } => {
@@ -181,6 +193,17 @@ fn run(cli: Cli) -> Result<()> {
             no_color,
         ),
         Commands::Symlinks { path, output } => cmd_symlinks(&api, &path, output, no_color),
+        Commands::Similar {
+            path,
+            limit,
+            output,
+        } => cmd_similar(
+            &api,
+            &catalog_read_path(&embeddings_path, &cache_options),
+            &path,
+            limit,
+            output,
+        ),
         Commands::Diff {
             path: Some(logical_path),
             against,
