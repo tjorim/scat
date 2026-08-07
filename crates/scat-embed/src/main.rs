@@ -68,6 +68,24 @@ struct ScriptRow {
     text: String,
 }
 
+/// Character budget for a script's `content` in the embedded text.
+///
+/// Bounds memory and embedding time for oversized scripts; it isn't there to
+/// avoid a model error; a tokenizer truncates to its own max sequence length
+/// regardless, so content beyond that is already dropped from the model's
+/// point of view. This budget keeps that truncation from happening deep
+/// inside `fastembed` on the full (possibly huge) script body instead.
+///
+/// Sized against the default model's window rather than the smallest one:
+/// `jina-embeddings-v2-base-code` (the default) and `nomic-embed-text-v1.5`
+/// have an 8192-token context, code tokenizes to roughly 2-3 chars/token, so
+/// ~20000 chars stays under that for the great majority of scripts without
+/// leaving headroom unused. The BGE models (`--model bge-small`/`bge-base`)
+/// have a much smaller 512-token window and will truncate well before this
+/// regardless — that's the tokenizer's own truncation, not something this
+/// budget can avoid, so it isn't worth sizing this constant down for them.
+const MAX_CONTENT_CHARS: usize = 20_000;
+
 fn main() -> Result<()> {
     let args = Args::parse();
 
@@ -107,7 +125,8 @@ fn read_scripts(path: &PathBuf) -> Result<Vec<ScriptRow>> {
         .with_context(|| format!("failed to open {}", path.display()))?;
 
     let mut stmt = conn.prepare(
-        "SELECT id, logical_path, COALESCE(purpose, ''), COALESCE(tags, ''), COALESCE(owner, '') \
+        "SELECT id, logical_path, COALESCE(purpose, ''), COALESCE(tags, ''), COALESCE(owner, ''), \
+                COALESCE(content, '') \
          FROM scripts",
     )?;
 
@@ -118,8 +137,16 @@ fn read_scripts(path: &PathBuf) -> Result<Vec<ScriptRow>> {
             let purpose: String = row.get(2)?;
             let tags: String = row.get(3)?;
             let owner: String = row.get(4)?;
+            let content: String = row.get(5)?;
 
-            let text = format!("{logical_path}\n{purpose}\ntags: {tags}\nowner: {owner}");
+            // Content (what the script actually does) matters most for a
+            // code-aware model, so it goes last: metadata first keeps the
+            // path/purpose/tags/owner intact even if a downstream tokenizer
+            // truncates from the end.
+            let text = format!(
+                "{logical_path}\n{purpose}\ntags: {tags}\nowner: {owner}\n\n{}",
+                truncate_chars(&content, MAX_CONTENT_CHARS)
+            );
             Ok(ScriptRow {
                 id,
                 logical_path,
@@ -129,6 +156,16 @@ fn read_scripts(path: &PathBuf) -> Result<Vec<ScriptRow>> {
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
     Ok(rows)
+}
+
+/// Truncate `s` to at most `max_chars` characters, respecting UTF-8
+/// boundaries (a plain byte-length truncation could split a multi-byte
+/// character and produce invalid UTF-8).
+fn truncate_chars(s: &str, max_chars: usize) -> &str {
+    match s.char_indices().nth(max_chars) {
+        Some((byte_idx, _)) => &s[..byte_idx],
+        None => s,
+    }
 }
 
 /// Writes a fresh embeddings sidecar and atomically publishes it to `path`.
@@ -222,6 +259,92 @@ mod tests {
             logical_path: logical_path.to_string(),
             text: String::new(),
         }
+    }
+
+    /// Write a minimal `scripts.sqlite` catalog with one row.
+    fn write_catalog(
+        path: &PathBuf,
+        logical_path: &str,
+        purpose: &str,
+        tags: &str,
+        owner: &str,
+        content: &str,
+    ) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE scripts (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                logical_path  TEXT NOT NULL UNIQUE,
+                purpose       TEXT,
+                tags          TEXT,
+                owner         TEXT,
+                content       TEXT
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO scripts (logical_path, purpose, tags, owner, content)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![logical_path, purpose, tags, owner, content],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn truncate_chars_leaves_short_strings_untouched() {
+        assert_eq!(truncate_chars("hello", 10), "hello");
+        assert_eq!(truncate_chars("hello", 5), "hello");
+    }
+
+    #[test]
+    fn truncate_chars_cuts_at_the_character_limit() {
+        assert_eq!(truncate_chars("hello world", 5), "hello");
+    }
+
+    #[test]
+    fn truncate_chars_respects_utf8_boundaries() {
+        // Each "é" is a two-byte UTF-8 character; a byte-length truncation
+        // at an odd offset would split one and produce invalid UTF-8.
+        let s = "éééé";
+        assert_eq!(truncate_chars(s, 2), "éé");
+    }
+
+    #[test]
+    fn read_scripts_includes_content_after_metadata() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("scripts.sqlite");
+        write_catalog(
+            &path,
+            "/catalog/scripts/deploy.py",
+            "Deploy the service",
+            "deploy,prod",
+            "alice",
+            "def deploy():\n    run_deployment()",
+        );
+
+        let rows = read_scripts(&path).unwrap();
+        assert_eq!(rows.len(), 1);
+        let text = &rows[0].text;
+        assert!(text.contains("/catalog/scripts/deploy.py"));
+        assert!(text.contains("Deploy the service"));
+        assert!(text.contains("tags: deploy,prod"));
+        assert!(text.contains("owner: alice"));
+        assert!(text.contains("def deploy():"));
+        assert!(text.contains("run_deployment()"));
+    }
+
+    #[test]
+    fn read_scripts_truncates_oversized_content() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("scripts.sqlite");
+        let huge_content = "x".repeat(MAX_CONTENT_CHARS + 5000);
+        write_catalog(&path, "/catalog/scripts/big.py", "", "", "", &huge_content);
+
+        let rows = read_scripts(&path).unwrap();
+        // Truncated content plus the metadata scaffolding around it, well
+        // under the untruncated original.
+        assert!(rows[0].text.len() < huge_content.len());
+        assert!(rows[0].text.len() <= MAX_CONTENT_CHARS + 200);
     }
 
     #[test]
