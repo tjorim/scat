@@ -83,6 +83,7 @@ impl TuiApp {
             stats_loading: false,
             inflight_stats_id: None,
             next_stats_id: 0,
+            stats_page: 0,
         };
         app.dispatch_query()?;
         Ok(app)
@@ -97,6 +98,7 @@ impl TuiApp {
         self.next_stats_id = self.next_stats_id.saturating_add(1);
         self.stats_loading = true;
         self.stats_error = None;
+        self.stats_page = 0;
         self.inflight_stats_id = Some(id);
         self.stats_worker.send(StatsRequest { id })?;
         Ok(())

@@ -1160,6 +1160,176 @@ fn stats_view_q_and_ctrl_c_quit() {
 }
 
 #[test]
+fn stats_view_left_right_cycle_pages_with_wraparound() {
+    let db = super::make_test_db();
+    let mut app = make_app(db.path());
+    app.mode = ViewMode::Stats;
+    assert_eq!(app.stats_page, 0);
+
+    app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.stats_page, 1);
+    app.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.stats_page, 2);
+    app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.stats_page, 0, "should wrap forward past the last page");
+
+    app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(
+        app.stats_page, 2,
+        "should wrap backward past the first page"
+    );
+    app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.stats_page, 1);
+}
+
+#[test]
+fn dispatch_stats_resets_the_page_to_zero() {
+    let db = super::make_test_db();
+    let mut app = make_app(db.path());
+    app.stats_page = 2;
+
+    app.dispatch_stats().unwrap();
+    assert_eq!(app.stats_page, 0);
+}
+
+#[test]
+fn d_key_opens_dep_graph_view() {
+    let db = super::make_test_db();
+    let mut app = make_app(db.path());
+    app.focus = Focus::Results;
+
+    assert_eq!(app.mode, ViewMode::Browse);
+    app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.mode, ViewMode::DepGraph);
+}
+
+#[test]
+fn d_key_does_not_open_dep_graph_view_in_search() {
+    let db = super::make_test_db();
+    let mut app = make_app(db.path());
+    app.focus = Focus::Search;
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.mode, ViewMode::Browse);
+    assert_eq!(app.query, "d");
+}
+
+#[test]
+fn dep_graph_view_esc_and_backspace_return_to_browse() {
+    let db = super::make_test_db();
+    let mut app = make_app(db.path());
+    app.mode = ViewMode::DepGraph;
+
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.mode, ViewMode::Browse);
+
+    app.mode = ViewMode::DepGraph;
+    app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.mode, ViewMode::Browse);
+}
+
+#[test]
+fn dep_graph_view_q_and_ctrl_c_quit() {
+    let db = super::make_test_db();
+    let mut app = make_app(db.path());
+    app.mode = ViewMode::DepGraph;
+
+    let should_quit = app
+        .handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE))
+        .unwrap();
+    assert!(should_quit);
+
+    let should_quit = app
+        .handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert!(should_quit);
+}
+
+#[test]
+fn dep_graph_view_enter_navigates_to_the_selected_dependency() {
+    let db = super::make_test_db();
+    let conn = rusqlite::Connection::open(db.path()).unwrap();
+    conn.execute(
+        "INSERT INTO scripts (logical_path, language, content, owner, purpose)
+         VALUES ('/catalog/scripts/b.py','python','def b():\\n    pass\\n','bob','')",
+        [],
+    )
+    .unwrap();
+    let source_id: i64 = conn
+        .query_row(
+            "SELECT id FROM scripts WHERE logical_path = '/catalog/scripts/a.py'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let target_id: i64 = conn
+        .query_row(
+            "SELECT id FROM scripts WHERE logical_path = '/catalog/scripts/b.py'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    conn.execute(
+        "INSERT INTO dependencies (script_id, depends_on_path, resolved_script_id)
+         VALUES (?1, '/catalog/scripts/b.py', ?2)",
+        rusqlite::params![source_id, target_id],
+    )
+    .unwrap();
+    drop(conn);
+
+    let mut app = make_app(db.path());
+    app.results = vec![
+        serde_json::json!({ "logical_path": "/catalog/scripts/a.py" })
+            .as_object()
+            .unwrap()
+            .clone(),
+    ];
+    app.selected = 0;
+    app.load_selected().unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        app.drain_detail_channel();
+        if !app.detail_loading {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert_eq!(app.deps.len(), 1, "a.py should show one 'uses' dependency");
+
+    app.mode = ViewMode::DepGraph;
+    app.deps_selected = 0;
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        app.drain_detail_channel();
+        if !app.detail_loading {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert_eq!(
+        app.selected_logical_path().as_deref(),
+        Some("/catalog/scripts/b.py")
+    );
+    // Enter stays in the graph view rather than bouncing back to Browse, so
+    // the user can keep walking the graph from the new center.
+    assert_eq!(app.mode, ViewMode::DepGraph);
+}
+
+#[test]
 fn dispatch_stats_and_drain_round_trips_a_real_query() {
     let db = super::make_test_db();
     let mut app = make_app(db.path());

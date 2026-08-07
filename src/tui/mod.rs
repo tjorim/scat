@@ -68,6 +68,9 @@ const HALF_PAGE_SCROLL_LINES: i16 = 20;
 const FULL_PAGE_SCROLL_LINES: i16 = 40;
 /// Two left-clicks within this window on the same row count as a double-click.
 const DOUBLE_CLICK_MS: u128 = 400;
+/// Number of pages in the full-screen stats view (`ViewMode::Stats`); see
+/// `render::stats_view`.
+const STATS_PAGE_COUNT: usize = 3;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Focus {
     Search,
@@ -128,6 +131,7 @@ enum ViewMode {
     Detail,
     DetailDiff,
     Stats,
+    DepGraph,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -235,6 +239,9 @@ struct TuiApp {
     stats_loading: bool,
     inflight_stats_id: Option<u64>,
     next_stats_id: u64,
+    /// Which of the stats view's pages is showing (0-indexed). Reset to `0`
+    /// each time the view is opened; see `render::stats_view`.
+    stats_page: usize,
 }
 fn inner_rect(outer: Rect) -> Rect {
     Rect {

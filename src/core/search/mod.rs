@@ -98,6 +98,32 @@ pub struct StatsResult {
     /// Scripts with the most defined functions, highest count first
     /// (capped at [`STATS_RANKING_LIMIT`]).
     pub most_functions: Vec<DependentCount>,
+    /// Active (DEVELOP) checkout counts grouped by OS flavor, highest count
+    /// first (capped at [`STATS_RANKING_LIMIT`]).
+    pub checkout_by_os: Vec<OsFlavorCount>,
+    /// Users with the most active (DEVELOP) checkouts, highest count first
+    /// (capped at [`STATS_RANKING_LIMIT`]).
+    pub most_active_checkout_users: Vec<CheckoutUserCount>,
+    /// Script byte-size distribution, bucketed into fixed ranges in
+    /// ascending order (not sorted by count — a histogram's bucket order is
+    /// the point, unlike the ranking fields above). Empty buckets are
+    /// included so the shape is accurate.
+    pub size_histogram: Vec<HistogramBucket>,
+    /// Active (DEVELOP) checkout-age distribution, bucketed into fixed
+    /// day ranges in ascending order (same "ascending, not by count"
+    /// reasoning as `size_histogram`).
+    pub checkout_staleness_histogram: Vec<HistogramBucket>,
+    /// `scat catalog audit`'s findings tallied by check name, highest count
+    /// first. Runs every check with its default thresholds (no embeddings
+    /// sidecar — `near-duplicates`/`outliers` are silently absent here, same
+    /// as an unselected `audit` run without one); a glance at which checks
+    /// are noisiest, not a substitute for `scat catalog audit` itself.
+    pub findings_by_check: Vec<CheckCount>,
+    /// Active (DEVELOP) checkout counts per calendar day, ascending by date.
+    /// Reflects only *currently observed* checkouts (the `revisions` table
+    /// isn't a permanent history log — see `core::vc::scan_checkouts`), so
+    /// this is naturally bounded and never capped.
+    pub checkout_activity_by_day: Vec<DailyCount>,
     /// Revision statistics when vc data has been indexed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub revisions: Option<RevisionStats>,
@@ -142,6 +168,54 @@ pub struct DependentCount {
     /// Logical path of the script.
     pub logical_path: String,
     /// The count this ranking sorts by.
+    pub count: i64,
+}
+
+#[derive(Debug, Serialize)]
+/// Count bucket for a vc checkout OS flavor (`LINUX`, `ZOS`, etc.).
+pub struct OsFlavorCount {
+    /// OS flavor value.
+    pub os_flavor: String,
+    /// Number of active (DEVELOP) checkouts on this OS flavor.
+    pub count: i64,
+}
+
+#[derive(Debug, Serialize)]
+/// Count bucket for a vc checkout user.
+pub struct CheckoutUserCount {
+    /// Checkout user.
+    pub user: String,
+    /// Number of active (DEVELOP) checkouts held by this user.
+    pub count: i64,
+}
+
+#[derive(Debug, Serialize)]
+/// Count bucket for `scat catalog audit`'s findings, grouped by check name.
+pub struct CheckCount {
+    /// Audit check name (see [`SearchApi::audit`]'s `ALL_CHECKS`).
+    pub check: String,
+    /// Number of findings this check reported.
+    pub count: i64,
+}
+
+#[derive(Debug, Serialize)]
+/// One bucket of a fixed-range histogram (`size_histogram`,
+/// `checkout_staleness_histogram`). Generic over both: neither has a more
+/// specific field name than "label" for what the bucket represents.
+pub struct HistogramBucket {
+    /// Human-readable bucket range, e.g. `"1-5KB"` or `"30-90d"`.
+    pub label: String,
+    /// Number of items falling in this bucket.
+    pub count: i64,
+}
+
+#[derive(Debug, Serialize)]
+/// Active (DEVELOP) checkout count for one calendar day.
+pub struct DailyCount {
+    /// Date in `YYYYMMDD` form (the same precision `revisions.timestamp`
+    /// stores at minimum, so this needs no time-of-day component).
+    pub date: String,
+    /// Number of DEVELOP checkouts observed on this date.
     pub count: i64,
 }
 

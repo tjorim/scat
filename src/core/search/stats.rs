@@ -6,9 +6,60 @@ use crate::core::vc::{REVISION_TYPE_ARCHIVE, REVISION_TYPE_DEVELOP, REVISION_TYP
 use crate::error::{Error, Result};
 
 use super::{
-    AuditFinding, AuditOptions, AuditResult, AuditSummary, DependentCount, IndexMetadata,
-    LangCount, OwnerCount, RevisionStats, STATS_RANKING_LIMIT, SearchApi, StatsResult, TagCount,
+    AuditFinding, AuditOptions, AuditResult, AuditSummary, CheckCount, CheckoutUserCount,
+    DailyCount, DependentCount, HistogramBucket, IndexMetadata, LangCount, OsFlavorCount,
+    OwnerCount, RevisionStats, STATS_RANKING_LIMIT, SearchApi, StatsResult, TagCount,
 };
+
+/// `stale_days` threshold for `stats()`'s internal audit run
+/// (`findings_by_check`), matching `scat catalog audit`'s own CLI default.
+const STATS_AUDIT_STALE_DAYS: i64 = 90;
+
+/// Ascending byte-size buckets for `size_histogram`. Each entry is the
+/// bucket's exclusive upper bound and label; the last bound is unreachable
+/// (`i64::MAX`) so every size lands somewhere.
+const SIZE_BUCKETS: &[(i64, &str)] = &[
+    (1024, "<1KB"),
+    (5 * 1024, "1-5KB"),
+    (10 * 1024, "5-10KB"),
+    (25 * 1024, "10-25KB"),
+    (50 * 1024, "25-50KB"),
+    (100 * 1024, "50-100KB"),
+    (250 * 1024, "100-250KB"),
+    (1024 * 1024, "250KB-1MB"),
+    (i64::MAX, ">1MB"),
+];
+
+/// Ascending checkout-age buckets (in days) for `checkout_staleness_histogram`.
+const STALENESS_BUCKETS_DAYS: &[(f64, &str)] = &[
+    (7.0, "0-7d"),
+    (30.0, "7-30d"),
+    (90.0, "30-90d"),
+    (180.0, "90-180d"),
+    (365.0, "180-365d"),
+    (f64::MAX, ">365d"),
+];
+
+/// Bucket `values` into `bounds` (each an exclusive upper bound + label),
+/// returning one [`HistogramBucket`] per bound in ascending order —
+/// including buckets nothing landed in, so the histogram's shape is
+/// accurate rather than just its non-empty bars.
+fn bucket_counts<T: PartialOrd + Copy>(values: &[T], bounds: &[(T, &str)]) -> Vec<HistogramBucket> {
+    let mut counts = vec![0i64; bounds.len()];
+    for &value in values {
+        if let Some(idx) = bounds.iter().position(|&(bound, _)| value < bound) {
+            counts[idx] += 1;
+        }
+    }
+    bounds
+        .iter()
+        .zip(counts)
+        .map(|(&(_, label), count)| HistogramBucket {
+            label: label.to_string(),
+            count,
+        })
+        .collect()
+}
 
 impl SearchApi {
     // ------------------------------------------------------------------
@@ -117,6 +168,118 @@ impl SearchApi {
             rows?
         };
 
+        let checkout_by_os: Vec<OsFlavorCount> = {
+            let mut stmt = self.conn.prepare_cached(
+                "SELECT os_flavor, COUNT(*) AS count
+                 FROM revisions
+                 WHERE revision_type = ?1
+                 GROUP BY os_flavor
+                 ORDER BY count DESC, os_flavor
+                 LIMIT ?2",
+            )?;
+            let rows: Result<Vec<OsFlavorCount>> = stmt
+                .query_map(
+                    rusqlite::params![REVISION_TYPE_DEVELOP, STATS_RANKING_LIMIT as i64],
+                    |row| {
+                        Ok(OsFlavorCount {
+                            os_flavor: row.get(0)?,
+                            count: row.get(1)?,
+                        })
+                    },
+                )?
+                .map(|r| r.map_err(Error::from))
+                .collect();
+            rows?
+        };
+
+        let most_active_checkout_users: Vec<CheckoutUserCount> = {
+            let mut stmt = self.conn.prepare_cached(
+                "SELECT user, COUNT(*) AS count
+                 FROM revisions
+                 WHERE revision_type = ?1 AND user != ''
+                 GROUP BY user
+                 ORDER BY count DESC, user
+                 LIMIT ?2",
+            )?;
+            let rows: Result<Vec<CheckoutUserCount>> = stmt
+                .query_map(
+                    rusqlite::params![REVISION_TYPE_DEVELOP, STATS_RANKING_LIMIT as i64],
+                    |row| {
+                        Ok(CheckoutUserCount {
+                            user: row.get(0)?,
+                            count: row.get(1)?,
+                        })
+                    },
+                )?
+                .map(|r| r.map_err(Error::from))
+                .collect();
+            rows?
+        };
+
+        // Bucketed client-side (rather than a SQL GROUP BY on a CASE
+        // expression) so buckets stay in ascending range order — including
+        // empty ones — instead of SQL's GROUP BY reordering them by
+        // whichever count sorts where.
+        let size_histogram = {
+            let mut stmt = self
+                .conn
+                .prepare_cached("SELECT size FROM scripts WHERE size IS NOT NULL")?;
+            let sizes: Result<Vec<i64>> = stmt
+                .query_map([], |row| row.get(0))?
+                .map(|r| r.map_err(Error::from))
+                .collect();
+            bucket_counts(&sizes?, SIZE_BUCKETS)
+        };
+
+        let checkout_staleness_histogram = {
+            let mut stmt = self.conn.prepare_cached(
+                "SELECT age_seconds FROM revisions
+                 WHERE revision_type = ?1 AND age_seconds IS NOT NULL",
+            )?;
+            let ages_days: Result<Vec<f64>> = stmt
+                .query_map([REVISION_TYPE_DEVELOP], |row| {
+                    row.get::<_, f64>(0).map(|secs| secs / 86_400.0)
+                })?
+                .map(|r| r.map_err(Error::from))
+                .collect();
+            bucket_counts(&ages_days?, STALENESS_BUCKETS_DAYS)
+        };
+
+        let findings_by_check: Vec<CheckCount> = {
+            let audit = self.audit(None, STATS_AUDIT_STALE_DAYS, AuditOptions::default())?;
+            let mut counts: std::collections::BTreeMap<String, i64> =
+                std::collections::BTreeMap::new();
+            for finding in audit.findings {
+                *counts.entry(finding.check).or_insert(0) += 1;
+            }
+            let mut checks: Vec<CheckCount> = counts
+                .into_iter()
+                .map(|(check, count)| CheckCount { check, count })
+                .collect();
+            checks.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.check.cmp(&b.check)));
+            checks
+        };
+
+        let checkout_activity_by_day: Vec<DailyCount> = {
+            let mut stmt = self.conn.prepare_cached(
+                "SELECT SUBSTR(timestamp, 1, 8) AS day, COUNT(*) AS count
+                 FROM revisions
+                 WHERE revision_type = ?1
+                 GROUP BY day
+                 ORDER BY day",
+            )?;
+            let rows: Result<Vec<DailyCount>> = stmt
+                .query_map([REVISION_TYPE_DEVELOP], |row| {
+                    Ok(DailyCount {
+                        date: row.get(0)?,
+                        count: row.get(1)?,
+                    })
+                })?
+                .map(|r| r.map_err(Error::from))
+                .collect();
+            rows?
+        };
+
         Ok(StatsResult {
             total_scripts: total,
             by_language,
@@ -124,6 +287,12 @@ impl SearchApi {
             most_depended_upon,
             top_tags,
             most_functions,
+            checkout_by_os,
+            most_active_checkout_users,
+            size_histogram,
+            checkout_staleness_histogram,
+            findings_by_check,
+            checkout_activity_by_day,
             revisions: self.revision_stats()?,
         })
     }

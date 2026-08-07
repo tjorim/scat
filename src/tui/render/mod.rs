@@ -9,6 +9,7 @@ use ratatui::layout::{Constraint, Direction, Layout};
 use super::{Focus, RegionKind, TuiApp, ViewMode};
 
 mod common;
+mod dep_graph;
 mod deps;
 mod detail_view;
 mod footer;
@@ -21,6 +22,7 @@ mod revisions;
 mod search;
 mod stats_view;
 
+use dep_graph::draw_dep_graph_view;
 use deps::draw_deps;
 use detail_view::{draw_detail_diff_view, draw_detail_view};
 use footer::draw_footer;
@@ -48,6 +50,10 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut TuiApp) {
         }
         ViewMode::Stats => {
             draw_stats_view(frame, app);
+            return;
+        }
+        ViewMode::DepGraph => {
+            draw_dep_graph_view(frame, app);
             return;
         }
         ViewMode::Browse => {}

@@ -547,6 +547,138 @@ fn stats_most_functions_is_empty_without_any_functions() {
 }
 
 #[test]
+fn stats_checkout_by_os_and_most_active_users_count_only_develop_revisions() {
+    let (api, _f) = make_api();
+    api.conn
+        .execute(
+            "INSERT INTO revisions (logical_path, physical_path, revision_type, os_flavor, user, timestamp, age_seconds)
+             VALUES
+                ('/catalog/scripts/a.py', '/dev/LINUX/a_1', 'DEVELOP', 'LINUX', 'alice', '20260101', 1.0),
+                ('/catalog/scripts/b.py', '/dev/LINUX/b_1', 'DEVELOP', 'LINUX', 'alice', '20260102', 1.0),
+                ('/catalog/scripts/c.py', '/dev/ZOS/c_1',   'DEVELOP', 'ZOS',   'bob',   '20260103', 1.0),
+                ('/catalog/scripts/d.py', '/arc/LINUX/d_1', 'ARCHIVE', 'LINUX', 'carla', '20260104', 1.0)",
+            [],
+        )
+        .unwrap();
+
+    let stats = api.stats().unwrap();
+
+    assert_eq!(stats.checkout_by_os.len(), 2);
+    assert_eq!(stats.checkout_by_os[0].os_flavor, "LINUX");
+    assert_eq!(stats.checkout_by_os[0].count, 2);
+    assert_eq!(stats.checkout_by_os[1].os_flavor, "ZOS");
+    assert_eq!(stats.checkout_by_os[1].count, 1);
+
+    assert_eq!(stats.most_active_checkout_users.len(), 2);
+    assert_eq!(stats.most_active_checkout_users[0].user, "alice");
+    assert_eq!(stats.most_active_checkout_users[0].count, 2);
+    assert_eq!(stats.most_active_checkout_users[1].user, "bob");
+    assert_eq!(stats.most_active_checkout_users[1].count, 1);
+}
+
+#[test]
+fn stats_size_histogram_buckets_ascending_including_empty_buckets() {
+    let (api, _f) = make_api();
+    insert(&api, "/catalog/scripts/tiny.py", "", "python", "", "");
+    insert(&api, "/catalog/scripts/big.py", "", "python", "", "");
+    api.conn
+        .execute(
+            "UPDATE scripts SET size = 100 WHERE logical_path = '/catalog/scripts/tiny.py'",
+            [],
+        )
+        .unwrap();
+    api.conn
+        .execute(
+            "UPDATE scripts SET size = 2_000_000 WHERE logical_path = '/catalog/scripts/big.py'",
+            [],
+        )
+        .unwrap();
+
+    let stats = api.stats().unwrap();
+    // Fixed bucket order, ascending, always the same length regardless of data.
+    assert_eq!(stats.size_histogram.first().unwrap().label, "<1KB");
+    assert_eq!(stats.size_histogram.first().unwrap().count, 1);
+    assert_eq!(stats.size_histogram.last().unwrap().label, ">1MB");
+    assert_eq!(stats.size_histogram.last().unwrap().count, 1);
+    assert!(
+        stats
+            .size_histogram
+            .iter()
+            .any(|b| b.label == "1-5KB" && b.count == 0),
+        "empty buckets should still appear, with a zero count"
+    );
+}
+
+#[test]
+fn stats_checkout_staleness_histogram_buckets_only_develop_ages() {
+    const DAY: f64 = 86_400.0;
+    let (api, _f) = make_api();
+    api.conn
+        .execute(
+            "INSERT INTO revisions (logical_path, physical_path, revision_type, os_flavor, user, timestamp, age_seconds)
+             VALUES
+                ('/catalog/scripts/a.py', '/dev/LINUX/a_1', 'DEVELOP', 'LINUX', 'alice', '20260101', ?1),
+                ('/catalog/scripts/b.py', '/dev/LINUX/b_1', 'DEVELOP', 'LINUX', 'alice', '20260101', ?2)",
+            rusqlite::params![2.0 * DAY, 400.0 * DAY],
+        )
+        .unwrap();
+
+    let stats = api.stats().unwrap();
+    let bucket = |label: &str| {
+        stats
+            .checkout_staleness_histogram
+            .iter()
+            .find(|b| b.label == label)
+            .unwrap()
+            .count
+    };
+    assert_eq!(bucket("0-7d"), 1);
+    assert_eq!(bucket(">365d"), 1);
+    assert_eq!(bucket("30-90d"), 0);
+}
+
+#[test]
+fn stats_findings_by_check_tallies_audit_findings() {
+    let (api, _f) = make_api();
+    insert(&api, "/catalog/scripts/a.py", "", "python", "", "");
+    insert(&api, "/catalog/scripts/b.py", "", "python", "", "");
+
+    let stats = api.stats().unwrap();
+    // Both scripts are unowned and have no purpose, so both checks fire twice.
+    let find = |check: &str| {
+        stats
+            .findings_by_check
+            .iter()
+            .find(|c| c.check == check)
+            .map(|c| c.count)
+    };
+    assert_eq!(find("unowned"), Some(2));
+    assert_eq!(find("no-purpose"), Some(2));
+}
+
+#[test]
+fn stats_checkout_activity_by_day_groups_develop_checkouts_by_date() {
+    let (api, _f) = make_api();
+    api.conn
+        .execute(
+            "INSERT INTO revisions (logical_path, physical_path, revision_type, os_flavor, user, timestamp)
+             VALUES
+                ('/catalog/scripts/a.py', '/dev/LINUX/a_1', 'DEVELOP', 'LINUX', 'alice', '20260101_0900'),
+                ('/catalog/scripts/b.py', '/dev/LINUX/b_1', 'DEVELOP', 'LINUX', 'bob',   '20260101_1400'),
+                ('/catalog/scripts/c.py', '/dev/LINUX/c_1', 'DEVELOP', 'LINUX', 'carla', '20260102')",
+            [],
+        )
+        .unwrap();
+
+    let stats = api.stats().unwrap();
+    assert_eq!(stats.checkout_activity_by_day.len(), 2);
+    assert_eq!(stats.checkout_activity_by_day[0].date, "20260101");
+    assert_eq!(stats.checkout_activity_by_day[0].count, 2);
+    assert_eq!(stats.checkout_activity_by_day[1].date, "20260102");
+    assert_eq!(stats.checkout_activity_by_day[1].count, 1);
+}
+
+#[test]
 fn stats_include_revision_statistics_when_available() {
     let (api, _f) = make_api();
     insert(&api, "/catalog/scripts/a.py", "", "python", "", "");
