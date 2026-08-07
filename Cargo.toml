@@ -5,6 +5,12 @@ edition = "2024"
 rust-version = "1.95.0"
 publish = false
 
+# scat itself stays Unix-only (see src/lib.rs). scat-embed is a separate,
+# ordinary cross-platform member so it can run on non-Unix laptops without
+# touching that gate.
+[workspace]
+members = ["crates/scat-embed"]
+
 [[bin]]
 name = "scat"
 path = "src/main.rs"

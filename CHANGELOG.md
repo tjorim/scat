@@ -68,6 +68,10 @@ All notable changes to this project will be documented in this file.
 
 - **Typed `scripts` row view** ([#17](https://github.com/tjorim/scat/issues/17)) — introduced `scat_core::core::script_view::ScriptView`, a thin read-only wrapper over a queried `scripts` row that exposes typed accessors for the known columns plus parsed helpers for the JSON-encoded `tags`/`entry_points`/`related`/`metadata_json`/`vc_warnings` fields. The JSON, CSV, table, and TUI detail/metadata renderers (and the catalog-diff field extraction) now share this one definition of each column's name and parsing/fallback semantics instead of re-reading raw `JsonRow` keys by hand. Behavior-preserving: command and TUI output are unchanged.
 
+### Tooling
+
+- **`scat-embed` scaffold** — new `crates/scat-embed` workspace member: a standalone CLI that reads a `scripts.sqlite` catalog copy read-only, generates embeddings for each script's `logical_path`/`purpose`/`tags`/`owner` via a local ONNX model (`fastembed`, defaulting to `jina-embeddings-v2-base-code`), and writes them to a sidecar `embeddings.sqlite` (`script_embeddings` table, keyed by `script_id`). Deliberately kept out of the `scat` binary and doesn't depend on `scat_core`, which stays Unix-only — `scat-embed` is a plain cross-platform crate meant to run wherever is convenient (e.g. a laptop with internet access) to produce a sidecar that gets published next to the catalog for the (still offline, Linux-only) `scat` clients to eventually consume. Scaffold only: nothing in `scat` reads the sidecar yet.
+
 ### Build
 
 - **Leaner release profile** ([#45](https://github.com/tjorim/scat/issues/45)) — `[profile.release]` now sets `lto = "thin"`, `codegen-units = 1`, `panic = "abort"`, and `strip = true` (build dependencies keep a `codegen-units = 4` override so they still compile quickly). On Linux x86_64, the release binary shrank from 12.8 MB to 9.4 MB (about 27% smaller); behavior is unchanged, since nothing in scat relies on unwinding across a panic. Full profile-guided optimization (instrumented build + representative training run) is a larger, separate undertaking and was left out of this pass.
