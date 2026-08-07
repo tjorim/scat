@@ -36,6 +36,18 @@ pub fn cmd_stats(
         .map(|row| vec![row.owner.clone(), row.count.to_string()])
         .collect::<Vec<_>>();
     println!("{}", render_table(&["Owner", "Count"], &by_owner, no_color));
+    if !data.most_depended_upon.is_empty() {
+        println!("\nMost depended-upon:");
+        let most_depended_upon = data
+            .most_depended_upon
+            .iter()
+            .map(|row| vec![row.logical_path.clone(), row.count.to_string()])
+            .collect::<Vec<_>>();
+        println!(
+            "{}",
+            render_table(&["Path", "Dependents"], &most_depended_upon, no_color)
+        );
+    }
     if let Some(revisions) = &data.revisions {
         println!("\nRevision statistics");
         for line in render_revision_stats_lines(revisions) {

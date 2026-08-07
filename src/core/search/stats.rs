@@ -6,8 +6,8 @@ use crate::core::vc::{REVISION_TYPE_ARCHIVE, REVISION_TYPE_DEVELOP, REVISION_TYP
 use crate::error::{Error, Result};
 
 use super::{
-    AuditFinding, AuditResult, AuditSummary, IndexMetadata, LangCount, OwnerCount, RevisionStats,
-    SearchApi, StatsResult,
+    AuditFinding, AuditOptions, AuditResult, AuditSummary, DependentCount, IndexMetadata,
+    LangCount, MOST_DEPENDED_UPON_LIMIT, OwnerCount, RevisionStats, SearchApi, StatsResult,
 };
 
 impl SearchApi {
@@ -55,10 +55,32 @@ impl SearchApi {
             rows?
         };
 
+        let most_depended_upon: Vec<DependentCount> = {
+            let mut stmt = self.conn.prepare_cached(
+                "SELECT s.logical_path AS logical_path, COUNT(d.id) AS count
+                 FROM scripts s
+                 JOIN dependencies d ON d.resolved_script_id = s.id
+                 GROUP BY s.id
+                 ORDER BY count DESC, logical_path
+                 LIMIT ?1",
+            )?;
+            let rows: Result<Vec<DependentCount>> = stmt
+                .query_map([MOST_DEPENDED_UPON_LIMIT as i64], |row| {
+                    Ok(DependentCount {
+                        logical_path: row.get(0)?,
+                        count: row.get(1)?,
+                    })
+                })?
+                .map(|r| r.map_err(Error::from))
+                .collect();
+            rows?
+        };
+
         Ok(StatsResult {
             total_scripts: total,
             by_language,
             by_owner,
+            most_depended_upon,
             revisions: self.revision_stats()?,
         })
     }
@@ -92,7 +114,12 @@ impl SearchApi {
     }
 
     /// Run selected audit checks and return findings with summary counts.
-    pub fn audit(&self, checks: Option<&[String]>, stale_days: i64) -> Result<AuditResult> {
+    pub fn audit(
+        &self,
+        checks: Option<&[String]>,
+        stale_days: i64,
+        options: AuditOptions<'_>,
+    ) -> Result<AuditResult> {
         const ALL_CHECKS: &[&str] = &[
             "unowned",
             "no-purpose",
@@ -101,6 +128,8 @@ impl SearchApi {
             "stale-checkouts",
             "dead-scripts",
             "no-description",
+            "near-duplicates",
+            "outliers",
         ];
 
         let selected = checks.map(|values| {
@@ -265,6 +294,64 @@ impl SearchApi {
                 logical_path: row_string(&row, "logical_path"),
                 detail: "missing both docstring and @brief metadata".to_string(),
             }));
+        }
+
+        if should_run(selected.as_ref(), "near-duplicates") {
+            match options.sidecar {
+                Some(sidecar) => {
+                    findings.extend(
+                        sidecar
+                            .near_duplicates(options.near_duplicate_threshold)
+                            .into_iter()
+                            .map(|pair| AuditFinding {
+                                check: "near-duplicates".to_string(),
+                                severity: "warn".to_string(),
+                                logical_path: pair.a,
+                                detail: format!(
+                                    "near-duplicate of {} (cosine similarity {:.3})",
+                                    pair.b, pair.score
+                                ),
+                            }),
+                    );
+                }
+                None if selected
+                    .as_ref()
+                    .is_some_and(|s| s.contains("near-duplicates")) =>
+                {
+                    return Err(Error::Validation(
+                        "near-duplicates requires an embeddings sidecar (run scat-embed and \
+                         publish embeddings.sqlite; see crates/scat-embed)"
+                            .to_string(),
+                    ));
+                }
+                None => {}
+            }
+        }
+
+        if should_run(selected.as_ref(), "outliers") {
+            match options.sidecar {
+                Some(sidecar) => {
+                    findings.extend(sidecar.outliers(options.outlier_threshold).into_iter().map(
+                        |s| AuditFinding {
+                            check: "outliers".to_string(),
+                            severity: "info".to_string(),
+                            logical_path: s.logical_path,
+                            detail: format!(
+                                "no similar script found (best match cosine similarity {:.3})",
+                                s.score
+                            ),
+                        },
+                    ));
+                }
+                None if selected.as_ref().is_some_and(|s| s.contains("outliers")) => {
+                    return Err(Error::Validation(
+                        "outliers requires an embeddings sidecar (run scat-embed and publish \
+                         embeddings.sqlite; see crates/scat-embed)"
+                            .to_string(),
+                    ));
+                }
+                None => {}
+            }
         }
 
         findings.sort_by(|a, b| {

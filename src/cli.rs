@@ -313,6 +313,14 @@ pub enum CatalogCommands {
         /// Age threshold in days for stale checkouts.
         #[arg(long, default_value = "90")]
         stale_days: i64,
+        /// Cosine-similarity threshold (0.0-1.0) at/above which two scripts
+        /// count as near-duplicates. Requires an embeddings sidecar.
+        #[arg(long, default_value = "0.97")]
+        near_duplicate_threshold: f32,
+        /// Cosine-similarity threshold (0.0-1.0) below which a script's best
+        /// match counts as an outlier. Requires an embeddings sidecar.
+        #[arg(long, default_value = "0.3")]
+        outlier_threshold: f32,
         /// Emit machine-readable JSON output.
         #[arg(long)]
         json: bool,

@@ -49,6 +49,17 @@ pub struct SimilarScript {
     pub score: f32,
 }
 
+/// One result from [`EmbeddingsSidecar::near_duplicates`].
+#[derive(Debug, Serialize, Clone, PartialEq)]
+pub struct NearDuplicatePair {
+    /// Logical path of one script in the pair (lexicographically first).
+    pub a: String,
+    /// Logical path of the other script in the pair.
+    pub b: String,
+    /// Cosine similarity between the pair's embeddings.
+    pub score: f32,
+}
+
 /// A read-only, fully-loaded view of an `embeddings.sqlite` sidecar.
 ///
 /// Loaded eagerly rather than queried per call: sidecars hold one row per
@@ -146,6 +157,74 @@ impl EmbeddingsSidecar {
         scored.sort_by(|a, b| b.score.total_cmp(&a.score));
         scored.truncate(limit);
         Some(scored)
+    }
+
+    /// All pairs of embedded scripts whose cosine similarity is at or above
+    /// `threshold`, sorted by score descending (ties broken by path).
+    ///
+    /// Each relationship is reported once: `a` is always the
+    /// lexicographically smaller of the pair's two logical paths, so a
+    /// caller iterating pairs never sees both `(x, y)` and `(y, x)`.
+    /// Quadratic in the sidecar's row count, which is fine at the scale
+    /// `EmbeddingsSidecar` already documents (a few thousand scripts at
+    /// most, held fully in memory).
+    #[must_use]
+    pub fn near_duplicates(&self, threshold: f32) -> Vec<NearDuplicatePair> {
+        let mut pairs = Vec::new();
+        for i in 0..self.embeddings.len() {
+            for j in (i + 1)..self.embeddings.len() {
+                let x = &self.embeddings[i];
+                let y = &self.embeddings[j];
+                let score = cosine_similarity(&x.vector, &y.vector);
+                if score >= threshold {
+                    let (a, b) = if x.logical_path <= y.logical_path {
+                        (x.logical_path.clone(), y.logical_path.clone())
+                    } else {
+                        (y.logical_path.clone(), x.logical_path.clone())
+                    };
+                    pairs.push(NearDuplicatePair { a, b, score });
+                }
+            }
+        }
+        pairs.sort_by(|p, q| q.score.total_cmp(&p.score).then_with(|| p.a.cmp(&q.a)));
+        pairs
+    }
+
+    /// Scripts whose *best* match among all other embedded scripts still
+    /// scores below `threshold` — the catalog's most one-of-a-kind scripts.
+    /// Sorted by score ascending (most unique first).
+    ///
+    /// A sidecar with fewer than two rows has nothing to compare against
+    /// and always returns empty, rather than reporting every script as an
+    /// outlier by default.
+    #[must_use]
+    pub fn outliers(&self, threshold: f32) -> Vec<SimilarScript> {
+        if self.embeddings.len() < 2 {
+            return Vec::new();
+        }
+        let mut results: Vec<SimilarScript> = self
+            .embeddings
+            .iter()
+            .map(|e| {
+                let best = self
+                    .embeddings
+                    .iter()
+                    .filter(|o| o.script_id != e.script_id)
+                    .map(|o| cosine_similarity(&e.vector, &o.vector))
+                    .fold(f32::MIN, f32::max);
+                SimilarScript {
+                    logical_path: e.logical_path.clone(),
+                    score: best,
+                }
+            })
+            .filter(|s| s.score < threshold)
+            .collect();
+        results.sort_by(|a, b| {
+            a.score
+                .total_cmp(&b.score)
+                .then_with(|| a.logical_path.cmp(&b.logical_path))
+        });
+        results
     }
 }
 
@@ -317,6 +396,73 @@ mod tests {
         let sidecar = EmbeddingsSidecar::open(&path).unwrap();
 
         assert!(sidecar.nearest("/catalog/never-embedded.py", 10).is_none());
+    }
+
+    #[test]
+    fn near_duplicates_reports_pairs_at_or_above_the_threshold_once_each() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("embeddings.sqlite");
+        write_sidecar(
+            &path,
+            &[
+                (1, "/catalog/b.py", &[1.0, 0.0]),
+                (2, "/catalog/a.py", &[0.999, 0.001]),
+                (3, "/catalog/unrelated.py", &[0.0, 1.0]),
+            ],
+        );
+        let sidecar = EmbeddingsSidecar::open(&path).unwrap();
+
+        let pairs = sidecar.near_duplicates(0.99);
+        assert_eq!(pairs.len(), 1);
+        // Lexicographically smaller path first, regardless of insertion order.
+        assert_eq!(pairs[0].a, "/catalog/a.py");
+        assert_eq!(pairs[0].b, "/catalog/b.py");
+        assert!(pairs[0].score >= 0.99);
+    }
+
+    #[test]
+    fn near_duplicates_excludes_pairs_below_the_threshold() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("embeddings.sqlite");
+        write_sidecar(
+            &path,
+            &[
+                (1, "/catalog/a.py", &[1.0, 0.0]),
+                (2, "/catalog/b.py", &[0.0, 1.0]),
+            ],
+        );
+        let sidecar = EmbeddingsSidecar::open(&path).unwrap();
+
+        assert!(sidecar.near_duplicates(0.99).is_empty());
+    }
+
+    #[test]
+    fn outliers_reports_scripts_whose_best_match_is_below_the_threshold() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("embeddings.sqlite");
+        write_sidecar(
+            &path,
+            &[
+                (1, "/catalog/a.py", &[1.0, 0.0]),
+                (2, "/catalog/b.py", &[0.99, 0.14]),
+                (3, "/catalog/lonely.py", &[0.0, 1.0]),
+            ],
+        );
+        let sidecar = EmbeddingsSidecar::open(&path).unwrap();
+
+        let results = sidecar.outliers(0.5);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].logical_path, "/catalog/lonely.py");
+    }
+
+    #[test]
+    fn outliers_is_empty_with_fewer_than_two_embedded_scripts() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("embeddings.sqlite");
+        write_sidecar(&path, &[(1, "/catalog/a.py", &[1.0, 0.0])]);
+        let sidecar = EmbeddingsSidecar::open(&path).unwrap();
+
+        assert!(sidecar.outliers(0.99).is_empty());
     }
 
     #[test]

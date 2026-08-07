@@ -115,7 +115,14 @@ fn run(cli: Cli) -> Result<()> {
             return tui::run(&catalog_read_path(db_path, &cache_options), resolver);
         }
         Commands::Catalog { command } => {
-            return cmd_catalog(command, db_path, &cache_options, no_color, scat_config);
+            return cmd_catalog(
+                command,
+                db_path,
+                &embeddings_path,
+                &cache_options,
+                no_color,
+                scat_config,
+            );
         }
         _ => {}
     }
@@ -225,6 +232,7 @@ fn run(cli: Cli) -> Result<()> {
 fn cmd_catalog(
     command: CatalogCommands,
     db_path: &std::path::Path,
+    embeddings_path: &std::path::Path,
     cache_options: &CacheOptions,
     no_color: bool,
     config: scat_core::core::vc::VcConfig,
@@ -281,8 +289,19 @@ fn cmd_catalog(
             checks,
             strict,
             stale_days,
+            near_duplicate_threshold,
+            outlier_threshold,
             json,
-        } => cmd_audit(&api, &checks, strict, stale_days, json),
+        } => cmd_audit(
+            &api,
+            &catalog_read_path(embeddings_path, cache_options),
+            &checks,
+            strict,
+            stale_days,
+            near_duplicate_threshold,
+            outlier_threshold,
+            json,
+        ),
         CatalogCommands::Build { .. } | CatalogCommands::Diff { .. } => unreachable!(),
     }
 }

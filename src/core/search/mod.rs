@@ -4,6 +4,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 use crate::core::db::{JsonRow, row_to_map};
+use crate::core::embeddings::EmbeddingsSidecar;
 use crate::error::{Error, Result};
 
 mod checkout;
@@ -88,10 +89,16 @@ pub struct StatsResult {
     pub by_language: Vec<LangCount>,
     /// Script counts grouped by owner.
     pub by_owner: Vec<OwnerCount>,
+    /// Scripts with the most dependents, highest in-degree first
+    /// (capped at [`MOST_DEPENDED_UPON_LIMIT`]).
+    pub most_depended_upon: Vec<DependentCount>,
     /// Revision statistics when vc data has been indexed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub revisions: Option<RevisionStats>,
 }
+
+/// Cap on [`StatsResult::most_depended_upon`] — a ranking, not a full dump.
+pub const MOST_DEPENDED_UPON_LIMIT: usize = 10;
 
 #[derive(Debug, Serialize)]
 /// Count bucket for a language.
@@ -108,6 +115,15 @@ pub struct OwnerCount {
     /// Owner value.
     pub owner: String,
     /// Script count for `owner`.
+    pub count: i64,
+}
+
+#[derive(Debug, Serialize)]
+/// A script and how many other scripts depend on it (in-degree).
+pub struct DependentCount {
+    /// Logical path of the depended-upon script.
+    pub logical_path: String,
+    /// Number of dependency edges resolving to this script.
     pub count: i64,
 }
 
@@ -178,6 +194,35 @@ pub struct AuditResult {
     pub findings: Vec<AuditFinding>,
     /// Aggregated finding counts.
     pub summary: AuditSummary,
+}
+
+/// Extra inputs to [`SearchApi::audit`] beyond the catalog database itself.
+///
+/// Grouped into one struct, rather than added as more positional
+/// parameters, because `sidecar` is optional (the embeddings sidecar isn't
+/// always published) while the two thresholds have sane defaults most
+/// callers won't want to think about.
+pub struct AuditOptions<'a> {
+    /// Embeddings sidecar backing the `near-duplicates` and `outliers`
+    /// checks. `None` disables both checks unless explicitly requested, in
+    /// which case `audit` returns a validation error.
+    pub sidecar: Option<&'a EmbeddingsSidecar>,
+    /// Cosine-similarity threshold at/above which a script pair counts as
+    /// a near-duplicate.
+    pub near_duplicate_threshold: f32,
+    /// Cosine-similarity threshold below which a script's best match
+    /// counts as an outlier.
+    pub outlier_threshold: f32,
+}
+
+impl Default for AuditOptions<'_> {
+    fn default() -> Self {
+        Self {
+            sidecar: None,
+            near_duplicate_threshold: 0.97,
+            outlier_threshold: 0.3,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
