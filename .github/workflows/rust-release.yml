@@ -210,3 +210,37 @@ jobs:
           name: scat-linux-x86_64-musl
           path: target/x86_64-unknown-linux-musl/release/scat
           if-no-files-found: error
+
+  windows:
+    name: Windows scat-embed build
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+
+      # scat_core is Unix-only; -p scat-embed keeps this build from ever
+      # touching that crate (scat-embed has no dependency on it).
+      - name: Run tests
+        run: cargo test -p scat-embed --locked
+
+      - name: Build Windows binary
+        run: cargo build -p scat-embed --release --locked
+
+      - name: Smoke test Windows binary
+        run: .\target\release\scat-embed.exe --help
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: scat-embed-windows-x86_64
+          path: target/release/scat-embed.exe
+          if-no-files-found: error
