@@ -12,7 +12,7 @@
 //! cached under `./.fastembed_cache` (override with `FASTEMBED_CACHE_DIR`)
 //! and later runs are offline.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -131,48 +131,168 @@ fn read_scripts(path: &PathBuf) -> Result<Vec<ScriptRow>> {
     Ok(rows)
 }
 
-/// Writes a fresh embeddings sidecar, replacing any file already at `path`.
+/// Writes a fresh embeddings sidecar and atomically publishes it to `path`.
+///
+/// The database is built entirely under a scratch path beside `path` — schema
+/// and data both — and only made visible at `path` via a single `rename(2)`
+/// once it is complete. Without that, a plain `Connection::open(path)`
+/// followed by `CREATE TABLE` and a separate insert transaction commits the
+/// (empty) table before the data, so a reader on the share that opens `path`
+/// mid-write could observe a `script_embeddings` table with zero rows instead
+/// of either the previous complete sidecar or the new one.
 fn write_embeddings(
     path: &PathBuf,
     rows: &[ScriptRow],
     embeddings: &[Vec<f32>],
     model_label: &str,
 ) -> Result<()> {
-    if path.exists() {
-        std::fs::remove_file(path)
-            .with_context(|| format!("failed to remove existing {}", path.display()))?;
-    }
-    let mut conn =
-        Connection::open(path).with_context(|| format!("failed to create {}", path.display()))?;
+    let tmp_path = scratch_path(path);
+    // A leftover from a previous crashed run; SQLite would otherwise append
+    // to it instead of starting fresh.
+    let _ = std::fs::remove_file(&tmp_path);
 
-    conn.execute_batch(
-        "CREATE TABLE script_embeddings (
-            script_id     INTEGER PRIMARY KEY,
-            logical_path  TEXT    NOT NULL,
-            model         TEXT    NOT NULL,
-            dim           INTEGER NOT NULL,
-            embedding     BLOB    NOT NULL
-        );",
-    )?;
+    let write_result = (|| -> Result<()> {
+        let mut conn = Connection::open(&tmp_path)
+            .with_context(|| format!("failed to create {}", tmp_path.display()))?;
 
-    let tx = conn.transaction()?;
-    {
-        let mut stmt = tx.prepare(
-            "INSERT INTO script_embeddings (script_id, logical_path, model, dim, embedding) \
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+        conn.execute_batch(
+            "CREATE TABLE script_embeddings (
+                script_id     INTEGER PRIMARY KEY,
+                logical_path  TEXT    NOT NULL,
+                model         TEXT    NOT NULL,
+                dim           INTEGER NOT NULL,
+                embedding     BLOB    NOT NULL
+            );",
         )?;
-        for (row, embedding) in rows.iter().zip(embeddings) {
-            let bytes: Vec<u8> = embedding.iter().flat_map(|f| f.to_le_bytes()).collect();
-            stmt.execute(rusqlite::params![
-                row.id,
-                row.logical_path,
-                model_label,
-                i64::try_from(embedding.len()).unwrap_or(i64::MAX),
-                bytes,
-            ])?;
+
+        let tx = conn.transaction()?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO script_embeddings (script_id, logical_path, model, dim, embedding) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            )?;
+            for (row, embedding) in rows.iter().zip(embeddings) {
+                let bytes: Vec<u8> = embedding.iter().flat_map(|f| f.to_le_bytes()).collect();
+                stmt.execute(rusqlite::params![
+                    row.id,
+                    row.logical_path,
+                    model_label,
+                    i64::try_from(embedding.len()).unwrap_or(i64::MAX),
+                    bytes,
+                ])?;
+            }
+        }
+        tx.commit()?;
+        drop(conn);
+        Ok(())
+    })();
+
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&tmp_path);
+        return write_result;
+    }
+
+    std::fs::rename(&tmp_path, path).with_context(|| {
+        format!(
+            "failed to publish {} to {}",
+            tmp_path.display(),
+            path.display()
+        )
+    })
+}
+
+/// A scratch path beside `path`, used to build the sidecar before it is
+/// atomically renamed into place.
+fn scratch_path(path: &Path) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .map(|n| format!("{}.tmp", n.to_string_lossy()))
+        .unwrap_or_else(|| "embeddings.sqlite.tmp".to_string());
+    path.with_file_name(file_name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn sample_row(id: i64, logical_path: &str) -> ScriptRow {
+        ScriptRow {
+            id,
+            logical_path: logical_path.to_string(),
+            text: String::new(),
         }
     }
-    tx.commit()?;
 
-    Ok(())
+    #[test]
+    fn write_embeddings_leaves_no_scratch_file_behind() {
+        let dir = TempDir::new().unwrap();
+        let output = dir.path().join("embeddings.sqlite");
+        let rows = vec![sample_row(1, "/catalog/scripts/a.py")];
+        let embeddings = vec![vec![0.1_f32, 0.2, 0.3]];
+
+        write_embeddings(&output, &rows, &embeddings, "test-model").unwrap();
+
+        assert!(output.is_file());
+        assert!(!scratch_path(&output).exists());
+
+        let conn = Connection::open_with_flags(&output, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM script_embeddings", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn republish_replaces_the_existing_sidecar_without_a_visible_empty_table() {
+        let dir = TempDir::new().unwrap();
+        let output = dir.path().join("embeddings.sqlite");
+
+        write_embeddings(
+            &output,
+            &[sample_row(1, "/catalog/scripts/a.py")],
+            &[vec![0.1_f32]],
+            "test-model",
+        )
+        .unwrap();
+
+        // Republishing must never leave `output` pointing at an empty table:
+        // the old complete file stays visible right up until the rename that
+        // swaps in the new complete one.
+        write_embeddings(
+            &output,
+            &[
+                sample_row(1, "/catalog/scripts/a.py"),
+                sample_row(2, "/catalog/scripts/b.py"),
+            ],
+            &[vec![0.1_f32], vec![0.2_f32]],
+            "test-model",
+        )
+        .unwrap();
+
+        let conn = Connection::open_with_flags(&output, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM script_embeddings", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 2);
+        assert!(!scratch_path(&output).exists());
+    }
+
+    #[test]
+    fn leftover_scratch_file_from_a_crashed_run_does_not_break_the_next_write() {
+        let dir = TempDir::new().unwrap();
+        let output = dir.path().join("embeddings.sqlite");
+        std::fs::write(scratch_path(&output), b"partial garbage from a killed run").unwrap();
+
+        write_embeddings(
+            &output,
+            &[sample_row(1, "/catalog/scripts/a.py")],
+            &[vec![0.1_f32]],
+            "test-model",
+        )
+        .unwrap();
+
+        assert!(output.is_file());
+        assert!(!scratch_path(&output).exists());
+    }
 }
