@@ -142,8 +142,8 @@ fn write_embeddings(
         std::fs::remove_file(path)
             .with_context(|| format!("failed to remove existing {}", path.display()))?;
     }
-    let mut conn = Connection::open(path)
-        .with_context(|| format!("failed to create {}", path.display()))?;
+    let mut conn =
+        Connection::open(path).with_context(|| format!("failed to create {}", path.display()))?;
 
     conn.execute_batch(
         "CREATE TABLE script_embeddings (
