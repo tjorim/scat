@@ -59,6 +59,7 @@ All notable changes to this project will be documented in this file.
 - **The live version is marked in the revisions pane** — nothing distinguished the version a script's symlink actually resolves to from the other retained copies, and their order does not imply it: a rollback re-points the symlink at an older version and leaves the newer one in place, so the group can hold versions both older *and* newer than the live one. The matching revision is now marked `← active`.
 - **Scroll clamping** — the preview, detail, diff, and revisions panes now clamp their scroll offset to the content height, removing the misleading blank-space scrolling past the end of shorter scripts.
 - **Consistent empty-field placeholder** — the detail/metadata/functions panes now show an em dash (`—`) for empty values, matching the placeholder already used across the CLI table, `show`, and `status` output instead of a plain hyphen.
+- **Preview pane no longer caps at 500 lines** — the catalog-preview pane and the metadata pane's embedded preview section both truncated at `PREVIEW_LINES` (500), even though the full content was already loaded into memory regardless and both panes scroll. The cap is removed; both panes now show the full indexed content, and the preview title shows `line N of M` instead of flagging truncation. `v`/`V` (open in an external viewer) remain useful for actually editing/searching a script, just no longer for "seeing the rest of it".
 
 ### Documentation and Configuration
 

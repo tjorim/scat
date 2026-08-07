@@ -59,7 +59,6 @@ use self::search_worker::{SearchRequest, SearchWorker};
 // (see `render::draw_results`), so this can be well beyond a single screen
 // without making rendering more expensive.
 const RESULT_LIMIT: usize = 2000;
-const PREVIEW_LINES: usize = 500;
 const DEBOUNCE_MS: u64 = 150;
 const POLL_TICK_MS: u64 = 50;
 const PAGE_SCROLL_LINES: i16 = 40;

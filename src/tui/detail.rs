@@ -5,7 +5,7 @@ use scat_core::core::db::{JsonRow, row_display};
 use scat_core::core::resolve::PathResolver;
 use scat_core::core::script_view::{ListField, ScriptView};
 
-use super::{PREVIEW_LINES, TuiApp};
+use super::TuiApp;
 
 pub(super) fn detail_lines(app: &TuiApp) -> Vec<Line<'static>> {
     if app.detail_loading {
@@ -111,7 +111,7 @@ pub(super) fn detail_lines(app: &TuiApp) -> Vec<Line<'static>> {
     if !content.is_empty() {
         lines.push(Line::from(""));
         lines.push(section("Preview"));
-        for line in content.lines().take(PREVIEW_LINES) {
+        for line in content.lines() {
             lines.push(Line::from(line.to_string()));
         }
     }
