@@ -247,6 +247,52 @@ fn cmd_similar_ranks_by_embedding_similarity() {
 }
 
 #[test]
+fn cmd_similar_succeeds_with_a_stale_embedding_for_a_removed_script() {
+    // The precise "filter before truncating so a stale entry can't cost a
+    // valid result" behavior is unit-tested directly against
+    // drop_stale_and_truncate in commands::similar::tests; this just checks
+    // the end-to-end command doesn't error when the sidecar outlives the
+    // catalog rows it was built from.
+    let (api, _file) = make_api();
+    insert_script(&api, "/catalog/scripts/query.py");
+    insert_script(&api, "/catalog/scripts/still-here.py");
+    let sidecar = tempfile::TempDir::new().unwrap();
+    let sidecar_path = sidecar.path().join("embeddings.sqlite");
+    write_embeddings_sidecar(
+        &sidecar_path,
+        &[
+            (1, "/catalog/scripts/query.py", &[1.0, 0.0]),
+            (2, "/catalog/scripts/deleted.py", &[0.99, 0.01]),
+            (3, "/catalog/scripts/still-here.py", &[0.9, 0.1]),
+        ],
+    );
+
+    for output in [OutputFormat::Table, OutputFormat::Json] {
+        cmd_similar(&api, &sidecar_path, "/catalog/scripts/query.py", 1, output).unwrap();
+    }
+}
+
+#[test]
+fn cmd_similar_zero_limit_reports_no_results_without_erroring() {
+    let (api, _file) = make_api();
+    insert_script(&api, "/catalog/scripts/query.py");
+    insert_script(&api, "/catalog/scripts/close.py");
+    let sidecar = tempfile::TempDir::new().unwrap();
+    let sidecar_path = sidecar.path().join("embeddings.sqlite");
+    write_embeddings_sidecar(
+        &sidecar_path,
+        &[
+            (1, "/catalog/scripts/query.py", &[1.0, 0.0]),
+            (2, "/catalog/scripts/close.py", &[0.9, 0.1]),
+        ],
+    );
+
+    for output in [OutputFormat::Table, OutputFormat::Json] {
+        cmd_similar(&api, &sidecar_path, "/catalog/scripts/query.py", 0, output).unwrap();
+    }
+}
+
+#[test]
 fn cmd_deps_missing_script_returns_plain_error() {
     let (api, _file) = make_api();
     let err = cmd_deps(
