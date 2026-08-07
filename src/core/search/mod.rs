@@ -90,15 +90,22 @@ pub struct StatsResult {
     /// Script counts grouped by owner.
     pub by_owner: Vec<OwnerCount>,
     /// Scripts with the most dependents, highest in-degree first
-    /// (capped at [`MOST_DEPENDED_UPON_LIMIT`]).
+    /// (capped at [`STATS_RANKING_LIMIT`]).
     pub most_depended_upon: Vec<DependentCount>,
+    /// Most common tags across the catalog, highest count first
+    /// (capped at [`STATS_RANKING_LIMIT`]).
+    pub top_tags: Vec<TagCount>,
+    /// Scripts with the most defined functions, highest count first
+    /// (capped at [`STATS_RANKING_LIMIT`]).
+    pub most_functions: Vec<DependentCount>,
     /// Revision statistics when vc data has been indexed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub revisions: Option<RevisionStats>,
 }
 
-/// Cap on [`StatsResult::most_depended_upon`] — a ranking, not a full dump.
-pub const MOST_DEPENDED_UPON_LIMIT: usize = 10;
+/// Cap shared by every `StatsResult` ranking field — each is a "what's
+/// dominant" glance, not a full dump of the catalog.
+pub const STATS_RANKING_LIMIT: usize = 10;
 
 #[derive(Debug, Serialize)]
 /// Count bucket for a language.
@@ -119,11 +126,22 @@ pub struct OwnerCount {
 }
 
 #[derive(Debug, Serialize)]
-/// A script and how many other scripts depend on it (in-degree).
+/// Count bucket for a tag.
+pub struct TagCount {
+    /// Tag value.
+    pub tag: String,
+    /// Number of scripts carrying this tag.
+    pub count: i64,
+}
+
+#[derive(Debug, Serialize)]
+/// A script and a per-script count — either how many other scripts depend
+/// on it (in-degree, for `most_depended_upon`) or how many functions it
+/// defines (for `most_functions`); the shape is identical either way.
 pub struct DependentCount {
-    /// Logical path of the depended-upon script.
+    /// Logical path of the script.
     pub logical_path: String,
-    /// Number of dependency edges resolving to this script.
+    /// The count this ranking sorts by.
     pub count: i64,
 }
 

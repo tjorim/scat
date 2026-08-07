@@ -464,6 +464,89 @@ fn stats_most_depended_upon_is_empty_without_dependencies() {
 }
 
 #[test]
+fn stats_top_tags_ranks_by_frequency() {
+    let (api, _f) = make_api();
+    insert(&api, "/catalog/scripts/a.py", "", "python", "", "");
+    insert(&api, "/catalog/scripts/b.py", "", "python", "", "");
+    insert(&api, "/catalog/scripts/c.py", "", "python", "", "");
+    api.conn
+        .execute(
+            "UPDATE scripts SET tags = '[\"deploy\",\"prod\"]' WHERE logical_path='/catalog/scripts/a.py'",
+            [],
+        )
+        .unwrap();
+    api.conn
+        .execute(
+            "UPDATE scripts SET tags = '[\"deploy\"]' WHERE logical_path='/catalog/scripts/b.py'",
+            [],
+        )
+        .unwrap();
+    api.conn
+        .execute(
+            "UPDATE scripts SET tags = '[]' WHERE logical_path='/catalog/scripts/c.py'",
+            [],
+        )
+        .unwrap();
+
+    let stats = api.stats().unwrap();
+    assert_eq!(stats.top_tags.len(), 2);
+    assert_eq!(stats.top_tags[0].tag, "deploy");
+    assert_eq!(stats.top_tags[0].count, 2);
+    assert_eq!(stats.top_tags[1].tag, "prod");
+    assert_eq!(stats.top_tags[1].count, 1);
+}
+
+#[test]
+fn stats_top_tags_is_empty_without_any_tags() {
+    let (api, _f) = make_api();
+    insert(&api, "/catalog/scripts/a.py", "", "python", "", "");
+
+    let stats = api.stats().unwrap();
+    assert!(stats.top_tags.is_empty());
+}
+
+#[test]
+fn stats_most_functions_ranks_scripts_by_function_count() {
+    let (api, _f) = make_api();
+    insert(&api, "/catalog/scripts/big.py", "", "python", "", "");
+    insert(&api, "/catalog/scripts/small.py", "", "python", "", "");
+    insert(&api, "/catalog/scripts/none.py", "", "python", "", "");
+    let big_id = id_for(&api, "/catalog/scripts/big.py");
+    let small_id = id_for(&api, "/catalog/scripts/small.py");
+    for (script_id, name) in [(big_id, "a"), (big_id, "b"), (small_id, "c")] {
+        api.conn
+            .execute(
+                "INSERT INTO function_definitions (script_id, name, kind, line)
+                 VALUES (?1, ?2, 'function', 1)",
+                rusqlite::params![script_id, name],
+            )
+            .unwrap();
+    }
+
+    let stats = api.stats().unwrap();
+    assert_eq!(stats.most_functions.len(), 2);
+    assert_eq!(
+        stats.most_functions[0].logical_path,
+        "/catalog/scripts/big.py"
+    );
+    assert_eq!(stats.most_functions[0].count, 2);
+    assert_eq!(
+        stats.most_functions[1].logical_path,
+        "/catalog/scripts/small.py"
+    );
+    assert_eq!(stats.most_functions[1].count, 1);
+}
+
+#[test]
+fn stats_most_functions_is_empty_without_any_functions() {
+    let (api, _f) = make_api();
+    insert(&api, "/catalog/scripts/a.py", "", "python", "", "");
+
+    let stats = api.stats().unwrap();
+    assert!(stats.most_functions.is_empty());
+}
+
+#[test]
 fn stats_include_revision_statistics_when_available() {
     let (api, _f) = make_api();
     insert(&api, "/catalog/scripts/a.py", "", "python", "", "");

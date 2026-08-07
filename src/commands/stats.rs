@@ -48,6 +48,27 @@ pub fn cmd_stats(
             render_table(&["Path", "Dependents"], &most_depended_upon, no_color)
         );
     }
+    if !data.top_tags.is_empty() {
+        println!("\nTop tags:");
+        let top_tags = data
+            .top_tags
+            .iter()
+            .map(|row| vec![row.tag.clone(), row.count.to_string()])
+            .collect::<Vec<_>>();
+        println!("{}", render_table(&["Tag", "Count"], &top_tags, no_color));
+    }
+    if !data.most_functions.is_empty() {
+        println!("\nMost functions:");
+        let most_functions = data
+            .most_functions
+            .iter()
+            .map(|row| vec![row.logical_path.clone(), row.count.to_string()])
+            .collect::<Vec<_>>();
+        println!(
+            "{}",
+            render_table(&["Path", "Functions"], &most_functions, no_color)
+        );
+    }
     if let Some(revisions) = &data.revisions {
         println!("\nRevision statistics");
         for line in render_revision_stats_lines(revisions) {

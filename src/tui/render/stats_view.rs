@@ -1,6 +1,7 @@
-//! Full-screen catalog stats view (`ViewMode::Stats`, opened with `s`):
-//! by-language and by-owner distribution rendered as horizontal bar charts,
-//! a direct visual restatement of `scat catalog stats`'s text tables.
+//! Full-screen catalog stats view (`ViewMode::Stats`, opened with `s`): four
+//! horizontal bar charts (by language, by owner, top tags, most functions
+//! per script) — a direct visual restatement of `scat catalog stats`'s text
+//! tables, laid out as a 2x2 grid.
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -9,13 +10,18 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Bar, BarChart, Block, Borders, Paragraph};
 
 use super::super::TuiApp;
-use super::common::{hint_key, spinner_char};
+use super::common::{hint_key, left_truncate_path, spinner_char};
 
 /// Cap on bars shown per chart. A catalog can have far more distinct owners
-/// than fit legibly in a terminal-height chart; the top N by count is what
-/// matters for a "what's dominant" glance, same reasoning as
-/// `StatsResult::most_depended_upon`'s cap.
-const MAX_BARS: usize = 12;
+/// (or scripts) than fit legibly in a quarter-screen chart; the top N by
+/// count is what matters for a "what's dominant" glance, same reasoning as
+/// `StatsResult`'s own ranking caps.
+const MAX_BARS: usize = 8;
+
+/// Cap on a bar's label width, for the two charts (`most_functions`) whose
+/// labels are full logical paths rather than short language/owner/tag
+/// strings.
+const MAX_LABEL_CHARS: usize = 28;
 
 pub(super) fn draw_stats_view(frame: &mut Frame<'_>, app: &mut TuiApp) {
     let root = Layout::default()
@@ -55,22 +61,49 @@ pub(super) fn draw_stats_view(frame: &mut Frame<'_>, app: &mut TuiApp) {
             body,
         );
     } else if let Some(stats) = &app.stats {
-        let columns = Layout::default()
-            .direction(Direction::Horizontal)
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
             .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
             .split(body);
-        let by_language: Vec<(&str, i64)> = stats
+        let top = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(rows[0]);
+        let bottom = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(rows[1]);
+
+        let by_language: Vec<(String, i64)> = stats
             .by_language
             .iter()
-            .map(|l| (l.language.as_str(), l.count))
+            .map(|l| (l.language.clone(), l.count))
             .collect();
-        let by_owner: Vec<(&str, i64)> = stats
+        let by_owner: Vec<(String, i64)> = stats
             .by_owner
             .iter()
-            .map(|o| (o.owner.as_str(), o.count))
+            .map(|o| (o.owner.clone(), o.count))
             .collect();
-        draw_bar_chart(frame, columns[0], "By language", &by_language);
-        draw_bar_chart(frame, columns[1], "By owner", &by_owner);
+        let top_tags: Vec<(String, i64)> = stats
+            .top_tags
+            .iter()
+            .map(|t| (t.tag.clone(), t.count))
+            .collect();
+        let most_functions: Vec<(String, i64)> = stats
+            .most_functions
+            .iter()
+            .map(|f| {
+                (
+                    left_truncate_path(&f.logical_path, MAX_LABEL_CHARS),
+                    f.count,
+                )
+            })
+            .collect();
+
+        draw_bar_chart(frame, top[0], "By language", &by_language);
+        draw_bar_chart(frame, top[1], "By owner", &by_owner);
+        draw_bar_chart(frame, bottom[0], "Top tags", &top_tags);
+        draw_bar_chart(frame, bottom[1], "Most functions", &most_functions);
     } else {
         frame.render_widget(
             Block::default()
@@ -94,7 +127,7 @@ pub(super) fn draw_stats_view(frame: &mut Frame<'_>, app: &mut TuiApp) {
 /// Draw one horizontal bar chart of `(label, count)` pairs, already sorted
 /// count-descending by the caller (matching `StatsResult`'s SQL ordering),
 /// truncated to [`MAX_BARS`] with the title noting how many were cut.
-fn draw_bar_chart(frame: &mut Frame<'_>, area: Rect, title: &str, data: &[(&str, i64)]) {
+fn draw_bar_chart(frame: &mut Frame<'_>, area: Rect, title: &str, data: &[(String, i64)]) {
     if data.is_empty() {
         frame.render_widget(
             Paragraph::new("No data.").block(
@@ -109,7 +142,7 @@ fn draw_bar_chart(frame: &mut Frame<'_>, area: Rect, title: &str, data: &[(&str,
     let shown = data.len().min(MAX_BARS);
     let bars: Vec<Bar<'_>> = data[..shown]
         .iter()
-        .map(|(label, count)| Bar::with_label(*label, u64::try_from(*count).unwrap_or(0)))
+        .map(|(label, count)| Bar::with_label(label.clone(), u64::try_from(*count).unwrap_or(0)))
         .collect();
     let full_title = if data.len() > shown {
         format!("{title} (top {shown} of {})", data.len())

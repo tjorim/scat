@@ -7,7 +7,7 @@ use crate::error::{Error, Result};
 
 use super::{
     AuditFinding, AuditOptions, AuditResult, AuditSummary, DependentCount, IndexMetadata,
-    LangCount, MOST_DEPENDED_UPON_LIMIT, OwnerCount, RevisionStats, SearchApi, StatsResult,
+    LangCount, OwnerCount, RevisionStats, STATS_RANKING_LIMIT, SearchApi, StatsResult, TagCount,
 };
 
 impl SearchApi {
@@ -65,7 +65,48 @@ impl SearchApi {
                  LIMIT ?1",
             )?;
             let rows: Result<Vec<DependentCount>> = stmt
-                .query_map([MOST_DEPENDED_UPON_LIMIT as i64], |row| {
+                .query_map([STATS_RANKING_LIMIT as i64], |row| {
+                    Ok(DependentCount {
+                        logical_path: row.get(0)?,
+                        count: row.get(1)?,
+                    })
+                })?
+                .map(|r| r.map_err(Error::from))
+                .collect();
+            rows?
+        };
+
+        let top_tags: Vec<TagCount> = {
+            let mut stmt = self.conn.prepare_cached(
+                "SELECT je.value AS tag, COUNT(*) AS count
+                 FROM scripts, json_each(scripts.tags) AS je
+                 GROUP BY je.value
+                 ORDER BY count DESC, tag
+                 LIMIT ?1",
+            )?;
+            let rows: Result<Vec<TagCount>> = stmt
+                .query_map([STATS_RANKING_LIMIT as i64], |row| {
+                    Ok(TagCount {
+                        tag: row.get(0)?,
+                        count: row.get(1)?,
+                    })
+                })?
+                .map(|r| r.map_err(Error::from))
+                .collect();
+            rows?
+        };
+
+        let most_functions: Vec<DependentCount> = {
+            let mut stmt = self.conn.prepare_cached(
+                "SELECT s.logical_path AS logical_path, COUNT(f.id) AS count
+                 FROM scripts s
+                 JOIN function_definitions f ON f.script_id = s.id
+                 GROUP BY s.id
+                 ORDER BY count DESC, logical_path
+                 LIMIT ?1",
+            )?;
+            let rows: Result<Vec<DependentCount>> = stmt
+                .query_map([STATS_RANKING_LIMIT as i64], |row| {
                     Ok(DependentCount {
                         logical_path: row.get(0)?,
                         count: row.get(1)?,
@@ -81,6 +122,8 @@ impl SearchApi {
             by_language,
             by_owner,
             most_depended_upon,
+            top_tags,
+            most_functions,
             revisions: self.revision_stats()?,
         })
     }
