@@ -14,6 +14,11 @@ pub struct Cli {
     #[arg(long, env = "SCAT_DB", global = true)]
     pub(crate) db: Option<PathBuf>,
 
+    /// Path to the embeddings.sqlite sidecar published by scat-embed, used
+    /// by `scat similar`. Defaults to embeddings.sqlite next to --db.
+    #[arg(long, env = "SCAT_EMBEDDINGS", global = true)]
+    pub(crate) embeddings: Option<PathBuf>,
+
     /// Path to the scat configuration file.
     #[arg(long, env = "SCAT_CONFIG", global = true)]
     pub(crate) config: Option<PathBuf>,
@@ -150,6 +155,22 @@ pub enum Commands {
     Symlinks {
         /// Logical path of the script.
         path: String,
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Table)]
+        output: OutputFormat,
+    },
+
+    /// Find scripts with a similar purpose, by embedding similarity.
+    ///
+    /// Requires an `embeddings.sqlite` sidecar published next to the catalog
+    /// (see crates/scat-embed) — this only ranks scripts already in the
+    /// catalog against each other and never embeds a typed query.
+    Similar {
+        /// Logical path of the script to find similar scripts for.
+        path: String,
+        /// Maximum number of results.
+        #[arg(long, default_value = "10")]
+        limit: usize,
         /// Output format.
         #[arg(long, value_enum, default_value_t = OutputFormat::Table)]
         output: OutputFormat,
@@ -824,6 +845,52 @@ mod tests {
             "0",
         ]);
         assert!(result.is_err(), "--depth 0 should be rejected");
+    }
+
+    #[test]
+    fn clap_parses_similar_path_limit_and_output() {
+        let cli = Cli::try_parse_from([
+            "scat",
+            "--db",
+            "catalog.sqlite",
+            "similar",
+            "/catalog/scripts/foo.py",
+            "--limit",
+            "5",
+            "--output",
+            "json",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Commands::Similar {
+                ref path,
+                limit: 5,
+                output: OutputFormat::Json,
+            } if path == "/catalog/scripts/foo.py"
+        ));
+    }
+
+    #[test]
+    fn clap_similar_defaults_limit_and_output() {
+        let cli = Cli::try_parse_from([
+            "scat",
+            "--db",
+            "catalog.sqlite",
+            "similar",
+            "/catalog/scripts/foo.py",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Commands::Similar {
+                limit: 10,
+                output: OutputFormat::Table,
+                ..
+            }
+        ));
     }
 
     #[test]

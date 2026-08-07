@@ -2,6 +2,7 @@ use super::deps::{cmd_deps, render_tree_lines};
 use super::index::should_skip_catalog_rebuild;
 use super::search::query_uses_fts;
 use super::show::{cmd_show, render_revision_lines, revisions_to_json};
+use super::similar::cmd_similar;
 use super::stats::render_revision_stats_lines;
 use crate::cli::OutputFormat;
 use scat_core::core::db::{JsonRow, SCHEMA_VERSION, create_db};
@@ -29,6 +30,30 @@ fn insert_script(api: &SearchApi, path: &str) {
             rusqlite::params![path],
         )
         .unwrap();
+}
+
+/// Write a minimal `embeddings.sqlite` sidecar, mirroring what `scat-embed` produces.
+fn write_embeddings_sidecar(path: &std::path::Path, rows: &[(i64, &str, &[f32])]) {
+    let conn = rusqlite::Connection::open(path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE script_embeddings (
+            script_id     INTEGER PRIMARY KEY,
+            logical_path  TEXT    NOT NULL,
+            model         TEXT    NOT NULL,
+            dim           INTEGER NOT NULL,
+            embedding     BLOB    NOT NULL
+        );",
+    )
+    .unwrap();
+    for (id, script_path, vector) in rows {
+        let bytes: Vec<u8> = vector.iter().flat_map(|f| f.to_le_bytes()).collect();
+        conn.execute(
+            "INSERT INTO script_embeddings (script_id, logical_path, model, dim, embedding)
+             VALUES (?1, ?2, 'test-model', ?3, ?4)",
+            rusqlite::params![id, script_path, vector.len() as i64, bytes],
+        )
+        .unwrap();
+    }
 }
 
 fn revision_row(os_flavor: &str, user: &str, timestamp: &str, age_seconds: Option<f64>) -> JsonRow {
@@ -133,6 +158,91 @@ fn cmd_show_accepts_folder_and_siblings_fields() {
             false,
         )
         .unwrap();
+    }
+}
+
+#[test]
+fn cmd_similar_missing_script_returns_plain_error() {
+    let (api, _file) = make_api();
+    let sidecar = tempfile::TempDir::new().unwrap();
+    let sidecar_path = sidecar.path().join("embeddings.sqlite");
+
+    let err = cmd_similar(
+        &api,
+        &sidecar_path,
+        "/catalog/scripts/missing.py",
+        10,
+        OutputFormat::Table,
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        "script '/catalog/scripts/missing.py' not found in catalog"
+    );
+}
+
+#[test]
+fn cmd_similar_missing_sidecar_reports_how_to_generate_one() {
+    let (api, _file) = make_api();
+    insert_script(&api, "/catalog/scripts/a.py");
+    let sidecar = tempfile::TempDir::new().unwrap();
+    let sidecar_path = sidecar.path().join("embeddings.sqlite");
+
+    let err = cmd_similar(
+        &api,
+        &sidecar_path,
+        "/catalog/scripts/a.py",
+        10,
+        OutputFormat::Table,
+    )
+    .unwrap_err();
+
+    assert!(err.to_string().contains("no embeddings sidecar found"));
+    assert!(err.to_string().contains("scat-embed"));
+}
+
+#[test]
+fn cmd_similar_unembedded_script_reports_drift() {
+    let (api, _file) = make_api();
+    insert_script(&api, "/catalog/scripts/a.py");
+    insert_script(&api, "/catalog/scripts/b.py");
+    let sidecar = tempfile::TempDir::new().unwrap();
+    let sidecar_path = sidecar.path().join("embeddings.sqlite");
+    // Only "b.py" is embedded; "a.py" was presumably added since.
+    write_embeddings_sidecar(&sidecar_path, &[(1, "/catalog/scripts/b.py", &[1.0, 0.0])]);
+
+    let err = cmd_similar(
+        &api,
+        &sidecar_path,
+        "/catalog/scripts/a.py",
+        10,
+        OutputFormat::Table,
+    )
+    .unwrap_err();
+
+    assert!(err.to_string().contains("no stored embedding"));
+}
+
+#[test]
+fn cmd_similar_ranks_by_embedding_similarity() {
+    let (api, _file) = make_api();
+    insert_script(&api, "/catalog/scripts/query.py");
+    insert_script(&api, "/catalog/scripts/close.py");
+    insert_script(&api, "/catalog/scripts/far.py");
+    let sidecar = tempfile::TempDir::new().unwrap();
+    let sidecar_path = sidecar.path().join("embeddings.sqlite");
+    write_embeddings_sidecar(
+        &sidecar_path,
+        &[
+            (1, "/catalog/scripts/query.py", &[1.0, 0.0]),
+            (2, "/catalog/scripts/close.py", &[0.9, 0.1]),
+            (3, "/catalog/scripts/far.py", &[0.0, 1.0]),
+        ],
+    );
+
+    for output in [OutputFormat::Table, OutputFormat::Json] {
+        cmd_similar(&api, &sidecar_path, "/catalog/scripts/query.py", 10, output).unwrap();
     }
 }
 

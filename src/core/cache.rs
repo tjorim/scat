@@ -74,6 +74,16 @@ impl Default for CacheOptions {
 /// itself. It never returns an error: a broken cache degrades to the
 /// uncached read path rather than failing the command the user asked for.
 ///
+/// Not specific to the catalog despite the name: any read-only SQLite file
+/// published to the same kind of shared drive can go through this — for
+/// example the `embeddings.sqlite` sidecar `crates/scat-embed` publishes
+/// beside the catalog, cached under its own entry (keyed by its own path,
+/// same as any other `source`). Only the catalog has an
+/// `index_metadata.build_timestamp` to short-circuit an identity change that
+/// still carries the same build; a file without one still caches correctly,
+/// it just always recopies on any identity change instead of sometimes
+/// re-stamping the existing copy in place.
+///
 /// Callers that *write* the catalog (the indexer) or that address files
 /// alongside it (`catalog diff`, which reads the rotated `.1`/`.2` copies)
 /// must keep using the published path instead.
@@ -199,7 +209,14 @@ impl CacheEntry {
     /// Copy `source` into the cache and record `stamp` as what it holds.
     fn populate(&self, source: &Path, stamp: &SourceStamp) -> Result<()> {
         let src = open_readonly(source)?;
-        let build_timestamp = build_timestamp(&src)?;
+        // Only the catalog carries `index_metadata`; other SQLite files this
+        // cache is used for (e.g. the scat-embed embeddings sidecar, which
+        // has no such table) have no build marker to read, so the shortcut
+        // below is simply unavailable for them rather than a hard error —
+        // `cached_build_timestamp` reads `None` the same way for the same
+        // reason, so it never falsely matches this empty placeholder and a
+        // real recopy still happens whenever the file's identity changes.
+        let build_timestamp = build_timestamp(&src).unwrap_or_default();
 
         // The published file changed identity (a rebuild, a rotation, a
         // restore from backup) but still carries the build we already hold.
@@ -663,6 +680,60 @@ mod tests {
         let _ = catalog_read_path(&source, &options(&root));
 
         assert!(!orphan.exists());
+    }
+
+    /// Write a plain SQLite file with no `index_metadata` table, mimicking
+    /// the scat-embed embeddings sidecar rather than the catalog.
+    fn publish_non_catalog_sqlite(path: &Path, marker: &str) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch("CREATE TABLE t (v TEXT NOT NULL);")
+            .unwrap();
+        conn.execute("INSERT INTO t (v) VALUES (?1)", [marker])
+            .unwrap();
+    }
+
+    #[test]
+    fn caches_a_sqlite_file_with_no_index_metadata_table() {
+        let dir = TempDir::new().unwrap();
+        let root = TempDir::new().unwrap();
+        let source = dir.path().join("embeddings.sqlite");
+        publish_non_catalog_sqlite(&source, "v1");
+
+        let cached = catalog_read_path(&source, &options(&root));
+        assert_ne!(cached, source);
+        assert!(cached.is_file());
+
+        let conn = open_readonly(&cached).unwrap();
+        let value: String = conn
+            .query_row("SELECT v FROM t", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(value, "v1");
+    }
+
+    #[test]
+    fn recopies_a_non_catalog_sqlite_file_when_it_changes() {
+        let dir = TempDir::new().unwrap();
+        let root = TempDir::new().unwrap();
+        let source = dir.path().join("embeddings.sqlite");
+        publish_non_catalog_sqlite(&source, "v1");
+
+        let cached = catalog_read_path(&source, &options(&root));
+        let before = ino_of(&cached);
+
+        // Republish, as scat-embed's atomic rename-based publish does.
+        let rebuilt = dir.path().join("rebuilt.sqlite");
+        publish_non_catalog_sqlite(&rebuilt, "v2");
+        fs::rename(&rebuilt, &source).unwrap();
+
+        let refreshed = catalog_read_path(&source, &options(&root));
+        assert_eq!(refreshed, cached);
+        assert_ne!(ino_of(&refreshed), before);
+
+        let conn = open_readonly(&refreshed).unwrap();
+        let value: String = conn
+            .query_row("SELECT v FROM t", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(value, "v2");
     }
 
     #[test]

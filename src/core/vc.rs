@@ -73,6 +73,10 @@ impl Default for VcConfigSection {
 struct VcConfigFile {
     db_path: Option<String>,
     cache_dir: Option<String>,
+    /// Path to the `embeddings.sqlite` sidecar published by `scat-embed`
+    /// (crates/scat-embed). Defaults to `embeddings.sqlite` next to `db_path`
+    /// when unset.
+    embeddings_path: Option<String>,
     scan_roots: Option<Vec<String>>,
     ignore_patterns: Option<Vec<String>>,
     vc: Option<VcConfigSection>,
@@ -96,6 +100,10 @@ pub struct VcConfig {
     /// Directory holding the host-local catalog cache. Falls back to
     /// [`crate::core::cache::DEFAULT_CACHE_ROOT`] when unset.
     pub cache_dir: Option<PathBuf>,
+    /// Path to the `embeddings.sqlite` sidecar published by `scat-embed`.
+    /// Falls back to [`crate::core::embeddings::sidecar_path`] (next to
+    /// `db_path`) when unset.
+    pub embeddings_path: Option<PathBuf>,
     /// Root directories to scan recursively when building the catalog.
     pub scan_roots: Vec<PathBuf>,
     /// Gitignore-style patterns applied during catalog scanning.
@@ -115,6 +123,7 @@ impl Default for VcConfig {
         Self {
             db_path: None,
             cache_dir: None,
+            embeddings_path: None,
             scan_roots: Vec::new(),
             ignore_patterns: Vec::new(),
             vc_executable: None,
@@ -258,6 +267,7 @@ pub fn load_vc_config(config_file: Option<&Path>) -> Result<VcConfig> {
 
     let db_path = file_data.db_path.map(PathBuf::from);
     let cache_dir = file_data.cache_dir.map(PathBuf::from);
+    let embeddings_path = file_data.embeddings_path.map(PathBuf::from);
     let scan_roots = match std::env::var("SCAT_SCAN_ROOTS").ok() {
         Some(s) => s
             .split(',')
@@ -277,6 +287,7 @@ pub fn load_vc_config(config_file: Option<&Path>) -> Result<VcConfig> {
     Ok(VcConfig {
         db_path,
         cache_dir,
+        embeddings_path,
         scan_roots,
         ignore_patterns,
         vc_executable: vc.executable.map(PathBuf::from),

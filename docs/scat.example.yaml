@@ -21,6 +21,12 @@ db_path: /catalog/scat/scripts.sqlite
 # Pass --no-cache (or SCAT_NO_CACHE=1) to read the shared drive directly.
 # cache_dir: /dev/shm
 
+# Path to the embeddings.sqlite sidecar published by scat-embed
+# (crates/scat-embed), used by `scat similar`. Cached to the local drive the
+# same way db_path is. Defaults to embeddings.sqlite next to db_path;
+# overridden by --embeddings / SCAT_EMBEDDINGS.
+# embeddings_path: /catalog/scat/embeddings.sqlite
+
 # Root directories scanned recursively by `scat catalog build` when
 # --scan-root is not passed on the command line. Each root's *parent*
 # directory name becomes the vc "os_flavor" for any DEVELOP/ARCHIVE
