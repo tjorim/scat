@@ -11,6 +11,9 @@ impl TuiApp {
         if self.mode == ViewMode::DetailDiff {
             return self.handle_detail_diff_key(key);
         }
+        if self.mode == ViewMode::Stats {
+            return self.handle_stats_key(key);
+        }
 
         match key {
             KeyEvent {
@@ -223,6 +226,14 @@ impl TuiApp {
                 self.queue_live_source_view();
             }
             KeyEvent {
+                code: KeyCode::Char('s'),
+                modifiers: KeyModifiers::NONE,
+                ..
+            } if self.focus != Focus::Search => {
+                self.dispatch_stats()?;
+                self.mode = ViewMode::Stats;
+            }
+            KeyEvent {
                 code: KeyCode::Char(ch),
                 modifiers,
                 ..
@@ -402,6 +413,41 @@ impl TuiApp {
             _ => {
                 apply_scroll_key(&mut self.detail_diff_scroll, key);
             }
+        }
+        Ok(false)
+    }
+
+    /// Key handling for the full-screen catalog stats view
+    /// (`ViewMode::Stats`, opened with `s`). No scroll state: the bar charts
+    /// are capped to a fixed top-N per chart (see
+    /// `render::stats_view::MAX_BARS`) so the view always fits one screen.
+    ///
+    /// Matches the `Result<bool>` signature of its sibling `handle_*_key`
+    /// handlers so `handle_key` can dispatch to any of them uniformly, even
+    /// though this one never actually errors.
+    #[allow(clippy::unnecessary_wraps)]
+    pub(super) fn handle_stats_key(&mut self, key: KeyEvent) -> Result<bool> {
+        match key {
+            KeyEvent {
+                code: KeyCode::Char('q'),
+                modifiers: KeyModifiers::NONE,
+                ..
+            } => return Ok(true),
+            KeyEvent {
+                code: KeyCode::Char('c'),
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            } => return Ok(true),
+            KeyEvent {
+                code: KeyCode::Esc, ..
+            }
+            | KeyEvent {
+                code: KeyCode::Backspace,
+                ..
+            } => {
+                self.mode = ViewMode::Browse;
+            }
+            _ => {}
         }
         Ok(false)
     }

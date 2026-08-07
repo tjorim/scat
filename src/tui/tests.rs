@@ -3,9 +3,9 @@ use std::io::Write;
 use super::detail::native_path_for_row;
 use super::{
     ClickRegion, DependencyItem, DetailPayload, DetailResponse, DetailWorker, DiffWorker, Focus,
-    FolderListing, FolderResponse, FolderWorker, FunctionItem, RegionKind, SearchWorker, TuiApp,
-    ViewMode, hit_test, move_selection, next_focus, previous_focus, scroll_by, search_title,
-    viewer,
+    FolderListing, FolderResponse, FolderWorker, FunctionItem, RegionKind, SearchWorker,
+    StatsWorker, TuiApp, ViewMode, hit_test, move_selection, next_focus, previous_focus, scroll_by,
+    search_title, viewer,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
@@ -254,11 +254,13 @@ fn make_app(db_path: &std::path::Path) -> TuiApp {
     let detail_worker = DetailWorker::new(db_path).unwrap();
     let diff_worker = DiffWorker::new(db_path).unwrap();
     let folder_worker = FolderWorker::new(db_path).unwrap();
+    let stats_worker = StatsWorker::new(db_path).unwrap();
     TuiApp::new(
         search_worker,
         detail_worker,
         diff_worker,
         folder_worker,
+        stats_worker,
         PathResolver::new(),
     )
     .unwrap()
@@ -1092,6 +1094,92 @@ fn f_key_does_not_toggle_fullscreen_in_search() {
     // f in search pane types into the query, not toggling fullscreen
     assert!(!app.fullscreen);
     assert_eq!(app.query, "f");
+}
+
+#[test]
+fn s_key_opens_stats_view_and_dispatches_a_fetch() {
+    let db = super::make_test_db();
+    let mut app = make_app(db.path());
+    app.focus = Focus::Results;
+
+    assert_eq!(app.mode, ViewMode::Browse);
+    app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.mode, ViewMode::Stats);
+    assert!(app.stats_loading);
+    assert!(app.inflight_stats_id.is_some());
+}
+
+#[test]
+fn s_key_does_not_open_stats_view_in_search() {
+    let db = super::make_test_db();
+    let mut app = make_app(db.path());
+    app.focus = Focus::Search;
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
+        .unwrap();
+    // s in search pane types into the query, not opening the stats view
+    assert_eq!(app.mode, ViewMode::Browse);
+    assert_eq!(app.query, "s");
+}
+
+#[test]
+fn stats_view_esc_and_backspace_return_to_browse() {
+    let db = super::make_test_db();
+    let mut app = make_app(db.path());
+    app.focus = Focus::Results;
+    app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.mode, ViewMode::Stats);
+
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.mode, ViewMode::Browse);
+
+    app.mode = ViewMode::Stats;
+    app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.mode, ViewMode::Browse);
+}
+
+#[test]
+fn stats_view_q_and_ctrl_c_quit() {
+    let db = super::make_test_db();
+    let mut app = make_app(db.path());
+    app.mode = ViewMode::Stats;
+
+    let should_quit = app
+        .handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE))
+        .unwrap();
+    assert!(should_quit);
+
+    let should_quit = app
+        .handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert!(should_quit);
+}
+
+#[test]
+fn dispatch_stats_and_drain_round_trips_a_real_query() {
+    let db = super::make_test_db();
+    let mut app = make_app(db.path());
+
+    app.dispatch_stats().unwrap();
+    assert!(app.stats_loading);
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while app.stats_loading {
+        app.drain_stats_channel();
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for stats worker"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+
+    let stats = app.stats.expect("stats should be populated");
+    assert_eq!(stats.total_scripts, 1);
+    assert!(app.stats_error.is_none());
 }
 
 #[test]

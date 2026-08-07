@@ -53,6 +53,9 @@ pub(super) fn draw_footer(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
         hint_key("V"),
         Span::raw(" view source"),
         sep.clone(),
+        hint_key("s"),
+        Span::raw(" stats"),
+        sep.clone(),
     ];
     if app.fullscreen {
         spans.push(hint_key("f/Esc"));
