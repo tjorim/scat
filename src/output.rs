@@ -221,7 +221,7 @@ fn render_table_with_width(
     truncate_left: &[bool],
 ) -> String {
     let mut table = Table::new();
-    table.load_preset(UTF8_FULL_CONDENSED);
+    table.load_style(UTF8_FULL_CONDENSED);
     table.set_content_arrangement(ContentArrangement::Dynamic);
 
     let widths = fit_column_widths(headers, rows, width);

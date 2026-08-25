@@ -45,7 +45,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 indicatif = "0.18"
 ctrlc = { version = "3.5", features = ["termination"] }
-comfy-table = "7"
+comfy-table = "8"
 unicode-width = "0.2"
 ignore = "0.4.26"
 rayon = "1"
