@@ -6,7 +6,7 @@ publish = false
 
 [dependencies]
 rusqlite = { version = "0.40", features = ["bundled-full"] }
-fastembed = "5"
+fastembed = "6"
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 
