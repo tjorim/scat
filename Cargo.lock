@@ -3544,7 +3544,10 @@ dependencies = [
  "tracing-subscriber",
  "tree-sitter",
  "tree-sitter-bash",
+ "tree-sitter-highlight",
+ "tree-sitter-json",
  "tree-sitter-python",
+ "tree-sitter-yaml",
  "unicode-width",
  "walkdir",
  "yaml_serde",
@@ -4363,6 +4366,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "tree-sitter-highlight"
+version = "0.27.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fa86266a9dc1aae627034551d45e84427a45c70914a8629608ed1bd093214c28"
+dependencies = [
+ "regex",
+ "streaming-iterator",
+ "thiserror 2.0.20",
+ "tree-sitter",
+]
+
+[[package]]
+name = "tree-sitter-json"
+version = "0.24.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4d727acca406c0020cffc6cf35516764f36c8e3dc4408e5ebe2cb35a947ec471"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "tree-sitter-language"
 version = "0.1.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4373,6 +4398,16 @@ name = "tree-sitter-python"
 version = "0.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6bf85fd39652e740bf60f46f4cda9492c3a9ad75880575bf14960f775cb74a1c"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-yaml"
+version = "0.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "53c223db85f05e34794f065454843b0668ebc15d240ada63e2b5939f43ce7c97"
 dependencies = [
  "cc",
  "tree-sitter-language",

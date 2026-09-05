@@ -4,10 +4,13 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
 
 use anyhow::{Context, Result, anyhow};
+use ratatui::text::Line;
 
 use scat_core::core::db::JsonRow;
 use scat_core::core::script_view::{ScriptView, logical_parent_dir};
 use scat_core::core::search::{SearchApi, open_search_api};
+
+use super::highlight;
 
 #[derive(Debug, Clone)]
 pub struct DetailRequest {
@@ -49,6 +52,10 @@ pub struct DetailPayload {
     /// Immediate subdirectory names of the script's parent folder.
     pub sibling_dirs: Vec<String>,
     pub cached_preview: String,
+    /// Syntax-highlighted (or, for an unrecognized language, plain) lines
+    /// for `cached_preview`, computed once here rather than per pane/frame;
+    /// see `TuiApp::cached_preview_lines`.
+    pub cached_preview_lines: Vec<Line<'static>>,
     /// Total number of lines in the indexed content, shown in the preview
     /// pane's title alongside the current scroll position.
     pub preview_total_lines: usize,
@@ -131,6 +138,7 @@ fn worker_loop(
                 siblings: vec![],
                 sibling_dirs: vec![],
                 cached_preview: String::new(),
+                cached_preview_lines: Vec::new(),
                 preview_total_lines: 0,
                 error: Some(err.clone()),
             },
@@ -163,6 +171,7 @@ fn load_detail(api: &SearchApi, path: &str) -> DetailPayload {
         siblings: vec![],
         sibling_dirs: vec![],
         cached_preview: String::new(),
+        cached_preview_lines: Vec::new(),
         preview_total_lines: 0,
         error: None,
     };
@@ -327,6 +336,28 @@ fn load_detail(api: &SearchApi, path: &str) -> DetailPayload {
         // artifact in some terminals.
         content.lines().collect::<Vec<_>>().join("\n")
     };
+    result.cached_preview_lines = if content.is_empty() {
+        // "No content indexed." is a UI placeholder, not script source —
+        // never run it through the language-specific highlighter.
+        vec![Line::from(result.cached_preview.clone())]
+    } else {
+        let language = result
+            .detail
+            .as_ref()
+            .map_or("", |row| ScriptView::new(row).language());
+        let lines = highlight::highlight_lines(&result.cached_preview, language);
+        if lines.is_empty() {
+            // `cached_preview` can itself normalize to "" for newline-only
+            // content (e.g. content that's just "\n" or "\r\n"), even
+            // though `content` was non-empty and `preview_total_lines`
+            // above counts it as one line — `highlight_lines` treats an
+            // empty source as "nothing to show". Preserve that one blank
+            // line instead of silently dropping it.
+            vec![Line::from("")]
+        } else {
+            lines
+        }
+    };
 
     result
 }
@@ -388,6 +419,33 @@ mod tests {
         let response = recv_response(&worker);
         assert_eq!(response.id, 6);
         assert_eq!(response.payload.contributors, vec!["alice", "bob"]);
+    }
+
+    #[test]
+    fn newline_only_content_preserves_one_blank_preview_line() {
+        // Regression: `cached_preview` normalizes newline-only content
+        // (e.g. a lone "\n") down to "", but `preview_total_lines` still
+        // counts it as one line. `cached_preview_lines` must agree — one
+        // blank `Line`, not zero (see the comment in `load_detail`).
+        let db = super::super::make_test_db();
+        let conn = rusqlite::Connection::open(db.path()).unwrap();
+        conn.execute(
+            "UPDATE scripts SET content = ?1 WHERE logical_path = '/catalog/scripts/a.py'",
+            ["\n"],
+        )
+        .unwrap();
+        drop(conn);
+
+        let worker = DetailWorker::new(db.path()).unwrap();
+        worker
+            .send(DetailRequest {
+                id: 7,
+                path: "/catalog/scripts/a.py".to_string(),
+            })
+            .unwrap();
+        let response = recv_response(&worker);
+        assert_eq!(response.payload.preview_total_lines, 1);
+        assert_eq!(response.payload.cached_preview_lines.len(), 1);
     }
 
     #[test]

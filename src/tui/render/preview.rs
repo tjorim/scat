@@ -1,14 +1,13 @@
 //! The catalog-preview pane: the full indexed content, scrollable.
 
-use std::borrow::Cow;
-
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::text::Text;
+use ratatui::style::{Color, Style};
+use ratatui::text::{Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use super::super::{Focus, TuiApp};
-use super::common::{clamp_scroll_offset, focus_border, line_count, spinner_char};
+use super::common::{clamp_scroll_offset, focus_border, spinner_char};
 
 /// Title for the catalog preview pane: current scroll position and the
 /// script's total line count, when known.
@@ -28,33 +27,24 @@ pub(super) fn draw_preview(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) 
     } else {
         clamp_scroll_offset(
             &mut app.preview_scroll,
-            line_count(app.cached_preview.as_str()),
+            app.cached_preview_lines.len().max(1),
             area,
         );
     }
-    let (content, title) = if app.detail_loading {
-        (
-            Cow::Owned(format!("{spinner} Loading…")),
-            "Preview (loading…)".to_string(),
-        )
-    } else if app.cached_preview.is_empty() && app.detail.is_some() {
-        (
-            Cow::Borrowed(""),
-            preview_title(app.preview_scroll, app.preview_total_lines),
-        )
+    let title = if app.detail_loading {
+        "Preview (loading…)".to_string()
     } else {
-        (
-            Cow::Borrowed(app.cached_preview.as_str()),
-            preview_title(app.preview_scroll, app.preview_total_lines),
-        )
+        preview_title(app.preview_scroll, app.preview_total_lines)
     };
-    let text: Text = if !app.detail_loading && content.is_empty() {
-        Text::from(ratatui::text::Span::styled(
+    let text: Text = if app.detail_loading {
+        Text::from(format!("{spinner} Loading…"))
+    } else if app.cached_preview_lines.is_empty() && app.detail.is_some() {
+        Text::from(Span::styled(
             "(empty)",
-            ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray),
+            Style::default().fg(Color::DarkGray),
         ))
     } else {
-        Text::from(content)
+        Text::from(app.cached_preview_lines.clone())
     };
     frame.render_widget(
         Paragraph::new(text)

@@ -107,13 +107,13 @@ pub(super) fn detail_lines(app: &TuiApp) -> Vec<Line<'static>> {
         }
     }
 
-    let content = view.content();
-    if !content.is_empty() {
+    if !view.content().is_empty() {
         lines.push(Line::from(""));
         lines.push(section("Preview"));
-        for line in content.lines() {
-            lines.push(Line::from(line.to_string()));
-        }
+        // Reuse the syntax-highlighted lines computed once by
+        // `detail_worker::load_detail`, rather than re-splitting (and
+        // re-highlighting) the raw content on every render.
+        lines.extend(app.cached_preview_lines.iter().cloned());
     }
 
     lines
