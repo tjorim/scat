@@ -281,6 +281,7 @@ pub fn normalise_lang(language: &str) -> &'static str {
     match language.to_lowercase().as_str() {
         "shell" => "bash",
         "python" => "python",
+        "json" => "json",
         _ => "unknown",
     }
 }
@@ -388,6 +389,7 @@ mod tests {
     fn normalise_lang_is_case_insensitive_with_unknown_fallback() {
         assert_eq!(normalise_lang("Shell"), "bash");
         assert_eq!(normalise_lang("PYTHON"), "python");
+        assert_eq!(normalise_lang("JSON"), "json");
         assert_eq!(normalise_lang("perl"), "unknown");
         assert_eq!(normalise_lang(""), "unknown");
     }

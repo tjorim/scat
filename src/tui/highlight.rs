@@ -1,8 +1,9 @@
 //! Syntax highlighting for script content shown in the catalog preview pane
 //! (`src/tui/render/preview.rs`) and the full-screen detail view
-//! (`src/tui/detail.rs`), via `tree-sitter-highlight` and the same Python and
-//! Bash grammars used for dependency extraction
-//! (`src/indexer/treesitter_deps.rs`).
+//! (`src/tui/detail.rs`), via `tree-sitter-highlight`. Python and Bash reuse
+//! the grammars already loaded for dependency extraction
+//! (`src/indexer/treesitter_deps.rs`); JSON is highlighted only (the indexer
+//! never tree-sits it).
 
 use std::sync::LazyLock;
 
@@ -78,14 +79,27 @@ static BASH_CONFIG: LazyLock<HighlightConfiguration> = LazyLock::new(|| {
     )
 });
 
+// `tree-sitter-json`'s bundled query captures object keys as
+// `@string.special.key` before the generic `@string`; since a key node is
+// always also a `(string)` node, and `tree-sitter-highlight` resolves two
+// captures on the same node by keeping the *last*-declared pattern, keys
+// render with the plain `string` style here, same as any other string.
+static JSON_CONFIG: LazyLock<HighlightConfiguration> = LazyLock::new(|| {
+    build_config(
+        tree_sitter_json::LANGUAGE.into(),
+        "json",
+        tree_sitter_json::HIGHLIGHTS_QUERY,
+    )
+});
+
 /// Highlight `source` for `language` (the `scripts.language` column's
-/// values, e.g. `"python"`/`"shell"`), returning one [`Line`] per line of
-/// `source` — matching `source.lines()` exactly, since callers (scroll
-/// math in `render::preview`, click hit-testing in `detail::detail_click_at`)
-/// count on one `Line` per source line.
+/// values, e.g. `"python"`/`"shell"`/`"json"`), returning one [`Line`] per
+/// line of `source` — matching `source.lines()` exactly, since callers
+/// (scroll math in `render::preview`, click hit-testing in
+/// `detail::detail_click_at`) count on one `Line` per source line.
 ///
-/// Falls back to plain, unstyled lines for a language other than Python or
-/// Bash, or when parsing doesn't finish within the same deadline
+/// Falls back to plain, unstyled lines for a language other than Python,
+/// Bash, or JSON, or when parsing doesn't finish within the same deadline
 /// [`parse_with_timeout`] enforces for dependency extraction.
 pub(super) fn highlight_lines(source: &str, language: &str) -> Vec<Line<'static>> {
     if source.is_empty() {
@@ -94,6 +108,7 @@ pub(super) fn highlight_lines(source: &str, language: &str) -> Vec<Line<'static>
     let config = match normalise_lang(language) {
         "python" => Some(&*PYTHON_CONFIG),
         "bash" => Some(&*BASH_CONFIG),
+        "json" => Some(&*JSON_CONFIG),
         _ => None,
     };
     config
@@ -240,6 +255,39 @@ mod tests {
     }
 
     #[test]
+    fn json_string_and_number_are_styled() {
+        let lines = highlight_lines("{\n  \"name\": \"hi\",\n  \"n\": 1\n}", "json");
+        assert_eq!(lines.len(), 4);
+        // Keys render with the same `string` style as values — see the
+        // `JSON_CONFIG` doc comment for why the bundled query's own
+        // `@string.special.key` capture never wins for a key node.
+        assert!(
+            lines[1]
+                .spans
+                .iter()
+                .any(|s| s.content.contains("name") && s.style == style_for("string")),
+            "expected a styled key span: {:?}",
+            lines[1].spans
+        );
+        assert!(
+            lines[1]
+                .spans
+                .iter()
+                .any(|s| s.content.contains("hi") && s.style == style_for("string")),
+            "expected a styled string value span: {:?}",
+            lines[1].spans
+        );
+        assert!(
+            lines[2]
+                .spans
+                .iter()
+                .any(|s| s.content.as_ref() == "1" && s.style == style_for("number")),
+            "expected a styled number span: {:?}",
+            lines[2].spans
+        );
+    }
+
+    #[test]
     fn line_count_matches_source_lines_exactly() {
         let source = "def f():\n    return 1\n\nf()";
         let lines = highlight_lines(source, "python");
@@ -255,6 +303,7 @@ mod tests {
         // not crash the highlighter or our event handling.
         assert!(!highlight_lines("def f(:\n    x = \"unterminated\n", "python").is_empty());
         assert!(!highlight_lines("if [ -z \"\n", "shell").is_empty());
+        assert!(!highlight_lines("{\"a\": [1, 2,\n", "json").is_empty());
         assert!(!highlight_lines("\u{0}\u{1}\u{2} not really code", "python").is_empty());
     }
 }
