@@ -56,6 +56,7 @@ impl TuiApp {
             detail_diff_scroll: 0,
             results_state: ListState::default(),
             cached_preview: String::new(),
+            cached_preview_lines: Vec::new(),
             preview_total_lines: 0,
             detail_loading: false,
             inflight_detail_id: None,
@@ -248,6 +249,7 @@ impl TuiApp {
             self.siblings_selected = 0;
             self.inflight_folder_id = None;
             self.cached_preview.clear();
+            self.cached_preview_lines.clear();
             self.preview_total_lines = 0;
             return Ok(());
         };
@@ -312,6 +314,7 @@ impl TuiApp {
             siblings,
             sibling_dirs,
             cached_preview,
+            cached_preview_lines,
             preview_total_lines,
             error,
         } = payload;
@@ -327,6 +330,7 @@ impl TuiApp {
         self.siblings = siblings;
         self.sibling_dirs = sibling_dirs;
         self.cached_preview = cached_preview;
+        self.cached_preview_lines = cached_preview_lines;
         self.preview_total_lines = preview_total_lines;
         if error.is_some() {
             self.error = error;

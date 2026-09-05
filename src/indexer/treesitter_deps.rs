@@ -21,9 +21,11 @@ const PARSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Parse `source` with a wall-clock deadline, returning `None` if parsing
 /// doesn't finish in time (in addition to the normal `None`-on-no-language
-/// case). Shared by both the bash extraction below and the Python AST
-/// extractor in [`crate::indexer::ast_deps`].
-pub(crate) fn parse_with_timeout(
+/// case). Shared by both the bash extraction below, the Python AST
+/// extractor in [`crate::indexer::ast_deps`], and the TUI's syntax
+/// highlighter (`src/tui/highlight.rs`, in the separate `scat` binary
+/// crate — hence `pub` rather than `pub(crate)`).
+pub fn parse_with_timeout(
     parser: &mut tree_sitter::Parser,
     source: &[u8],
 ) -> Option<tree_sitter::Tree> {
@@ -271,7 +273,11 @@ pub fn extract_deps_fallback(source: &str, language: &str) -> Vec<String> {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn normalise_lang(language: &str) -> &'static str {
+/// Map a `scripts.language` column value to the tree-sitter grammar key
+/// that identifies it here and in the TUI's syntax highlighter
+/// (`src/tui/highlight.rs`, in the separate `scat` binary crate — hence
+/// `pub` rather than `pub(crate)`).
+pub fn normalise_lang(language: &str) -> &'static str {
     match language.to_lowercase().as_str() {
         "shell" => "bash",
         "python" => "python",

@@ -13,6 +13,7 @@ use crossterm::terminal::{
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
+use ratatui::text::Line;
 use ratatui::widgets::ListState;
 use ratatui::{Frame, Terminal};
 use serde_json::Value;
@@ -33,6 +34,7 @@ mod folder;
 mod folder_worker;
 mod handlers;
 mod helpers;
+mod highlight;
 mod mouse;
 mod render;
 mod search_worker;
@@ -192,6 +194,12 @@ struct TuiApp {
     detail_diff_scroll: u16,
     results_state: ListState,
     cached_preview: String,
+    /// Syntax-highlighted (Python/Bash) or plain (any other language)
+    /// rendering of `cached_preview`, computed once per detail load by
+    /// `detail_worker::load_detail` and reused as-is by both the catalog
+    /// preview pane (`render::preview`) and the detail view's content tail
+    /// (`detail::detail_lines`), rather than re-parsing per pane/frame.
+    cached_preview_lines: Vec<Line<'static>>,
     preview_total_lines: usize,
     detail_loading: bool,
     inflight_detail_id: Option<u64>,

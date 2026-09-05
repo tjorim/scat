@@ -4,10 +4,13 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
 
 use anyhow::{Context, Result, anyhow};
+use ratatui::text::Line;
 
 use scat_core::core::db::JsonRow;
 use scat_core::core::script_view::{ScriptView, logical_parent_dir};
 use scat_core::core::search::{SearchApi, open_search_api};
+
+use super::highlight;
 
 #[derive(Debug, Clone)]
 pub struct DetailRequest {
@@ -49,6 +52,10 @@ pub struct DetailPayload {
     /// Immediate subdirectory names of the script's parent folder.
     pub sibling_dirs: Vec<String>,
     pub cached_preview: String,
+    /// Syntax-highlighted (or, for an unrecognized language, plain) lines
+    /// for `cached_preview`, computed once here rather than per pane/frame;
+    /// see `TuiApp::cached_preview_lines`.
+    pub cached_preview_lines: Vec<Line<'static>>,
     /// Total number of lines in the indexed content, shown in the preview
     /// pane's title alongside the current scroll position.
     pub preview_total_lines: usize,
@@ -131,6 +138,7 @@ fn worker_loop(
                 siblings: vec![],
                 sibling_dirs: vec![],
                 cached_preview: String::new(),
+                cached_preview_lines: Vec::new(),
                 preview_total_lines: 0,
                 error: Some(err.clone()),
             },
@@ -163,6 +171,7 @@ fn load_detail(api: &SearchApi, path: &str) -> DetailPayload {
         siblings: vec![],
         sibling_dirs: vec![],
         cached_preview: String::new(),
+        cached_preview_lines: Vec::new(),
         preview_total_lines: 0,
         error: None,
     };
@@ -326,6 +335,17 @@ fn load_detail(api: &SearchApi, path: &str) -> DetailPayload {
         // rendering — a stray `\r` can otherwise show up as a rendering
         // artifact in some terminals.
         content.lines().collect::<Vec<_>>().join("\n")
+    };
+    result.cached_preview_lines = if content.is_empty() {
+        // "No content indexed." is a UI placeholder, not script source —
+        // never run it through the language-specific highlighter.
+        vec![Line::from(result.cached_preview.clone())]
+    } else {
+        let language = result
+            .detail
+            .as_ref()
+            .map_or("", |row| ScriptView::new(row).language());
+        highlight::highlight_lines(&result.cached_preview, language)
     };
 
     result
