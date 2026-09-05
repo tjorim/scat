@@ -217,39 +217,60 @@ fn extract_bash_commands(
 // YAML (Ansible) tree walker
 // ---------------------------------------------------------------------------
 
+/// How a recognized Ansible reference key's value should be read.
+struct AnsibleKeyRule {
+    /// `roles`/`include_role` entries are frequently a bare Galaxy role name
+    /// rather than a path (e.g. `roles: [common]`), so only path-shaped
+    /// entries (containing `/`) are kept for those — matching the issue's
+    /// "path-style entries, not Galaxy role names". The other keys always
+    /// point at a file, so any scalar value is a candidate.
+    path_only: bool,
+    /// When a value (or list item) is a mapping — `include_tasks: {file:
+    /// ..., apply: {...}}`, `roles: [{role: ..., vars: {...}}]` — only this
+    /// one field actually carries a file/role reference; an unrelated
+    /// sibling option must not become a candidate even if its value happens
+    /// to look like a path.
+    reference_field: Option<&'static str>,
+}
+
 /// If `raw_key` (stripped of any FQCN module prefix, e.g. `ansible.builtin.`)
-/// is a recognized Ansible file-reference key, returns whether only
-/// path-shaped values (containing `/`) should be kept for it.
-///
-/// `import_playbook`/`include_tasks`/`import_tasks`/`vars_files`/
-/// `include_vars` always point at a file, so any scalar value under them is
-/// a candidate. `roles`/`include_role` entries are frequently a bare Galaxy
-/// role name rather than a path (e.g. `roles: [common]`), so only
-/// path-shaped entries are kept for those — matching the issue's "path-style
-/// entries, not Galaxy role names".
-fn ansible_key_path_only(raw_key: &str) -> Option<bool> {
+/// is a recognized Ansible file-reference key, returns how to read its value.
+fn ansible_key_rule(raw_key: &str) -> Option<AnsibleKeyRule> {
     let bare = raw_key.rsplit('.').next().unwrap_or(raw_key);
     match bare {
-        "import_playbook" | "include_tasks" | "import_tasks" | "vars_files" | "include_vars" => {
-            Some(false)
-        }
-        "include_role" | "roles" => Some(true),
+        "import_playbook" | "vars_files" => Some(AnsibleKeyRule {
+            path_only: false,
+            reference_field: None,
+        }),
+        "include_tasks" | "import_tasks" | "include_vars" => Some(AnsibleKeyRule {
+            path_only: false,
+            reference_field: Some("file"),
+        }),
+        "include_role" => Some(AnsibleKeyRule {
+            path_only: true,
+            reference_field: Some("name"),
+        }),
+        "roles" => Some(AnsibleKeyRule {
+            path_only: true,
+            reference_field: Some("role"),
+        }),
         _ => None,
     }
 }
 
 /// Descend through wrapper nodes (`flow_node`/`block_node`) to the first
 /// scalar leaf's text — used for reading a mapping key, which is always a
-/// single scalar.
+/// single scalar. Iterative (heap-allocated stack, not native recursion) so
+/// a pathologically deep value can't overflow the stack — see
+/// `collect_ansible_pairs`.
 fn first_scalar_text(node: Node<'_>, source: &[u8]) -> Option<String> {
-    if let Some(text) = leaf_scalar_text(node, source) {
-        return Some(text);
-    }
-    let mut cursor = node.walk();
-    for child in node.named_children(&mut cursor) {
-        if let Some(text) = first_scalar_text(child, source) {
+    let mut stack = vec![node];
+    while let Some(node) = stack.pop() {
+        if let Some(text) = leaf_scalar_text(node, source) {
             return Some(text);
         }
+        let mut cursor = node.walk();
+        stack.extend(node.named_children(&mut cursor));
     }
     None
 }
@@ -267,55 +288,95 @@ fn leaf_scalar_text(node: Node<'_>, source: &[u8]) -> Option<String> {
     }
 }
 
-/// Collect every scalar leaf reachable under `node` (a mapping pair's
-/// value), covering a bare scalar, a list of scalars, and mapping forms like
-/// `include_role: {name: ..., tasks_from: ...}` alike — deliberately liberal,
-/// the same way `extract_reference_paths` is: unrelated scalars picked up
-/// this way (e.g. a `tags:` value) simply won't resolve to an indexed script
-/// and are dropped later, while `path_only` keeps unresolvable Galaxy role
-/// names out of the candidate set up front.
+/// Collect dependency-edge candidates from a recognized key's value —
+/// a bare scalar, a list of scalars/mappings, or a mapping directly —
+/// applying `rule` at every level (a mapping only ever contributes its
+/// `reference_field`, never an unrelated sibling). Iterative (heap-allocated
+/// stack, not native recursion): a pathologically deep or wide YAML value
+/// (e.g. deeply nested flow sequences) can't overflow the native stack, the
+/// same concern `extract_bash_commands` above already guards against.
 fn collect_scalar_candidates(
-    node: Node<'_>,
+    root: Node<'_>,
     source: &[u8],
-    path_only: bool,
+    rule: &AnsibleKeyRule,
     out: &mut Vec<String>,
     seen: &mut HashSet<String>,
 ) {
-    if let Some(text) = leaf_scalar_text(node, source) {
-        if !text.is_empty() && (!path_only || text.contains('/')) && seen.insert(text.clone()) {
-            out.push(text);
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        match node.kind() {
+            "plain_scalar" | "block_scalar" | "single_quote_scalar" | "double_quote_scalar" => {
+                if let Some(text) = leaf_scalar_text(node, source)
+                    && !text.is_empty()
+                    && (!rule.path_only || text.contains('/'))
+                    && seen.insert(text.clone())
+                {
+                    out.push(text);
+                }
+            }
+            // Wrapper nodes and sequences just pass their children through —
+            // a list item's own wrapper (block_sequence_item) is unwrapped
+            // the same way.
+            "flow_node"
+            | "block_node"
+            | "block_sequence"
+            | "block_sequence_item"
+            | "flow_sequence" => {
+                let mut cursor = node.walk();
+                stack.extend(
+                    node.named_children(&mut cursor)
+                        .filter(|c| !matches!(c.kind(), "anchor" | "tag")),
+                );
+            }
+            "block_mapping" | "flow_mapping" => {
+                let Some(field) = rule.reference_field else {
+                    continue;
+                };
+                let mut cursor = node.walk();
+                for pair in node.named_children(&mut cursor) {
+                    if matches!(pair.kind(), "block_mapping_pair" | "flow_pair")
+                        && let (Some(key_node), Some(value_node)) = (
+                            pair.child_by_field_name("key"),
+                            pair.child_by_field_name("value"),
+                        )
+                        && first_scalar_text(key_node, source).as_deref() == Some(field)
+                    {
+                        stack.push(value_node);
+                    }
+                }
+            }
+            _ => {}
         }
-        return;
-    }
-    let mut cursor = node.walk();
-    for child in node.named_children(&mut cursor) {
-        collect_scalar_candidates(child, source, path_only, out, seen);
     }
 }
 
 /// Walk the YAML tree looking for mapping pairs keyed on a recognized
-/// Ansible reference key (see `ansible_key_path_only`) and collect their
-/// values as dependency-edge candidates.
+/// Ansible reference key (see `ansible_key_rule`) and collect their values
+/// as dependency-edge candidates. Iterative (heap-allocated stack, not
+/// native recursion) for the same reason `extract_bash_commands` above
+/// already is: a deeply nested (but otherwise valid) YAML document must not
+/// be able to overflow the native stack just by walking it.
 fn collect_ansible_pairs(
-    node: Node<'_>,
+    root: Node<'_>,
     source: &[u8],
     out: &mut Vec<String>,
     seen: &mut HashSet<String>,
 ) {
-    if matches!(node.kind(), "block_mapping_pair" | "flow_pair")
-        && let (Some(key_node), Some(value_node)) = (
-            node.child_by_field_name("key"),
-            node.child_by_field_name("value"),
-        )
-        && let Some(raw_key) = first_scalar_text(key_node, source)
-        && let Some(path_only) = ansible_key_path_only(&raw_key)
-    {
-        collect_scalar_candidates(value_node, source, path_only, out, seen);
-    }
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if matches!(node.kind(), "block_mapping_pair" | "flow_pair")
+            && let (Some(key_node), Some(value_node)) = (
+                node.child_by_field_name("key"),
+                node.child_by_field_name("value"),
+            )
+            && let Some(raw_key) = first_scalar_text(key_node, source)
+            && let Some(rule) = ansible_key_rule(&raw_key)
+        {
+            collect_scalar_candidates(value_node, source, &rule, out, seen);
+        }
 
-    let mut cursor = node.walk();
-    for child in node.named_children(&mut cursor) {
-        collect_ansible_pairs(child, source, out, seen);
+        let mut cursor = node.walk();
+        stack.extend(node.named_children(&mut cursor));
     }
 }
 
@@ -374,6 +435,15 @@ pub fn extract_reference_paths(content: &str) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut out = Vec::new();
     for m in REFERENCE_PATH_RE.find_iter(content) {
+        // A char immediately after the match that could continue the same
+        // filename (`templates/site.yml.j2`, `run.sh~`, `lib.py-old`) means
+        // the real extension is something else entirely — `\b` alone only
+        // rules out a following word character, not `.`/`~`/`-`, all of
+        // which are themselves part of the path-char class above. The
+        // `regex` crate has no lookahead, so reject here instead.
+        if matches!(content.as_bytes().get(m.end()), Some(b'.' | b'~' | b'-')) {
+            continue;
+        }
         // Normalise Windows separators up front so a back-slash reference
         // (`..\lib\common.py`) is captured and resolved the same as a
         // forward-slash one — logical paths are always `/`-separated.
@@ -655,6 +725,30 @@ mod tests {
     }
 
     #[test]
+    fn yaml_include_tasks_ignores_option_fields_even_when_path_shaped() {
+        // A sibling option (`apply.tags` here) is not a reference field, so
+        // it must never become a candidate — even when its value happens to
+        // look like a path to an indexed script.
+        let mut ext = TreeSitterExtractor::new().unwrap();
+        let refs = ext.extract_yaml_deps(
+            "- include_tasks:\n    file: tasks/setup.yml\n    apply:\n      tags: lib/unrelated.yml\n",
+        );
+        assert_eq!(refs, vec!["tasks/setup.yml".to_string()]);
+    }
+
+    #[test]
+    fn yaml_roles_mapping_form_ignores_sibling_vars() {
+        // `roles: [{role: ..., vars: {...}}]` — only the `role` field is a
+        // reference; a `vars` sub-mapping alongside it is not, even if one
+        // of its values looks path-shaped.
+        let mut ext = TreeSitterExtractor::new().unwrap();
+        let refs = ext.extract_yaml_deps(
+            "roles:\n  - role: roles/custom/nginx\n    vars:\n      config_file: lib/unrelated.yml\n",
+        );
+        assert_eq!(refs, vec!["roles/custom/nginx".to_string()]);
+    }
+
+    #[test]
     fn yaml_roles_keeps_path_style_entries_and_drops_galaxy_names() {
         let mut ext = TreeSitterExtractor::new().unwrap();
         let refs = ext.extract_yaml_deps("roles:\n  - common\n  - roles/custom/nginx\n");
@@ -702,5 +796,38 @@ mod tests {
         );
         assert!(refs.contains(&"/catalog/playbooks/site.yml".to_string()));
         assert!(refs.contains(&"/catalog/vars/main.yaml".to_string()));
+    }
+
+    #[test]
+    fn reference_paths_reject_compound_extensions() {
+        // A char right after the matched extension that could continue the
+        // same filename (a Jinja-templated YAML file, a shell backup, a
+        // dash-suffixed copy) means the real extension is something else —
+        // `templates/site.yml` must not be extracted from
+        // `templates/site.yml.j2`.
+        let refs = extract_reference_paths(
+            "see templates/site.yml.j2 and lib/run.sh~ and old/script.py-bak",
+        );
+        assert!(refs.is_empty(), "unexpected: {refs:?}");
+    }
+
+    #[test]
+    fn yaml_deep_nesting_does_not_stack_overflow() {
+        // The value walk under a recognized key used to be recursive,
+        // tracking YAML nesting depth 1:1 with native stack depth. A
+        // pathologically (but validly) deep flow sequence must not crash —
+        // same concern as `extract_deps_handles_deeply_nested_script_without_stack_overflow`.
+        let mut source = String::from("vars_files: ");
+        for _ in 0..20_000 {
+            source.push('[');
+        }
+        source.push_str("x/y.yml");
+        for _ in 0..20_000 {
+            source.push(']');
+        }
+
+        let mut ext = TreeSitterExtractor::new().unwrap();
+        let refs = ext.extract_yaml_deps(&source);
+        assert!(refs.contains(&"x/y.yml".to_string()));
     }
 }
