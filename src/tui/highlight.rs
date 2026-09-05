@@ -2,8 +2,8 @@
 //! (`src/tui/render/preview.rs`) and the full-screen detail view
 //! (`src/tui/detail.rs`), via `tree-sitter-highlight`. Python and Bash reuse
 //! the grammars already loaded for dependency extraction
-//! (`src/indexer/treesitter_deps.rs`); JSON is highlighted only (the indexer
-//! never tree-sits it).
+//! (`src/indexer/treesitter_deps.rs`); JSON and YAML are highlighted only
+//! (the indexer never tree-sits them).
 
 use std::sync::LazyLock;
 
@@ -13,7 +13,7 @@ use tree_sitter_highlight::{Highlight, HighlightConfiguration, HighlightEvent, H
 
 use scat_core::indexer::treesitter_deps::{normalise_lang, parse_with_timeout};
 
-/// Highlight capture names recognized from the bundled Python/Bash
+/// Highlight capture names recognized from the bundled Python/Bash/JSON/YAML
 /// `highlights.scm` queries. A `Highlight(i)` event from [`Highlighter`]
 /// indexes into this list (set via `HighlightConfiguration::configure`).
 const HIGHLIGHT_NAMES: &[&str] = &[
@@ -23,7 +23,9 @@ const HIGHLIGHT_NAMES: &[&str] = &[
     "number",
     "constant",
     "constant.builtin",
+    "boolean",
     "keyword",
+    "attribute",
     "operator",
     "function",
     "function.builtin",
@@ -31,7 +33,10 @@ const HIGHLIGHT_NAMES: &[&str] = &[
     "type",
     "constructor",
     "property",
+    "label",
     "punctuation.special",
+    "punctuation.bracket",
+    "punctuation.delimiter",
     "variable",
 ];
 
@@ -43,11 +48,14 @@ fn style_for(name: &str) -> Style {
         "comment" => Style::default().fg(Color::DarkGray),
         "string" => Style::default().fg(Color::Green),
         "escape" | "punctuation.special" => Style::default().fg(Color::LightMagenta),
-        "number" | "constant" | "constant.builtin" => Style::default().fg(Color::Yellow),
-        "keyword" => Style::default().fg(Color::Magenta),
+        "number" | "constant" | "constant.builtin" | "boolean" => {
+            Style::default().fg(Color::Yellow)
+        }
+        "keyword" | "attribute" => Style::default().fg(Color::Magenta),
         "function" | "function.builtin" | "function.method" => Style::default().fg(Color::Blue),
         "type" | "constructor" => Style::default().fg(Color::Cyan),
         "property" => Style::default().fg(Color::LightCyan),
+        "label" => Style::default().fg(Color::LightBlue),
         _ => Style::default(),
     }
 }
@@ -92,15 +100,23 @@ static JSON_CONFIG: LazyLock<HighlightConfiguration> = LazyLock::new(|| {
     )
 });
 
+static YAML_CONFIG: LazyLock<HighlightConfiguration> = LazyLock::new(|| {
+    build_config(
+        tree_sitter_yaml::LANGUAGE.into(),
+        "yaml",
+        tree_sitter_yaml::HIGHLIGHTS_QUERY,
+    )
+});
+
 /// Highlight `source` for `language` (the `scripts.language` column's
-/// values, e.g. `"python"`/`"shell"`/`"json"`), returning one [`Line`] per
-/// line of `source` — matching `source.lines()` exactly, since callers
-/// (scroll math in `render::preview`, click hit-testing in
+/// values, e.g. `"python"`/`"shell"`/`"json"`/`"yaml"`), returning one
+/// [`Line`] per line of `source` — matching `source.lines()` exactly, since
+/// callers (scroll math in `render::preview`, click hit-testing in
 /// `detail::detail_click_at`) count on one `Line` per source line.
 ///
 /// Falls back to plain, unstyled lines for a language other than Python,
-/// Bash, or JSON, or when parsing doesn't finish within the same deadline
-/// [`parse_with_timeout`] enforces for dependency extraction.
+/// Bash, JSON, or YAML, or when parsing doesn't finish within the same
+/// deadline [`parse_with_timeout`] enforces for dependency extraction.
 pub(super) fn highlight_lines(source: &str, language: &str) -> Vec<Line<'static>> {
     if source.is_empty() {
         return Vec::new();
@@ -109,6 +125,7 @@ pub(super) fn highlight_lines(source: &str, language: &str) -> Vec<Line<'static>
         "python" => Some(&*PYTHON_CONFIG),
         "bash" => Some(&*BASH_CONFIG),
         "json" => Some(&*JSON_CONFIG),
+        "yaml" => Some(&*YAML_CONFIG),
         _ => None,
     };
     config
@@ -288,6 +305,36 @@ mod tests {
     }
 
     #[test]
+    fn yaml_key_comment_and_boolean_are_styled() {
+        let lines = highlight_lines("# comment\nname: hi\nenabled: true", "yaml");
+        assert_eq!(lines.len(), 3);
+        assert!(
+            lines[0]
+                .spans
+                .iter()
+                .any(|s| s.style == style_for("comment")),
+            "expected a styled comment span: {:?}",
+            lines[0].spans
+        );
+        assert!(
+            lines[1]
+                .spans
+                .iter()
+                .any(|s| s.content.as_ref() == "name" && s.style == style_for("property")),
+            "expected a styled key span: {:?}",
+            lines[1].spans
+        );
+        assert!(
+            lines[2]
+                .spans
+                .iter()
+                .any(|s| s.content.as_ref() == "true" && s.style == style_for("boolean")),
+            "expected a styled boolean span: {:?}",
+            lines[2].spans
+        );
+    }
+
+    #[test]
     fn line_count_matches_source_lines_exactly() {
         let source = "def f():\n    return 1\n\nf()";
         let lines = highlight_lines(source, "python");
@@ -304,6 +351,7 @@ mod tests {
         assert!(!highlight_lines("def f(:\n    x = \"unterminated\n", "python").is_empty());
         assert!(!highlight_lines("if [ -z \"\n", "shell").is_empty());
         assert!(!highlight_lines("{\"a\": [1, 2,\n", "json").is_empty());
+        assert!(!highlight_lines("key: [1, 2\n  bad indent\n", "yaml").is_empty());
         assert!(!highlight_lines("\u{0}\u{1}\u{2} not really code", "python").is_empty());
     }
 }

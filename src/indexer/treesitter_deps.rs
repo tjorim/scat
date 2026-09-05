@@ -282,6 +282,7 @@ pub fn normalise_lang(language: &str) -> &'static str {
         "shell" => "bash",
         "python" => "python",
         "json" => "json",
+        "yaml" => "yaml",
         _ => "unknown",
     }
 }
@@ -390,6 +391,7 @@ mod tests {
         assert_eq!(normalise_lang("Shell"), "bash");
         assert_eq!(normalise_lang("PYTHON"), "python");
         assert_eq!(normalise_lang("JSON"), "json");
+        assert_eq!(normalise_lang("YAML"), "yaml");
         assert_eq!(normalise_lang("perl"), "unknown");
         assert_eq!(normalise_lang(""), "unknown");
     }
