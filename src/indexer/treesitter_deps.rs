@@ -17,7 +17,11 @@ use crate::indexer::ast_deps::{
 /// can otherwise take a very long time to parse, stalling the whole indexing
 /// run on one file; on timeout the parse returns `None` and callers fall
 /// back to the regex-based extractor.
-const PARSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+///
+/// `pub` (rather than `pub(crate)`) so the TUI's syntax highlighter
+/// (`src/tui/highlight.rs`, in the separate `scat` binary crate) can bound
+/// `tree-sitter-highlight`'s own reparse under the same deadline.
+pub const PARSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Parse `source` with a wall-clock deadline, returning `None` if parsing
 /// doesn't finish in time (in addition to the normal `None`-on-no-language

@@ -5,13 +5,15 @@
 //! (`src/indexer/treesitter_deps.rs`); JSON and YAML are highlighted only
 //! (the indexer never tree-sits them).
 
-use std::sync::LazyLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, LazyLock};
+use std::thread;
 
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use tree_sitter_highlight::{Highlight, HighlightConfiguration, HighlightEvent, Highlighter};
 
-use scat_core::indexer::treesitter_deps::{normalise_lang, parse_with_timeout};
+use scat_core::indexer::treesitter_deps::{PARSE_TIMEOUT, normalise_lang};
 
 /// Highlight capture names recognized from the bundled Python/Bash/JSON/YAML
 /// `highlights.scm` queries. A `Highlight(i)` event from [`Highlighter`]
@@ -141,18 +143,28 @@ fn plain_lines(source: &str) -> Vec<Line<'static>> {
 }
 
 fn try_highlight(source: &str, config: &HighlightConfiguration) -> Option<Vec<Line<'static>>> {
-    // `Highlighter::highlight` always reparses internally with no timeout of
-    // its own, so probe first with a throwaway parse under the same deadline
-    // `parse_with_timeout` guards dependency extraction with — pathological
+    // `Highlighter::highlight` reparses `source` internally and lazily
+    // iterates highlight events, with no deadline of its own — pathological
     // input (deep nesting, a huge minified file) could otherwise stall the
-    // detail worker thread indefinitely.
-    let mut probe = tree_sitter::Parser::new();
-    probe.set_language(&config.language).ok()?;
-    parse_with_timeout(&mut probe, source.as_bytes())?;
+    // detail worker thread indefinitely. Bound it under the same deadline
+    // `parse_with_timeout` guards dependency extraction with, via the
+    // crate's own cancellation mechanism: a detached timer thread flips the
+    // shared flag after `PARSE_TIMEOUT` elapses; the highlighter checks it
+    // both in its internal reparse and periodically while iterating, and
+    // any per-event `Err` this produces (a `Cancelled` error included)
+    // falls through the `?` below to the plain-text fallback. The `Arc`
+    // keeps the flag alive for the timer thread even if this call returns
+    // (and drops its own reference) before the deadline fires.
+    let cancelled = Arc::new(AtomicUsize::new(0));
+    let timer_flag = Arc::clone(&cancelled);
+    thread::spawn(move || {
+        thread::sleep(PARSE_TIMEOUT);
+        timer_flag.store(1, Ordering::SeqCst);
+    });
 
     let mut highlighter = Highlighter::new();
     let events = highlighter
-        .highlight(config, source.as_bytes(), None, None, |_| None)
+        .highlight(config, source.as_bytes(), None, Some(&cancelled), |_| None)
         .ok()?;
 
     let mut lines: Vec<Vec<Span<'static>>> = vec![Vec::new()];
