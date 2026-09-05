@@ -604,10 +604,25 @@ fn extract_for_insert<'a>(
     // listed in a manifest). Candidates that don't resolve to an indexed
     // script are dropped later in `resolve_reference_targets`; a script
     // mentioning its own path is not a dependency, so skip it here.
-    let references = crate::indexer::treesitter_deps::extract_reference_paths(&meta.content)
-        .into_iter()
-        .filter(|reference| reference != &record.logical_path)
-        .collect();
+    let mut references: Vec<String> =
+        crate::indexer::treesitter_deps::extract_reference_paths(&meta.content)
+            .into_iter()
+            .filter(|reference| reference != &record.logical_path)
+            .collect();
+
+    // YAML gets a second, structure-aware pass for Ansible-shaped keys
+    // (`include_tasks`, `import_playbook`, `roles`, …) that the generic
+    // path-literal scan above can't distinguish from unrelated strings —
+    // see `extract_yaml_reference_paths`. Same "referenced" resolution and
+    // self-reference rule as above; deduped against the generic pass.
+    if record.language == "yaml" {
+        let mut seen: HashSet<String> = references.iter().cloned().collect();
+        for reference in ts.extract_yaml_deps(&meta.content) {
+            if reference != record.logical_path && seen.insert(reference.clone()) {
+                references.push(reference);
+            }
+        }
+    }
 
     Ok(ExtractedRow {
         record,

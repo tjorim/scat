@@ -812,6 +812,105 @@ fn build_records_referenced_path_dependencies() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Ansible-shaped YAML dependency edges (issue #100)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn build_resolves_ansible_yaml_dependency_edges() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path().join("scripts");
+    std::fs::create_dir_all(root.join("tasks")).unwrap();
+    std::fs::create_dir_all(root.join("vars")).unwrap();
+    std::fs::create_dir_all(root.join("roles/custom/nginx")).unwrap();
+
+    let setup_yml = root.join("tasks/setup.yml").to_string_lossy().into_owned();
+    let vars_main_yml = root.join("vars/main.yml").to_string_lossy().into_owned();
+    let nginx_main_yml = root
+        .join("roles/custom/nginx/main.yml")
+        .to_string_lossy()
+        .into_owned();
+
+    std::fs::write(&setup_yml, "- name: noop\n  command: /bin/true\n").unwrap();
+    std::fs::write(&vars_main_yml, "greeting: hello\n").unwrap();
+    std::fs::write(&nginx_main_yml, "- name: noop\n  command: /bin/true\n").unwrap();
+
+    // A playbook using bare Ansible reference keys (relative paths), an
+    // FQCN-qualified key, a `vars_files` list, and both a Galaxy role name
+    // (must NOT resolve — no such indexed script) and a path-style role
+    // entry (must resolve, since it matches an indexed script exactly).
+    std::fs::write(
+        root.join("site.yml"),
+        "- hosts: all\n\
+         \x20\x20vars_files:\n\
+         \x20\x20\x20\x20- vars/main.yml\n\
+         \x20\x20roles:\n\
+         \x20\x20\x20\x20- common\n\
+         \x20\x20\x20\x20- roles/custom/nginx/main.yml\n\
+         \x20\x20tasks:\n\
+         \x20\x20\x20\x20- ansible.builtin.include_tasks: tasks/setup.yml\n",
+    )
+    .unwrap();
+
+    let db_path = dir.path().join("catalog.sqlite");
+    build_index(
+        std::slice::from_ref(&root),
+        &db_path,
+        BuildOptions {
+            head_lines: 5,
+            keep_copies: 0,
+            vc_config: Some(VcConfig::default()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let conn = open_ro(&db_path);
+
+    let site_yml = root.join("site.yml").to_string_lossy().into_owned();
+    let site_id: i64 = conn
+        .query_row(
+            "SELECT id FROM scripts WHERE logical_path = ?1",
+            rusqlite::params![site_yml],
+            |r| r.get(0),
+        )
+        .unwrap();
+
+    let resolved_targets: Vec<String> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT s.logical_path FROM dependencies d
+                 JOIN scripts s ON s.id = d.resolved_script_id
+                 WHERE d.kind = 'referenced' AND d.script_id = ?1
+                 ORDER BY s.logical_path",
+            )
+            .unwrap();
+        stmt.query_map(rusqlite::params![site_id], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    };
+
+    let mut expected = vec![nginx_main_yml, setup_yml, vars_main_yml];
+    expected.sort();
+    assert_eq!(resolved_targets, expected);
+
+    // The Galaxy role name "common" has no indexed script to match, so it
+    // must not survive as an unresolved edge — resolve_reference_targets
+    // drops every unresolved 'referenced' row.
+    let unresolved_refs: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM dependencies WHERE kind = 'referenced' AND resolved_script_id IS NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        unresolved_refs, 0,
+        "unresolved referenced edges (e.g. the Galaxy role name) must be dropped"
+    );
+}
+
 #[test]
 fn build_resolves_relative_and_cross_language_references() {
     let dir = tempfile::TempDir::new().unwrap();
