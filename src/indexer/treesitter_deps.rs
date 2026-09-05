@@ -52,10 +52,11 @@ pub fn parse_with_timeout(
 pub struct TreeSitterExtractor {
     python_parser: tree_sitter::Parser,
     bash_parser: tree_sitter::Parser,
+    yaml_parser: tree_sitter::Parser,
 }
 
 impl TreeSitterExtractor {
-    /// Construct a new extractor with Python and Bash grammars loaded.
+    /// Construct a new extractor with Python, Bash and YAML grammars loaded.
     pub fn new() -> Result<Self> {
         let mut python_parser = tree_sitter::Parser::new();
         python_parser
@@ -67,9 +68,15 @@ impl TreeSitterExtractor {
             .set_language(&tree_sitter_bash::LANGUAGE.into())
             .map_err(|e| Error::Mapping(e.to_string()))?;
 
+        let mut yaml_parser = tree_sitter::Parser::new();
+        yaml_parser
+            .set_language(&tree_sitter_yaml::LANGUAGE.into())
+            .map_err(|e| Error::Mapping(e.to_string()))?;
+
         Ok(Self {
             python_parser,
             bash_parser,
+            yaml_parser,
         })
     }
 
@@ -106,6 +113,19 @@ impl TreeSitterExtractor {
         module_name: Option<&str>,
     ) -> AstDependencies {
         extract_python_deps_with_module(&mut self.python_parser, source, module_name)
+    }
+
+    /// Extract Ansible-style path references from YAML content (see
+    /// [`extract_yaml_reference_paths`]). These are path-shaped, not
+    /// module-shaped, so callers must fold them into the "referenced"
+    /// dependency kind — resolved by [`extract_reference_paths`]'s own
+    /// path-resolution passes — rather than treating them as import edges.
+    pub fn extract_yaml_deps(&mut self, source: &str) -> Vec<String> {
+        let source_bytes = source.as_bytes();
+        match parse_with_timeout(&mut self.yaml_parser, source_bytes) {
+            Some(tree) => extract_yaml_reference_paths(tree.root_node(), source_bytes),
+            None => vec![],
+        }
     }
 }
 
@@ -194,6 +214,128 @@ fn extract_bash_commands(
 }
 
 // ---------------------------------------------------------------------------
+// YAML (Ansible) tree walker
+// ---------------------------------------------------------------------------
+
+/// If `raw_key` (stripped of any FQCN module prefix, e.g. `ansible.builtin.`)
+/// is a recognized Ansible file-reference key, returns whether only
+/// path-shaped values (containing `/`) should be kept for it.
+///
+/// `import_playbook`/`include_tasks`/`import_tasks`/`vars_files`/
+/// `include_vars` always point at a file, so any scalar value under them is
+/// a candidate. `roles`/`include_role` entries are frequently a bare Galaxy
+/// role name rather than a path (e.g. `roles: [common]`), so only
+/// path-shaped entries are kept for those — matching the issue's "path-style
+/// entries, not Galaxy role names".
+fn ansible_key_path_only(raw_key: &str) -> Option<bool> {
+    let bare = raw_key.rsplit('.').next().unwrap_or(raw_key);
+    match bare {
+        "import_playbook" | "include_tasks" | "import_tasks" | "vars_files" | "include_vars" => {
+            Some(false)
+        }
+        "include_role" | "roles" => Some(true),
+        _ => None,
+    }
+}
+
+/// Descend through wrapper nodes (`flow_node`/`block_node`) to the first
+/// scalar leaf's text — used for reading a mapping key, which is always a
+/// single scalar.
+fn first_scalar_text(node: Node<'_>, source: &[u8]) -> Option<String> {
+    if let Some(text) = leaf_scalar_text(node, source) {
+        return Some(text);
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if let Some(text) = first_scalar_text(child, source) {
+            return Some(text);
+        }
+    }
+    None
+}
+
+/// Text of a scalar leaf node, with quotes stripped for quoted forms.
+/// Returns `None` for non-leaf (structural) nodes.
+fn leaf_scalar_text(node: Node<'_>, source: &[u8]) -> Option<String> {
+    match node.kind() {
+        "plain_scalar" | "block_scalar" => Some(node.utf8_text(source).ok()?.trim().to_string()),
+        "single_quote_scalar" | "double_quote_scalar" => {
+            let raw = node.utf8_text(source).ok()?.trim();
+            Some(raw.trim_matches(['\'', '"']).to_string())
+        }
+        _ => None,
+    }
+}
+
+/// Collect every scalar leaf reachable under `node` (a mapping pair's
+/// value), covering a bare scalar, a list of scalars, and mapping forms like
+/// `include_role: {name: ..., tasks_from: ...}` alike — deliberately liberal,
+/// the same way `extract_reference_paths` is: unrelated scalars picked up
+/// this way (e.g. a `tags:` value) simply won't resolve to an indexed script
+/// and are dropped later, while `path_only` keeps unresolvable Galaxy role
+/// names out of the candidate set up front.
+fn collect_scalar_candidates(
+    node: Node<'_>,
+    source: &[u8],
+    path_only: bool,
+    out: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+) {
+    if let Some(text) = leaf_scalar_text(node, source) {
+        if !text.is_empty() && (!path_only || text.contains('/')) && seen.insert(text.clone()) {
+            out.push(text);
+        }
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_scalar_candidates(child, source, path_only, out, seen);
+    }
+}
+
+/// Walk the YAML tree looking for mapping pairs keyed on a recognized
+/// Ansible reference key (see `ansible_key_path_only`) and collect their
+/// values as dependency-edge candidates.
+fn collect_ansible_pairs(
+    node: Node<'_>,
+    source: &[u8],
+    out: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+) {
+    if matches!(node.kind(), "block_mapping_pair" | "flow_pair")
+        && let (Some(key_node), Some(value_node)) = (
+            node.child_by_field_name("key"),
+            node.child_by_field_name("value"),
+        )
+        && let Some(raw_key) = first_scalar_text(key_node, source)
+        && let Some(path_only) = ansible_key_path_only(&raw_key)
+    {
+        collect_scalar_candidates(value_node, source, path_only, out, seen);
+    }
+
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_ansible_pairs(child, source, out, seen);
+    }
+}
+
+/// Extract Ansible-style file references (`include_tasks`, `import_tasks`,
+/// `import_playbook`, `vars_files`, `include_vars`, path-style
+/// `include_role`/`roles` entries, and their `ansible.builtin.`-qualified
+/// forms) from parsed YAML.
+///
+/// Like [`extract_reference_paths`], these are "referenced" (not "import")
+/// edges: candidates are resolved against indexed logical paths and silently
+/// dropped if nothing matches, so callers must fold the result into the same
+/// reference set rather than the module-based import dependencies.
+pub fn extract_yaml_reference_paths(root: Node<'_>, source: &[u8]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    collect_ansible_pairs(root, source, &mut out, &mut seen);
+    out
+}
+
+// ---------------------------------------------------------------------------
 // Regex fallback
 // ---------------------------------------------------------------------------
 
@@ -209,16 +351,20 @@ static BASH_SOURCE_RE: std::sync::LazyLock<Vec<Regex>> = std::sync::LazyLock::ne
 });
 
 static REFERENCE_PATH_RE: std::sync::LazyLock<Regex> =
-    std::sync::LazyLock::new(|| Regex::new(r"[\w./\\-]+\.(?:py|sh|bash|ksh)\b").unwrap());
+    std::sync::LazyLock::new(|| Regex::new(r"[\w./\\-]+\.(?:py|sh|bash|ksh|ya?ml)\b").unwrap());
 
 /// Extract path-shaped string literals that point at other scripts.
 ///
 /// This is language-agnostic: it scans the raw file text for tokens that look
-/// like a path to a `.py`/`.sh`/`.bash`/`.ksh` file and contain a `/`
-/// separator, regardless of whether they appear inside an `ssh`/`scp`/`rsync`
-/// command, a `subprocess`/`paramiko` invocation, or a JSON/YAML manifest
-/// list. These "called, not imported" edges are invisible to the AST-based
-/// import extractors.
+/// like a path to a `.py`/`.sh`/`.bash`/`.ksh`/`.yml`/`.yaml` file and contain
+/// a `/` separator, regardless of whether they appear inside an
+/// `ssh`/`scp`/`rsync` command, a `subprocess`/`paramiko` invocation, or a
+/// JSON/YAML manifest list. These "called, not imported" edges are invisible
+/// to the AST-based import extractors. The YAML extensions catch opportunistic
+/// mentions of a playbook/task file (e.g. `subprocess.run(["ansible-playbook",
+/// "/catalog/playbooks/site.yml"])`); structured Ansible key/value references
+/// within YAML content itself are handled with more precision by
+/// `extract_yaml_reference_paths`.
 ///
 /// Extraction is deliberately liberal — precision comes from resolution: a
 /// candidate is only kept as a dependency edge if it matches an indexed
@@ -458,5 +604,103 @@ mod tests {
         let mut ext = TreeSitterExtractor::new().unwrap();
         let deps = ext.extract_deps(&source, "shell");
         assert!(deps.contains(&"lib.sh".to_string()));
+    }
+
+    // -----------------------------------------------------------------------
+    // YAML (Ansible) reference extraction
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn yaml_extracts_import_playbook() {
+        let mut ext = TreeSitterExtractor::new().unwrap();
+        let refs = ext.extract_yaml_deps("- import_playbook: playbooks/site.yml\n");
+        assert_eq!(refs, vec!["playbooks/site.yml".to_string()]);
+    }
+
+    #[test]
+    fn yaml_extracts_include_and_import_tasks() {
+        let mut ext = TreeSitterExtractor::new().unwrap();
+        let refs = ext.extract_yaml_deps(
+            "- include_tasks: tasks/setup.yml\n- import_tasks: tasks/teardown.yml\n",
+        );
+        assert!(refs.contains(&"tasks/setup.yml".to_string()));
+        assert!(refs.contains(&"tasks/teardown.yml".to_string()));
+    }
+
+    #[test]
+    fn yaml_extracts_fqcn_qualified_keys() {
+        let mut ext = TreeSitterExtractor::new().unwrap();
+        let refs = ext.extract_yaml_deps("- ansible.builtin.include_tasks: tasks/setup.yml\n");
+        assert_eq!(refs, vec!["tasks/setup.yml".to_string()]);
+    }
+
+    #[test]
+    fn yaml_extracts_vars_files_and_include_vars_lists() {
+        let mut ext = TreeSitterExtractor::new().unwrap();
+        let refs = ext.extract_yaml_deps(
+            "vars_files:\n  - vars/main.yml\n  - vars/prod.yml\ninclude_vars: vars/extra.yml\n",
+        );
+        assert!(refs.contains(&"vars/main.yml".to_string()));
+        assert!(refs.contains(&"vars/prod.yml".to_string()));
+        assert!(refs.contains(&"vars/extra.yml".to_string()));
+    }
+
+    #[test]
+    fn yaml_include_tasks_mapping_form_resolves_file_key() {
+        let mut ext = TreeSitterExtractor::new().unwrap();
+        let refs = ext.extract_yaml_deps(
+            "- include_tasks:\n    file: tasks/setup.yml\n    apply:\n      tags: setup\n",
+        );
+        assert!(refs.contains(&"tasks/setup.yml".to_string()));
+    }
+
+    #[test]
+    fn yaml_roles_keeps_path_style_entries_and_drops_galaxy_names() {
+        let mut ext = TreeSitterExtractor::new().unwrap();
+        let refs = ext.extract_yaml_deps("roles:\n  - common\n  - roles/custom/nginx\n");
+        assert!(refs.contains(&"roles/custom/nginx".to_string()));
+        assert!(!refs.contains(&"common".to_string()));
+    }
+
+    #[test]
+    fn yaml_include_role_keeps_path_style_name_and_drops_galaxy_name() {
+        let mut ext = TreeSitterExtractor::new().unwrap();
+        let path_refs = ext.extract_yaml_deps("- include_role:\n    name: roles/custom/nginx\n");
+        assert_eq!(path_refs, vec!["roles/custom/nginx".to_string()]);
+
+        let galaxy_refs = ext.extract_yaml_deps("- include_role:\n    name: nginx\n");
+        assert!(galaxy_refs.is_empty(), "unexpected: {galaxy_refs:?}");
+    }
+
+    #[test]
+    fn yaml_ignores_unrelated_keys() {
+        let mut ext = TreeSitterExtractor::new().unwrap();
+        let refs = ext.extract_yaml_deps(
+            "name: Deploy app\nhosts: all\ntasks:\n  - name: run it\n    command: /bin/true\n",
+        );
+        assert!(refs.is_empty(), "unexpected: {refs:?}");
+    }
+
+    #[test]
+    fn yaml_malformed_content_does_not_panic() {
+        let mut ext = TreeSitterExtractor::new().unwrap();
+        // Unterminated flow mapping / mismatched braces — must not panic,
+        // an empty result (however partial the parse) is acceptable.
+        let _ = ext.extract_yaml_deps("include_tasks: [foo.yml\nfoo: {bar: ");
+    }
+
+    #[test]
+    fn yaml_empty_source_does_not_panic() {
+        let mut ext = TreeSitterExtractor::new().unwrap();
+        assert!(ext.extract_yaml_deps("").is_empty());
+    }
+
+    #[test]
+    fn reference_path_regex_now_matches_yaml_extensions() {
+        let refs = extract_reference_paths(
+            "ansible-playbook /catalog/playbooks/site.yml and /catalog/vars/main.yaml",
+        );
+        assert!(refs.contains(&"/catalog/playbooks/site.yml".to_string()));
+        assert!(refs.contains(&"/catalog/vars/main.yaml".to_string()));
     }
 }
