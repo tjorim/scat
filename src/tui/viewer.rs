@@ -10,6 +10,8 @@ use anyhow::{Context, Result, anyhow, bail};
 pub(super) struct CatalogView {
     pub(super) logical_path: String,
     pub(super) content: String,
+    /// The `scripts.language` column, e.g. `"python"` or `"shell"`.
+    pub(super) language: String,
 }
 
 /// What the external read-only viewer should open.
@@ -22,6 +24,8 @@ pub(super) enum ViewTarget {
     LiveSource {
         logical_path: String,
         native_path: PathBuf,
+        /// The `scripts.language` column, e.g. `"python"` or `"shell"`.
+        language: String,
     },
 }
 
@@ -34,10 +38,15 @@ pub(super) enum ViewTarget {
 pub(super) fn open_target(target: &ViewTarget) -> Result<()> {
     match target {
         ViewTarget::Catalog(view) => {
+            let language = view.language.clone();
             let (_dir, path) = write_catalog_view_file(view)?;
-            open_readonly(&path)
+            open_readonly(&path, &language)
         }
-        ViewTarget::LiveSource { native_path, .. } => open_readonly(native_path),
+        ViewTarget::LiveSource {
+            native_path,
+            language,
+            ..
+        } => open_readonly(native_path, language),
     }
 }
 
@@ -61,11 +70,11 @@ pub(super) fn write_catalog_view_file(
     Ok((dir, path))
 }
 
-pub(super) fn open_readonly(path: &Path) -> Result<()> {
+pub(super) fn open_readonly(path: &Path, language: &str) -> Result<()> {
     let commands = viewer_commands()?;
     let mut last_not_found = None;
     for command in commands {
-        match run_viewer_command(&command, path) {
+        match run_viewer_command(&command, path, language) {
             Ok(()) => return Ok(()),
             Err(err) if command.fallback && err.kind() == std::io::ErrorKind::NotFound => {
                 last_not_found = Some((command.program, err));
@@ -133,9 +142,9 @@ fn parse_viewer_command(value: &str, fallback: bool) -> Result<ViewerCommand> {
     })
 }
 
-fn run_viewer_command(command: &ViewerCommand, path: &Path) -> std::io::Result<()> {
+fn run_viewer_command(command: &ViewerCommand, path: &Path, language: &str) -> std::io::Result<()> {
     let mut process = Command::new(&command.program);
-    let args = args_with_readonly(command, path);
+    let args = args_with_readonly(command, path, language);
     let status = process.args(args).status()?;
     if status.success() {
         Ok(())
@@ -147,10 +156,16 @@ fn run_viewer_command(command: &ViewerCommand, path: &Path) -> std::io::Result<(
     }
 }
 
-fn args_with_readonly(command: &ViewerCommand, path: &Path) -> Vec<OsString> {
+fn args_with_readonly(command: &ViewerCommand, path: &Path, language: &str) -> Vec<OsString> {
     let mut args: Vec<OsString> = command.args.iter().map(OsString::from).collect();
-    if is_vim_like(&command.program) && !has_vim_readonly_arg(&command.args) {
-        args.push(OsString::from("-R"));
+    if is_vim_like(&command.program) {
+        if !has_vim_readonly_arg(&command.args) {
+            args.push(OsString::from("-R"));
+        }
+        if let Some(filetype) = vim_filetype(language) {
+            args.push(OsString::from("-c"));
+            args.push(OsString::from(format!("set filetype={filetype}")));
+        }
     }
     args.push(path.as_os_str().to_os_string());
     args
@@ -168,6 +183,25 @@ fn is_vim_like(program: &str) -> bool {
 fn has_vim_readonly_arg(args: &[String]) -> bool {
     args.iter()
         .any(|arg| matches!(arg.as_str(), "-R" | "-M" | "-m" | "-Z" | "-y"))
+}
+
+/// Map a `scripts.language` value to the vim filetype that turns on its
+/// syntax highlighting.
+///
+/// Vim normally detects filetype from the file's extension (or, failing
+/// that, its shebang line) — but many of the shell tools this catalog
+/// indexes have no extension at all, and vim's shebang-based fallback
+/// (`scripts.vim`) only runs when `:filetype on`/`:syntax on` are active,
+/// which isn't guaranteed for a bare `vi -R`. Setting it explicitly makes
+/// highlighting depend on scat's own language detection instead of vim's.
+fn vim_filetype(language: &str) -> Option<&'static str> {
+    match language {
+        "python" => Some("python"),
+        "shell" => Some("sh"),
+        "yaml" => Some("yaml"),
+        "json" => Some("json"),
+        _ => None,
+    }
 }
 
 /// Derive a temp-file name for a logical path, preserving the script's own
@@ -205,7 +239,7 @@ mod tests {
 
     use super::{
         CatalogView, ViewerCommand, args_with_readonly, parse_viewer_command, safe_view_filename,
-        write_catalog_view_file,
+        vim_filetype, write_catalog_view_file,
     };
 
     #[test]
@@ -223,7 +257,7 @@ mod tests {
             fallback: false,
         };
 
-        let args = args_with_readonly(&command, std::path::Path::new("foo.py"));
+        let args = args_with_readonly(&command, std::path::Path::new("foo.py"), "");
 
         assert_eq!(args, vec![OsString::from("-R"), OsString::from("foo.py")]);
     }
@@ -236,9 +270,69 @@ mod tests {
             fallback: false,
         };
 
-        let args = args_with_readonly(&command, std::path::Path::new("foo.py"));
+        let args = args_with_readonly(&command, std::path::Path::new("foo.py"), "");
 
         assert_eq!(args, vec![OsString::from("-R"), OsString::from("foo.py")]);
+    }
+
+    #[test]
+    fn args_with_readonly_sets_filetype_for_known_language() {
+        let command = ViewerCommand {
+            program: "vim".to_string(),
+            args: Vec::new(),
+            fallback: false,
+        };
+
+        // Extensionless shell tools (indexed via shebang sniffing) are
+        // exactly the case vim's own detection can miss.
+        let args = args_with_readonly(&command, std::path::Path::new("prepare_release"), "shell");
+
+        assert_eq!(
+            args,
+            vec![
+                OsString::from("-R"),
+                OsString::from("-c"),
+                OsString::from("set filetype=sh"),
+                OsString::from("prepare_release"),
+            ]
+        );
+    }
+
+    #[test]
+    fn args_with_readonly_skips_filetype_for_unknown_language() {
+        let command = ViewerCommand {
+            program: "vim".to_string(),
+            args: Vec::new(),
+            fallback: false,
+        };
+
+        let args = args_with_readonly(&command, std::path::Path::new("data.bin"), "unknown");
+
+        assert_eq!(args, vec![OsString::from("-R"), OsString::from("data.bin")]);
+    }
+
+    #[test]
+    fn args_with_readonly_ignores_language_for_non_vim_editor() {
+        let command = ViewerCommand {
+            program: "less".to_string(),
+            args: Vec::new(),
+            fallback: true,
+        };
+
+        let args = args_with_readonly(&command, std::path::Path::new("prepare_release"), "shell");
+
+        assert_eq!(args, vec![OsString::from("prepare_release")]);
+    }
+
+    #[test]
+    fn vim_filetype_maps_known_languages() {
+        assert_eq!(vim_filetype("python"), Some("python"));
+        assert_eq!(vim_filetype("shell"), Some("sh"));
+        assert_eq!(vim_filetype("yaml"), Some("yaml"));
+        assert_eq!(vim_filetype("json"), Some("json"));
+        assert_eq!(vim_filetype("csv"), None);
+        assert_eq!(vim_filetype("unknown"), None);
+        assert_eq!(vim_filetype(""), None);
     }
 
     #[test]
@@ -263,6 +357,7 @@ mod tests {
         let target = CatalogView {
             logical_path: "/catalog/scripts/foo.py".to_string(),
             content: "print(1)\n".to_string(),
+            language: "python".to_string(),
         };
 
         let (_dir, path) = write_catalog_view_file(&target).unwrap();

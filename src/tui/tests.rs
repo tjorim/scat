@@ -156,6 +156,7 @@ fn live_source_view_resolves_mapped_path() {
         viewer::ViewTarget::LiveSource {
             logical_path,
             native_path,
+            ..
         } => {
             assert_eq!(logical_path, "/catalog/scripts/foo.py");
             assert_eq!(native_path, script);
@@ -192,6 +193,7 @@ fn live_source_view_opens_logical_path_without_mapping_when_file_exists() {
         viewer::ViewTarget::LiveSource {
             logical_path,
             native_path,
+            ..
         } => {
             assert_eq!(logical_path, logical);
             assert_eq!(native_path, script);

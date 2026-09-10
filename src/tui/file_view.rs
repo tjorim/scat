@@ -30,10 +30,12 @@ impl TuiApp {
         let Some(row) = self.detail.as_ref() else {
             anyhow::bail!("No script selected.");
         };
-        let logical_path = ScriptView::new(row).logical_path().to_string();
+        let view = ScriptView::new(row);
+        let logical_path = view.logical_path().to_string();
         if logical_path.is_empty() {
             anyhow::bail!("Selected script has no logical path.");
         }
+        let language = view.language().to_string();
         let native = self.resolver.to_native(&logical_path);
         let mapped = native != logical_path;
         let native_path = PathBuf::from(native);
@@ -47,6 +49,7 @@ impl TuiApp {
             logical_path,
             native_path,
             mapped,
+            language,
         })
     }
 
@@ -81,6 +84,7 @@ impl TuiApp {
             self.pending_view = Some(viewer::ViewTarget::LiveSource {
                 logical_path: response.logical_path,
                 native_path: response.native_path,
+                language: response.language,
             });
         } else if response.mapped {
             self.error = Some(format!(
@@ -110,6 +114,7 @@ impl TuiApp {
         Ok(viewer::CatalogView {
             logical_path,
             content: view.content().to_string(),
+            language: view.language().to_string(),
         })
     }
 }
