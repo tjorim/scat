@@ -15,6 +15,9 @@ pub struct FileCheckRequest {
     pub native_path: PathBuf,
     /// Whether a path mapping was applied (`native_path != logical_path`).
     pub mapped: bool,
+    /// The `scripts.language` column, carried through so the viewer can hint
+    /// the external editor's syntax highlighting for extensionless scripts.
+    pub language: String,
 }
 
 pub struct FileCheckResponse {
@@ -23,6 +26,7 @@ pub struct FileCheckResponse {
     pub native_path: PathBuf,
     pub mapped: bool,
     pub exists: bool,
+    pub language: String,
 }
 
 /// Background worker that performs the (potentially blocking, e.g. on a slow
@@ -91,6 +95,7 @@ fn worker_loop(request_rx: Receiver<FileCheckRequest>, response_tx: Sender<FileC
                 native_path: request.native_path,
                 mapped: request.mapped,
                 exists,
+                language: request.language,
             })
             .is_err()
         {
@@ -132,6 +137,7 @@ mod tests {
                 logical_path: "/catalog/scripts/foo.py".to_string(),
                 native_path: script.clone(),
                 mapped: true,
+                language: "python".to_string(),
             })
             .unwrap();
 
@@ -140,6 +146,7 @@ mod tests {
         assert!(response.exists);
         assert_eq!(response.native_path, script);
         assert!(response.mapped);
+        assert_eq!(response.language, "python");
     }
 
     #[test]
@@ -154,6 +161,7 @@ mod tests {
                 logical_path: "/catalog/scripts/missing.py".to_string(),
                 native_path: missing,
                 mapped: false,
+                language: "python".to_string(),
             })
             .unwrap();
 
