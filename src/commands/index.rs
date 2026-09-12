@@ -116,6 +116,7 @@ pub fn cmd_index(
             "db_path": result.db_path.display().to_string(),
             "dry_run": result.dry_run,
             "errors": result.errors.iter().map(|(p, e)| serde_json::json!({"path": p, "error": e})).collect::<Vec<_>>(),
+            "manifest_paths_not_indexed": result.manifest_paths_not_indexed,
         }));
     } else {
         let reused_suffix = if result.scripts_reused > 0 {
@@ -138,6 +139,15 @@ pub fn cmd_index(
             );
             for (path, err) in &result.errors {
                 warn!(path = %path, error = %err, "indexing file failed");
+            }
+        }
+        if !result.manifest_paths_not_indexed.is_empty() {
+            warn!(
+                path_count = result.manifest_paths_not_indexed.len(),
+                "path(s) listed in vc's managed-file manifest were not found during scanning"
+            );
+            for path in &result.manifest_paths_not_indexed {
+                warn!(path = %path, "registered with vc but not indexed");
             }
         }
     }

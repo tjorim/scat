@@ -812,6 +812,108 @@ fn build_records_referenced_path_dependencies() {
     );
 }
 
+#[test]
+fn build_records_referenced_dependencies_from_vc_related_file_keywords() {
+    // vc's @parentfile/@childfile/@inputfile/@outputfile/@paramfile header
+    // keywords are author-declared paths to other managed scripts — as
+    // high-confidence a dependency edge as scat records.
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path().join("scripts");
+    std::fs::create_dir(&root).unwrap();
+
+    std::fs::write(root.join("launcher.sh"), "#!/bin/bash\necho launcher\n").unwrap();
+    std::fs::write(root.join("config.yaml"), "key: value\n").unwrap();
+    std::fs::write(
+        root.join("worker.sh"),
+        "#!/bin/bash\n\
+         # @parentfile launcher.sh\n\
+         # @inputfile config.yaml\n\
+         # @inputfile missing.yaml\n\
+         echo worker\n",
+    )
+    .unwrap();
+
+    let db_path = dir.path().join("catalog.sqlite");
+    build_index(
+        std::slice::from_ref(&root),
+        &db_path,
+        BuildOptions {
+            head_lines: 5,
+            keep_copies: 0,
+            vc_config: Some(VcConfig::default()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let conn = open_ro(&db_path);
+
+    let worker_id: i64 = conn
+        .query_row(
+            "SELECT id FROM scripts WHERE logical_path = ?1",
+            rusqlite::params![root.join("worker.sh").to_string_lossy()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let launcher_id: i64 = conn
+        .query_row(
+            "SELECT id FROM scripts WHERE logical_path = ?1",
+            rusqlite::params![root.join("launcher.sh").to_string_lossy()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let config_id: i64 = conn
+        .query_row(
+            "SELECT id FROM scripts WHERE logical_path = ?1",
+            rusqlite::params![root.join("config.yaml").to_string_lossy()],
+            |r| r.get(0),
+        )
+        .unwrap();
+
+    let resolved_targets: Vec<i64> = conn
+        .prepare(
+            "SELECT resolved_script_id FROM dependencies
+             WHERE kind = 'referenced' AND script_id = ?1 AND resolved_script_id IS NOT NULL
+             ORDER BY resolved_script_id",
+        )
+        .unwrap()
+        .query_map(rusqlite::params![worker_id], |r| r.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+
+    let mut expected = [launcher_id, config_id];
+    expected.sort_unstable();
+    assert_eq!(
+        resolved_targets, expected,
+        "@parentfile and @inputfile must resolve to the scripts they name"
+    );
+
+    let unresolved: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM dependencies
+             WHERE kind = 'referenced' AND script_id = ?1 AND resolved_script_id IS NULL",
+            rusqlite::params![worker_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        unresolved, 0,
+        "@inputfile missing.yaml does not resolve to an indexed script and must be dropped"
+    );
+
+    // `related` also carries the declared paths for display in `scat show`.
+    let related_json: String = conn
+        .query_row(
+            "SELECT related FROM scripts WHERE id = ?1",
+            rusqlite::params![worker_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let related: Vec<String> = serde_json::from_str(&related_json).unwrap();
+    assert_eq!(related, vec!["launcher.sh", "config.yaml", "missing.yaml"]);
+}
+
 // ---------------------------------------------------------------------------
 // Ansible-shaped YAML dependency edges (issue #100)
 // ---------------------------------------------------------------------------
@@ -1363,5 +1465,113 @@ fn build_indexes_a_vc_working_directory_as_one_script_per_tool() {
     assert_eq!(
         revisions, 4,
         "two working copies plus the archive and develop entries"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Managed-file manifest cross-reference
+// ---------------------------------------------------------------------------
+
+#[test]
+fn build_reports_manifest_registered_path_not_indexed() {
+    // A path vc's manifest lists that scanning never found can't attach a
+    // warning to any `scripts` row (there isn't one), so it must be reported
+    // on `IndexResult` instead of silently dropped.
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path().join("scripts");
+    std::fs::create_dir(&root).unwrap();
+
+    std::fs::write(root.join("deploy.sh"), "#!/bin/bash\necho ok\n").unwrap();
+
+    let missing_path = root.join("missing.sh").to_string_lossy().into_owned();
+    let manifest_path = dir.path().join("manifest.lst");
+    std::fs::write(
+        &manifest_path,
+        format!(
+            "{}\n{}\n",
+            root.join("deploy.sh").to_string_lossy(),
+            missing_path
+        ),
+    )
+    .unwrap();
+
+    let db_path = dir.path().join("catalog.sqlite");
+    let result = build_index(
+        std::slice::from_ref(&root),
+        &db_path,
+        BuildOptions {
+            head_lines: 5,
+            keep_copies: 0,
+            vc_config: Some(VcConfig {
+                manifest_path: Some(manifest_path),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        result.manifest_paths_not_indexed,
+        vec![missing_path],
+        "the manifest-registered-but-unindexed path must be reported on IndexResult"
+    );
+
+    // deploy.sh is both indexed and manifest-registered — it must not appear
+    // in either warning direction.
+    let conn = open_ro(&db_path);
+    let vc_warnings: String = conn
+        .query_row(
+            "SELECT vc_warnings FROM scripts WHERE logical_path = ?1",
+            rusqlite::params![root.join("deploy.sh").to_string_lossy()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(vc_warnings, "[]");
+}
+
+#[test]
+fn build_flags_indexed_script_not_in_manifest() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path().join("scripts");
+    std::fs::create_dir(&root).unwrap();
+
+    std::fs::write(root.join("deploy.sh"), "#!/bin/bash\necho ok\n").unwrap();
+    std::fs::write(root.join("unregistered.sh"), "#!/bin/bash\necho ok\n").unwrap();
+
+    let manifest_path = dir.path().join("manifest.lst");
+    std::fs::write(
+        &manifest_path,
+        format!("{}\n", root.join("deploy.sh").to_string_lossy()),
+    )
+    .unwrap();
+
+    let db_path = dir.path().join("catalog.sqlite");
+    build_index(
+        std::slice::from_ref(&root),
+        &db_path,
+        BuildOptions {
+            head_lines: 5,
+            keep_copies: 0,
+            vc_config: Some(VcConfig {
+                manifest_path: Some(manifest_path),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let conn = open_ro(&db_path);
+    let vc_warnings: String = conn
+        .query_row(
+            "SELECT vc_warnings FROM scripts WHERE logical_path = ?1",
+            rusqlite::params![root.join("unregistered.sh").to_string_lossy()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        vc_warnings.contains("not_registered_with_vc"),
+        "unregistered.sh was indexed but is absent from the manifest: {vc_warnings}"
     );
 }

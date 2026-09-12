@@ -46,11 +46,13 @@ fn hit_test_maps_click_to_pane_and_scrolled_index() {
             area: Rect::new(0, 1, 30, 10),
             kind: RegionKind::Results,
             scroll: 5,
+            row_item_index: None,
         },
         ClickRegion {
             area: Rect::new(31, 1, 40, 6),
             kind: RegionKind::Deps,
             scroll: 0,
+            row_item_index: None,
         },
     ];
 
@@ -455,23 +457,128 @@ fn diff_view_escape_returns_to_detail_view() {
     assert_eq!(app.mode, ViewMode::Detail);
 }
 
+fn revision_row(revision_type: &str, timestamp: &str, physical_path: &str) -> Map<String, Value> {
+    let mut row = Map::new();
+    row.insert(
+        "logical_path".to_string(),
+        Value::String("/catalog/scripts/tool.py".to_string()),
+    );
+    row.insert(
+        "revision_type".to_string(),
+        Value::String(revision_type.to_string()),
+    );
+    row.insert("os_flavor".to_string(), Value::String("linux".to_string()));
+    row.insert("user".to_string(), Value::String(String::new()));
+    row.insert(
+        "timestamp".to_string(),
+        Value::String(timestamp.to_string()),
+    );
+    row.insert(
+        "physical_path".to_string(),
+        Value::String(physical_path.to_string()),
+    );
+    row
+}
+
 #[test]
-fn revisions_pane_scrolls_independently() {
+fn revisions_pane_moves_selection_with_j_and_k() {
+    // Selection replaced raw scroll for this pane — Up/Down move
+    // `revisions_selected` (clamped at the ends, matching Deps/Functions),
+    // not `revisions_scroll` directly; scroll only auto-follows once a frame
+    // is actually rendered (covered separately below).
     let db = super::make_test_db();
     let mut app = make_app(db.path());
     app.focus = Focus::Revisions;
+    app.checkouts = vec![
+        revision_row("DEVELOP", "20260910_091500", "/dev/tool_alice"),
+        revision_row("ARCHIVE", "20240921_135312", "/archive/tool_new"),
+        revision_row("ARCHIVE", "20240610", "/archive/tool_old"),
+    ];
+
+    assert_eq!(app.revisions_selected, 0);
 
     app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
         .unwrap();
-    assert_eq!(app.revisions_scroll, 1);
+    assert_eq!(app.revisions_selected, 1);
 
     app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
         .unwrap();
-    assert_eq!(app.revisions_scroll, 2);
+    assert_eq!(app.revisions_selected, 2);
 
-    app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE))
+    // Clamped at the last entry.
+    app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
         .unwrap();
-    assert_eq!(app.revisions_scroll, 0);
+    assert_eq!(app.revisions_selected, 2);
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.revisions_selected, 1);
+}
+
+#[test]
+fn revisions_pane_enter_diffs_against_the_selected_revision() {
+    use ratatui::{Terminal, backend::TestBackend};
+
+    let db = super::make_test_db();
+    let mut app = make_app(db.path());
+    app.focus = Focus::Revisions;
+    app.detail = Some(detail_row("/catalog/scripts/a.py"));
+    app.checkouts = vec![
+        revision_row("DEVELOP", "20260910_091500", "/dev/tool_alice"),
+        revision_row("ARCHIVE", "20240921_135312", "/archive/tool_new"),
+    ];
+    app.revisions_selected = 1;
+
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    terminal
+        .draw(|frame| super::render::draw(frame, &mut app))
+        .unwrap();
+
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+
+    assert_eq!(app.mode, ViewMode::DetailDiff);
+    assert!(app.detail_diff_loading);
+}
+
+#[test]
+fn revisions_pane_scrolls_to_keep_the_selection_visible() {
+    use ratatui::{Terminal, backend::TestBackend};
+
+    let db = super::make_test_db();
+    let mut app = make_app(db.path());
+    app.detail = Some(detail_row("/catalog/scripts/a.py"));
+    let total = 100;
+    app.checkouts = (0..total)
+        .map(|i| {
+            revision_row(
+                "ARCHIVE",
+                &format!("mark{i:04}"),
+                &format!("/archive/tool_{i:04}"),
+            )
+        })
+        .collect();
+    app.revisions_selected = total - 1;
+
+    // Tall enough that the Revisions pane (24% of the body's leftover
+    // height) gets more than a couple of rows to scroll within.
+    let mut terminal = Terminal::new(TestBackend::new(80, 150)).unwrap();
+    terminal
+        .draw(|frame| super::render::draw(frame, &mut app))
+        .unwrap();
+
+    let rendered: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(ratatui::buffer::Cell::symbol)
+        .collect();
+
+    // `format_revision_row` renders the timestamp, not physical_path — the
+    // marker embedded there is what's actually on screen.
+    assert!(rendered.contains(&format!("mark{:04}", total - 1)));
+    assert!(!rendered.contains("mark0000"));
 }
 
 #[test]
@@ -1448,10 +1555,13 @@ fn clicking_a_visible_result_does_not_shift_the_scroll_window() {
         .click_regions
         .iter()
         .find(|r| r.kind == RegionKind::Results)
-        .copied()
+        .cloned()
         .expect("results region recorded");
     let target_index = offset_before + 2;
-    let row = region.area.y + u16::try_from(target_index - region.scroll).unwrap();
+    // Results uses `row_item_index` (variable row heights) rather than
+    // `scroll`, so the offset to solve for `row` comes from the pane's own
+    // scroll state instead of `region.scroll` (always 0 here).
+    let row = region.area.y + u16::try_from(target_index - offset_before).unwrap();
     app.handle_left_click(region.area.x, row).unwrap();
     assert_eq!(app.selected, target_index);
 
@@ -1466,6 +1576,88 @@ fn clicking_a_visible_result_does_not_shift_the_scroll_window() {
         app.results_state.offset(),
         offset_before,
         "clicking a visible row should not shift the pane's scroll offset"
+    );
+}
+
+#[test]
+fn arrow_keys_move_past_a_symlinked_result_as_one_step() {
+    use ratatui::{Terminal, backend::TestBackend};
+
+    // A symlinked result renders as two screen rows (its `↳ target`
+    // sub-line), but Up/Down must still move `selected` by exactly one
+    // logical entry — selection is index-based (`move_selection`), never
+    // derived from rendered row count.
+    let db = super::make_test_db();
+    let mut app = make_app(db.path());
+
+    let mut rows = vec![detail_row("/scripts/before.sh")];
+    let mut symlink = detail_row("/scripts/prepare_release");
+    symlink.insert(
+        "symlink_target".to_string(),
+        Value::String("/scripts/prepare_release_20260729_140513".to_string()),
+    );
+    rows.push(symlink);
+    rows.push(detail_row("/scripts/after.sh"));
+    app.results = rows;
+    app.selected = 0;
+    app.results_state.select(Some(0));
+
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    terminal
+        .draw(|frame| super::render::draw(frame, &mut app))
+        .unwrap();
+
+    app.selected = move_selection(app.selected, app.results.len(), 1);
+    assert_eq!(
+        app.selected, 1,
+        "one Down step must land on the symlink entry"
+    );
+
+    app.selected = move_selection(app.selected, app.results.len(), 1);
+    assert_eq!(
+        app.selected, 2,
+        "the next Down step must land on after.sh, not skip or re-enter the symlink's second row"
+    );
+}
+
+#[test]
+fn clicking_a_symlinks_sub_line_selects_the_same_entry_as_its_path_line() {
+    use ratatui::{Terminal, backend::TestBackend};
+
+    let db = super::make_test_db();
+    let mut app = make_app(db.path());
+
+    let mut rows = vec![detail_row("/scripts/before.sh")];
+    let mut symlink = detail_row("/scripts/prepare_release");
+    symlink.insert(
+        "symlink_target".to_string(),
+        Value::String("/scripts/prepare_release_20260729_140513".to_string()),
+    );
+    rows.push(symlink);
+    rows.push(detail_row("/scripts/after.sh"));
+    app.results = rows;
+    app.selected = 0;
+    app.results_state.select(Some(0));
+
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    terminal
+        .draw(|frame| super::render::draw(frame, &mut app))
+        .unwrap();
+
+    let region = app
+        .click_regions
+        .iter()
+        .find(|r| r.kind == RegionKind::Results)
+        .cloned()
+        .expect("results region recorded");
+
+    // Row 0 is before.sh, row 1 is the symlink's path line, row 2 is its
+    // `↳ target` sub-line, row 3 is after.sh.
+    app.handle_left_click(region.area.x, region.area.y + 2)
+        .unwrap();
+    assert_eq!(
+        app.selected, 1,
+        "clicking the sub-line must select the symlink entry, not after.sh"
     );
 }
 
@@ -1516,7 +1708,7 @@ fn deps_pane_virtualizes_and_never_wraps_a_long_path() {
         .click_regions
         .iter()
         .find(|r| r.kind == RegionKind::Deps)
-        .copied()
+        .cloned()
         .expect("deps region recorded");
     let target_index = offset_before + 1;
     let row = region.area.y + u16::try_from(target_index - region.scroll).unwrap();

@@ -10,7 +10,7 @@
 /// kinds from indexed revision rows.
 use scat_core::core::db::create_db;
 use scat_core::core::vc::{
-    REVISION_TYPE_ARCHIVE, REVISION_TYPE_DEVELOP, VcConfig, infer_warnings,
+    REVISION_TYPE_ARCHIVE, REVISION_TYPE_DEVELOP, REVISION_TYPE_ROLLBACK, VcConfig, infer_warnings,
     parse_checkout_filename, scan_checkouts,
 };
 use tempfile::NamedTempFile;
@@ -131,6 +131,60 @@ fn scan_checkouts_finds_develop_at_scan_root_level() {
 }
 
 #[test]
+fn scan_checkouts_skips_hidden_checkout_metadata_file() {
+    // vc drops a hidden companion file next to every DEVELOP checkout —
+    // `.<checkout-filename>` — recording the stat value and canonical
+    // original-version path it was checked out from. It must not surface as
+    // a second, bogus checkout of a script named `.deploy`.
+    let dir = tempfile::TempDir::new().unwrap();
+    let scan_root = dir.path().join("linux").join("scripts");
+    let develop = scan_root.join("DEVELOP");
+    std::fs::create_dir_all(&develop).unwrap();
+
+    touch_checkout(&develop, "deploy_20240315_1430_jdoe");
+    touch_checkout(&develop, ".deploy_20240315_1430_jdoe");
+
+    let config = make_config(&scan_root);
+    let records = scan_checkouts(&config);
+
+    assert_eq!(
+        records.len(),
+        1,
+        "the hidden companion file must not be recorded as its own checkout"
+    );
+    assert_eq!(
+        records[0].logical_path,
+        scan_root.join("deploy").to_string_lossy()
+    );
+}
+
+#[test]
+fn scan_checkouts_skips_merge_conflict_backup_and_merged_files() {
+    // When the live target changed during a checkout, vc runs a merge and
+    // leaves a `.org` backup of the pre-merge checkout (and, transiently, a
+    // `.merged` file) alongside the real checkout. Neither is a second,
+    // independent checkout by a user named "jdoe.org"/"jdoe.merged".
+    let dir = tempfile::TempDir::new().unwrap();
+    let scan_root = dir.path().join("linux").join("scripts");
+    let develop = scan_root.join("DEVELOP");
+    std::fs::create_dir_all(&develop).unwrap();
+
+    touch_checkout(&develop, "deploy_20240315_1430_jdoe");
+    touch_checkout(&develop, "deploy_20240315_1430_jdoe.org");
+    touch_checkout(&develop, "deploy_20240315_1430_jdoe.merged");
+
+    let config = make_config(&scan_root);
+    let records = scan_checkouts(&config);
+
+    assert_eq!(
+        records.len(),
+        1,
+        "the .org backup and .merged file must not be recorded as their own checkouts"
+    );
+    assert_eq!(records[0].user, "jdoe");
+}
+
+#[test]
 fn scan_checkouts_records_user_timestamp_and_os_flavor() {
     let dir = tempfile::TempDir::new().unwrap();
     let scan_root = dir.path().join("linux").join("scripts");
@@ -148,6 +202,68 @@ fn scan_checkouts_records_user_timestamp_and_os_flavor() {
     assert_eq!(records[0].revision_type, REVISION_TYPE_DEVELOP);
     // os_flavor is derived from the parent directory of the scan_root
     assert_eq!(records[0].os_flavor, "linux");
+}
+
+#[test]
+fn scan_checkouts_reclassifies_rollback_displaced_develop_entry() {
+    // A rollback moves the version it displaces into DEVELOP as
+    // `<script>_<timestamp>_RB_<abbr>` rather than deleting it — that must not
+    // be counted as an active in-progress checkout by a user named "RB_abcd".
+    let dir = tempfile::TempDir::new().unwrap();
+    let scan_root = dir.path().join("linux").join("scripts");
+    let develop = scan_root.join("DEVELOP");
+    std::fs::create_dir_all(&develop).unwrap();
+
+    touch_checkout(&develop, "deploy_20260910_120000_RB_abcd");
+
+    let config = make_config(&scan_root);
+    let records = scan_checkouts(&config);
+
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].revision_type, REVISION_TYPE_ROLLBACK);
+    assert_eq!(
+        records[0].user, "abcd",
+        "the RB_ marker must be stripped, leaving the real abbreviation"
+    );
+    assert_eq!(records[0].timestamp, "20260910_120000");
+}
+
+#[test]
+fn scan_checkouts_does_not_reclassify_a_genuine_user_named_rb() {
+    // A real checkout whose abbreviation happens to start with "rb" (not the
+    // uppercase "RB_" marker) must still be treated as an ordinary checkout.
+    let dir = tempfile::TempDir::new().unwrap();
+    let scan_root = dir.path().join("linux").join("scripts");
+    let develop = scan_root.join("DEVELOP");
+    std::fs::create_dir_all(&develop).unwrap();
+
+    touch_checkout(&develop, "deploy_20260910_120000_rballoy");
+
+    let config = make_config(&scan_root);
+    let records = scan_checkouts(&config);
+
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].revision_type, REVISION_TYPE_DEVELOP);
+    assert_eq!(records[0].user, "rballoy");
+}
+
+#[test]
+fn scan_checkouts_does_not_reclassify_bare_rb_marker_with_no_abbreviation() {
+    // "RB_" with nothing after it isn't a real rollback marker (there's no
+    // abbreviation left once stripped), so it's left as an ordinary checkout.
+    let dir = tempfile::TempDir::new().unwrap();
+    let scan_root = dir.path().join("linux").join("scripts");
+    let develop = scan_root.join("DEVELOP");
+    std::fs::create_dir_all(&develop).unwrap();
+
+    touch_checkout(&develop, "deploy_20260910_120000_RB_");
+
+    let config = make_config(&scan_root);
+    let records = scan_checkouts(&config);
+
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].revision_type, REVISION_TYPE_DEVELOP);
+    assert_eq!(records[0].user, "RB_");
 }
 
 #[test]
@@ -568,6 +684,69 @@ fn infer_no_timestamp_drift_when_checkout_newer_than_script() {
 }
 
 // ---------------------------------------------------------------------------
+// infer_warnings – scripttype_language_mismatch
+// ---------------------------------------------------------------------------
+
+#[test]
+fn infer_warns_scripttype_language_mismatch() {
+    let (conn, _db) = make_warning_db();
+    conn.execute(
+        "INSERT INTO scripts (logical_path, language, metadata_json)
+         VALUES ('/catalog/scripts/tool.py', 'python', '{\"scripttype\":\"shell\"}')",
+        [],
+    )
+    .unwrap();
+
+    let warnings = infer_warnings(&conn).unwrap();
+    let warning = warnings
+        .iter()
+        .find(|w| w.kind == "scripttype_language_mismatch")
+        .expect("expected a scripttype_language_mismatch warning");
+    assert_eq!(warning.details.get("declared_scripttype").unwrap(), "shell");
+    assert_eq!(warning.details.get("detected_language").unwrap(), "python");
+}
+
+#[test]
+fn infer_no_scripttype_warning_when_declared_matches_detected() {
+    let (conn, _db) = make_warning_db();
+    conn.execute(
+        "INSERT INTO scripts (logical_path, language, metadata_json)
+         VALUES ('/catalog/scripts/tool.py', 'python', '{\"scripttype\":\"python\"}')",
+        [],
+    )
+    .unwrap();
+
+    let warnings = infer_warnings(&conn).unwrap();
+    assert!(
+        !warnings
+            .iter()
+            .any(|w| w.kind == "scripttype_language_mismatch"),
+        "should NOT warn when @scripttype agrees with the detected language"
+    );
+}
+
+#[test]
+fn infer_no_scripttype_warning_for_unrecognized_taxonomy() {
+    // "utility" isn't a language token scat recognizes, so it must not be
+    // guessed at — no comparison, no false positive.
+    let (conn, _db) = make_warning_db();
+    conn.execute(
+        "INSERT INTO scripts (logical_path, language, metadata_json)
+         VALUES ('/catalog/scripts/tool.py', 'python', '{\"scripttype\":\"utility\"}')",
+        [],
+    )
+    .unwrap();
+
+    let warnings = infer_warnings(&conn).unwrap();
+    assert!(
+        !warnings
+            .iter()
+            .any(|w| w.kind == "scripttype_language_mismatch"),
+        "should NOT warn on an unrecognized @scripttype taxonomy"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // infer_warnings – self_referential_symlink
 // ---------------------------------------------------------------------------
 
@@ -708,5 +887,84 @@ fn infer_no_missing_archive_warning_when_archive_revision_exists() {
     assert!(
         !warnings.iter().any(|w| w.kind == "missing_archive_entries"),
         "should NOT warn when archive entry exists"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// infer_manifest_warnings – managed-file manifest cross-reference
+// ---------------------------------------------------------------------------
+
+#[test]
+fn infer_manifest_warnings_flags_entry_registered_but_not_indexed() {
+    let (conn, _db) = make_warning_db();
+    insert_script(&conn, "/catalog/scripts/tool.py", 0.0, None);
+
+    let manifest: std::collections::HashSet<String> = [
+        "/catalog/scripts/tool.py".to_string(),
+        "/catalog/scripts/missing.sh".to_string(),
+    ]
+    .into_iter()
+    .collect();
+
+    let warnings = scat_core::core::vc::infer_manifest_warnings(&conn, &manifest).unwrap();
+
+    assert_eq!(
+        warnings
+            .iter()
+            .filter(|w| w.kind == "registered_with_vc_but_not_indexed")
+            .count(),
+        1
+    );
+    let missing = warnings
+        .iter()
+        .find(|w| w.kind == "registered_with_vc_but_not_indexed")
+        .unwrap();
+    assert_eq!(missing.logical_path, "/catalog/scripts/missing.sh");
+
+    // tool.py is registered AND indexed — must not appear in either warning kind.
+    assert!(
+        !warnings
+            .iter()
+            .any(|w| w.logical_path == "/catalog/scripts/tool.py")
+    );
+}
+
+#[test]
+fn infer_manifest_warnings_flags_indexed_entry_not_registered() {
+    let (conn, _db) = make_warning_db();
+    insert_script(&conn, "/catalog/scripts/tool.py", 0.0, None);
+    insert_script(&conn, "/catalog/scripts/unregistered.sh", 0.0, None);
+
+    let manifest: std::collections::HashSet<String> = ["/catalog/scripts/tool.py".to_string()]
+        .into_iter()
+        .collect();
+
+    let warnings = scat_core::core::vc::infer_manifest_warnings(&conn, &manifest).unwrap();
+
+    assert_eq!(
+        warnings
+            .iter()
+            .filter(|w| w.kind == "not_registered_with_vc")
+            .count(),
+        1
+    );
+    let extra = warnings
+        .iter()
+        .find(|w| w.kind == "not_registered_with_vc")
+        .unwrap();
+    assert_eq!(extra.logical_path, "/catalog/scripts/unregistered.sh");
+}
+
+#[test]
+fn infer_manifest_warnings_empty_manifest_produces_no_warnings() {
+    let (conn, _db) = make_warning_db();
+    insert_script(&conn, "/catalog/scripts/tool.py", 0.0, None);
+
+    let warnings =
+        scat_core::core::vc::infer_manifest_warnings(&conn, &std::collections::HashSet::new())
+            .unwrap();
+    assert!(
+        warnings.is_empty(),
+        "an unconfigured/unreadable manifest must produce no warnings, not false positives"
     );
 }

@@ -1,5 +1,12 @@
 //! The Revisions pane: DEVELOP/WORKING/ARCHIVE checkout history, grouped and
 //! marked with the version the script's symlink currently resolves to.
+//!
+//! Unlike the other list panes (Deps, Functions), this one is rendered as a
+//! wrapped `Paragraph` rather than a `List` — headers and blank-line group
+//! separators are baked into the same text block as the entries. Selection
+//! (`app.revisions_selected`, an index into `app.checkouts`) is layered on
+//! top: [`revision_lines`] reports which rendered line the selected entry
+//! landed on, and `draw_revisions` scrolls that line into view.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -29,20 +36,29 @@ pub(super) fn draw_revisions(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect
         return;
     }
 
-    let lines = if app.checkouts.is_empty() {
-        vec![Line::from(Span::styled(
-            "No revision data.",
-            Style::default().fg(Color::DarkGray),
-        ))]
+    let (lines, selected_line) = if app.checkouts.is_empty() {
+        (
+            vec![Line::from(Span::styled(
+                "No revision data.",
+                Style::default().fg(Color::DarkGray),
+            ))],
+            None,
+        )
     } else {
+        app.revisions_selected = app.revisions_selected.min(app.checkouts.len() - 1);
         let active = app
             .detail
             .as_ref()
             .map(ScriptView::new)
             .map(|view| view.symlink_target().to_string())
             .unwrap_or_default();
-        revision_lines(&app.checkouts, &active)
+        let selected_physical_path =
+            str_field(&app.checkouts[app.revisions_selected], "physical_path");
+        revision_lines(&app.checkouts, &active, &selected_physical_path)
     };
+    if let Some(selected_line) = selected_line {
+        ensure_line_visible(&mut app.revisions_scroll, selected_line, area);
+    }
     clamp_scroll_offset(&mut app.revisions_scroll, lines.len(), area);
     let title = format!(
         "Revisions (line {})",
@@ -62,6 +78,21 @@ pub(super) fn draw_revisions(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect
     );
 }
 
+/// Scroll the minimal amount to bring rendered line `line_index` into the
+/// pane's visible window — same "keep visible, don't otherwise move" rule
+/// `scroll_window` applies to the item-based panes, adapted to raw line
+/// scrolling since this pane wraps text rather than listing discrete items.
+fn ensure_line_visible(scroll: &mut u16, line_index: usize, area: Rect) {
+    let inner_height = usize::from(area.height.saturating_sub(2)).max(1);
+    let current = usize::from(*scroll);
+    if line_index < current {
+        *scroll = u16::try_from(line_index).unwrap_or(u16::MAX);
+    } else if line_index >= current + inner_height {
+        let target = line_index + 1 - inner_height;
+        *scroll = u16::try_from(target).unwrap_or(u16::MAX);
+    }
+}
+
 /// Render the revisions pane, grouped by revision type.
 ///
 /// `active_target` is the script's `symlink_target`; the WORKING revision it
@@ -69,23 +100,78 @@ pub(super) fn draw_revisions(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect
 /// actually active is not implied by their order — a rollback re-points the
 /// symlink at an older version and leaves the newer ones in place, so the
 /// group can hold versions both older and newer than the live one.
-fn revision_lines(revisions: &[JsonRow], active_target: &str) -> Vec<Line<'static>> {
+///
+/// Returns the lines to render, plus the index of the line matching
+/// `selected_physical_path` (for `draw_revisions` to scroll into view), if
+/// any row matched.
+fn revision_lines(
+    revisions: &[JsonRow],
+    active_target: &str,
+    selected_physical_path: &str,
+) -> (Vec<Line<'static>>, Option<usize>) {
     let mut lines = Vec::new();
-    append_revision_group(&mut lines, "DEVELOP", revisions, active_target);
+    let mut selected_line = None;
+    append_revision_group(
+        &mut lines,
+        "DEVELOP",
+        revisions,
+        active_target,
+        selected_physical_path,
+        &mut selected_line,
+    );
+    // A rollback moved this version into DEVELOP as a re-editable candidate
+    // rather than someone checking it out to edit — shown separately so it
+    // doesn't read as an in-progress checkout. Unlike DEVELOP/WORKING/ARCHIVE
+    // this group is rare, so it's omitted entirely rather than always shown
+    // with a "(no rollback entries.)" placeholder.
+    let rollback_rows = revisions
+        .iter()
+        .filter(|row| str_field(row, "revision_type") == "ROLLBACK")
+        .collect::<Vec<_>>();
+    if !rollback_rows.is_empty() {
+        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::styled(
+            "ROLLBACK",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        )));
+        for row in rollback_rows {
+            push_revision_row(
+                &mut lines,
+                row,
+                active_target,
+                selected_physical_path,
+                &mut selected_line,
+            );
+        }
+    }
     lines.push(Line::raw(""));
     // Between DEVELOP and ARCHIVE: newer than anything archived, not a
     // checkout. Without a group of its own this lands under "OTHER", which is
     // where every working-directory version copy used to be filed.
-    append_revision_group(&mut lines, "WORKING", revisions, active_target);
+    append_revision_group(
+        &mut lines,
+        "WORKING",
+        revisions,
+        active_target,
+        selected_physical_path,
+        &mut selected_line,
+    );
     lines.push(Line::raw(""));
-    append_revision_group(&mut lines, "ARCHIVE", revisions, active_target);
+    append_revision_group(
+        &mut lines,
+        "ARCHIVE",
+        revisions,
+        active_target,
+        selected_physical_path,
+        &mut selected_line,
+    );
     let other_rows = revisions
         .iter()
         .filter(|row| {
             let revision_type = str_field(row, "revision_type");
             !matches!(
                 revision_type.as_str(),
-                "" | "DEVELOP" | "WORKING" | "ARCHIVE"
+                "" | "DEVELOP" | "ROLLBACK" | "WORKING" | "ARCHIVE"
             )
         })
         .collect::<Vec<_>>();
@@ -98,17 +184,26 @@ fn revision_lines(revisions: &[JsonRow], active_target: &str) -> Vec<Line<'stati
                 .add_modifier(Modifier::BOLD),
         )));
         for row in other_rows {
-            lines.push(Line::raw(format_revision_row(row, "")));
+            push_revision_row(
+                &mut lines,
+                row,
+                "",
+                selected_physical_path,
+                &mut selected_line,
+            );
         }
     }
-    lines
+    (lines, selected_line)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn append_revision_group(
     lines: &mut Vec<Line<'static>>,
     revision_type: &str,
     revisions: &[JsonRow],
     active_target: &str,
+    selected_physical_path: &str,
+    selected_line: &mut Option<usize>,
 ) {
     let badge_style = match revision_type {
         "DEVELOP" => Style::default()
@@ -134,7 +229,13 @@ fn append_revision_group(
         if row_revision_type == revision_type
             || (revision_type == "DEVELOP" && row_revision_type.is_empty())
         {
-            lines.push(Line::raw(format_revision_row(row, active_target)));
+            push_revision_row(
+                lines,
+                row,
+                active_target,
+                selected_physical_path,
+                selected_line,
+            );
             found = true;
         }
     }
@@ -147,7 +248,24 @@ fn append_revision_group(
     }
 }
 
-fn format_revision_row(row: &JsonRow, active_target: &str) -> String {
+/// Push one revision's rendered line, recording its index in `selected_line`
+/// when it's the currently selected entry.
+fn push_revision_row(
+    lines: &mut Vec<Line<'static>>,
+    row: &JsonRow,
+    active_target: &str,
+    selected_physical_path: &str,
+    selected_line: &mut Option<usize>,
+) {
+    let is_selected = !selected_physical_path.is_empty()
+        && str_field(row, "physical_path") == selected_physical_path;
+    if is_selected {
+        *selected_line = Some(lines.len());
+    }
+    lines.push(format_revision_row(row, active_target, is_selected));
+}
+
+fn format_revision_row(row: &JsonRow, active_target: &str, selected: bool) -> Line<'static> {
     let os = str_field(row, "os_flavor");
     let user = str_field(row, "user");
     let timestamp = str_field(row, "timestamp");
@@ -161,7 +279,15 @@ fn format_revision_row(row: &JsonRow, active_target: &str) -> String {
     } else {
         ""
     };
-    format!("  {os:<7} {user:<12} {timestamp}{age_suffix}{active}")
+    let text = format!("  {os:<7} {user:<12} {timestamp}{age_suffix}{active}");
+    if selected {
+        Line::from(Span::styled(
+            text,
+            Style::default().add_modifier(Modifier::REVERSED),
+        ))
+    } else {
+        Line::raw(text)
+    }
 }
 
 /// Whether this revision is the version the script's symlink resolves to.
@@ -216,11 +342,12 @@ mod tests {
 
     #[test]
     fn revision_lines_group_develop_and_archive_rows() {
-        let lines = revision_lines(
+        let (lines, _) = revision_lines(
             &[
                 revision_row("DEVELOP", "LINUX", "alice", "20240102_1200"),
                 revision_row("ARCHIVE", "ZOS", "bob", "20231231_0900"),
             ],
+            "",
             "",
         );
 
@@ -244,8 +371,9 @@ mod tests {
     fn revision_lines_give_working_versions_their_own_group() {
         // Working-directory version copies used to land under "OTHER"; they
         // are the common case for a vc-managed script, not an oddity.
-        let lines = revision_lines(
+        let (lines, _) = revision_lines(
             &[revision_row("WORKING", "LINUX", "", "20260701_105550")],
+            "",
             "",
         );
 
@@ -265,16 +393,56 @@ mod tests {
     }
 
     #[test]
+    fn revision_lines_give_rollback_entries_their_own_group() {
+        // A rollback-displaced version must not read as an in-progress
+        // checkout, so it gets its own labeled group rather than sitting
+        // among ordinary DEVELOP rows or falling through to OTHER.
+        let (lines, _) = revision_lines(
+            &[revision_row("ROLLBACK", "LINUX", "abcd", "20260910_120000")],
+            "",
+            "",
+        );
+
+        let texts: Vec<String> = lines.iter().map(line_text).collect();
+        assert!(texts.iter().any(|t| t == "ROLLBACK"), "{texts:?}");
+        assert!(
+            !texts.iter().any(|t| t == "OTHER"),
+            "a ROLLBACK row must not fall through to OTHER: {texts:?}"
+        );
+        let rollback_at = texts.iter().position(|t| t == "ROLLBACK").unwrap();
+        let develop_at = texts.iter().position(|t| t == "DEVELOP").unwrap();
+        assert!(
+            develop_at < rollback_at,
+            "ROLLBACK belongs after DEVELOP: {texts:?}"
+        );
+    }
+
+    #[test]
+    fn revision_lines_omit_rollback_group_when_no_rollback_entries() {
+        // Unlike DEVELOP/WORKING/ARCHIVE, ROLLBACK is rare — no placeholder
+        // line when there's nothing to show.
+        let (lines, _) = revision_lines(
+            &[revision_row("DEVELOP", "LINUX", "alice", "20240102_1200")],
+            "",
+            "",
+        );
+
+        let texts: Vec<String> = lines.iter().map(line_text).collect();
+        assert!(!texts.iter().any(|t| t == "ROLLBACK"), "{texts:?}");
+    }
+
+    #[test]
     fn revision_lines_mark_the_version_the_symlink_points_at() {
         // Order does not imply which version is live: a rollback re-points the
         // symlink at an older version and leaves the newer one in place, so
         // here the *older* of the two is the active one.
-        let lines = revision_lines(
+        let (lines, _) = revision_lines(
             &[
                 revision_row("WORKING", "LINUX", "", "20260729_140513"),
                 revision_row("WORKING", "LINUX", "", "20260701_105550"),
             ],
             "/catalog/scripts/tool_20260701_105550",
+            "",
         );
 
         let texts: Vec<String> = lines.iter().map(line_text).collect();
@@ -285,11 +453,41 @@ mod tests {
 
     #[test]
     fn revision_lines_mark_nothing_when_the_script_is_not_a_symlink() {
-        let lines = revision_lines(
+        let (lines, _) = revision_lines(
             &[revision_row("WORKING", "LINUX", "", "20260701_105550")],
+            "",
             "",
         );
         let texts: Vec<String> = lines.iter().map(line_text).collect();
         assert!(!texts.iter().any(|t| t.contains("← active")), "{texts:?}");
+    }
+
+    #[test]
+    fn revision_lines_reports_the_selected_rows_line_index() {
+        let (lines, selected_line) = revision_lines(
+            &[
+                revision_row("DEVELOP", "LINUX", "alice", "20240102_1200"),
+                revision_row("ARCHIVE", "ZOS", "bob", "20231231_0900"),
+            ],
+            "",
+            "/srv/scripts/tool_20231231_0900",
+        );
+
+        let selected_line = selected_line.expect("a row matched the selected physical_path");
+        assert!(
+            line_text(&lines[selected_line]).contains("20231231_0900"),
+            "line {selected_line} should be the ARCHIVE/bob row: {:?}",
+            line_text(&lines[selected_line])
+        );
+    }
+
+    #[test]
+    fn revision_lines_selected_line_is_none_when_nothing_matches() {
+        let (_, selected_line) = revision_lines(
+            &[revision_row("DEVELOP", "LINUX", "alice", "20240102_1200")],
+            "",
+            "/no/such/path",
+        );
+        assert_eq!(selected_line, None);
     }
 }

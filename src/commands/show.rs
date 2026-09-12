@@ -4,8 +4,9 @@ use scat_core::core::vc::{compare_revision_rows, relative_age};
 
 use crate::cli::OutputFormat;
 use crate::output::{
-    dash_or_empty, dep_entry_to_json, json_script_field, list_field_display, mtime_field,
-    print_json, render_table, sibling_row_to_json, size_field, str_field, used_by_row_to_json,
+    block_field_display, dash_or_empty, dep_entry_to_json, json_script_field, list_field_display,
+    mtime_field, print_json, render_table, sibling_row_to_json, size_field, str_field,
+    used_by_row_to_json,
 };
 
 const DEFAULT_SHOW_FIELDS: &[&str] = &[
@@ -95,6 +96,10 @@ pub fn cmd_show(
         let siblings = needs_siblings
             .then(|| api.siblings(resolved_path))
             .transpose()?;
+        let needs_linked_by = effective.contains(&"linked_by");
+        let linked_by = needs_linked_by
+            .then(|| api.symlinks_to(resolved_path))
+            .transpose()?;
 
         let mut out = scat_core::core::db::JsonRow::new();
         // Always include path as the record identifier, mirroring how the table
@@ -136,6 +141,21 @@ pub fn cmd_show(
                     let contribs = view.contributors();
                     out.insert("contributors".to_string(), serde_json::json!(contribs));
                 }
+                "linked_by" => {
+                    let rows: Vec<serde_json::Value> = linked_by
+                        .as_ref()
+                        .map(|rows| rows.iter().map(sibling_row_to_json).collect())
+                        .unwrap_or_default();
+                    out.insert("linked_by".to_string(), serde_json::json!(rows));
+                }
+                "usage" | "description" => {
+                    let value = view
+                        .metadata()
+                        .get(field)
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string);
+                    out.insert(field.to_string(), serde_json::json!(value));
+                }
                 _ => {
                     out.entry(field.to_string())
                         .or_insert_with(|| json_script_field(view, field));
@@ -164,6 +184,10 @@ pub fn cmd_show(
     let siblings = needs_siblings
         .then(|| api.siblings(resolved_path))
         .transpose()?;
+    let needs_linked_by = effective.contains(&"linked_by");
+    let linked_by = needs_linked_by
+        .then(|| api.symlinks_to(resolved_path))
+        .transpose()?;
 
     for field in &effective {
         match *field {
@@ -174,6 +198,15 @@ pub fn cmd_show(
             "size" => println!("  Size         : {}", size_field(view)),
             "indexed" => println!("  Indexed      : {}", dash_or_empty(view.indexed_at())),
             "symlink" => println!("  Symlink      : {}", dash_or_empty(view.symlink_target())),
+            "linked_by" => {
+                let paths = linked_by.as_deref().unwrap_or_default();
+                let joined = paths
+                    .iter()
+                    .map(|row| ScriptView::new(row).logical_path())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                println!("  Linked by    : {}", dash_or_empty(&joined));
+            }
             "uses" => {
                 if let Some(g) = &graph {
                     println!("  Uses         : {}", g.uses.len());
@@ -209,6 +242,11 @@ pub fn cmd_show(
                 let contribs = view.contributors();
                 println!("  Contributors : {}", contribs.join(", "));
             }
+            "usage" => println!("  Usage        : {}", block_field_display(view, "usage")),
+            "description" => println!(
+                "  Description  : {}",
+                block_field_display(view, "description")
+            ),
             unknown => eprintln!("warning: unknown field '{unknown}'"),
         }
     }

@@ -360,7 +360,10 @@ fn scan_does_not_follow_symlinks_outside_scan_roots() {
 }
 
 #[test]
-fn scan_follows_symlinks_within_scan_roots() {
+fn scan_dedupes_symlinked_directory_within_scan_root() {
+    // `alt` is a symlink to `linux` — an `alt/scripts → linux/scripts`
+    // OS-variant pattern, nested inside a single scan root. tool.py must be
+    // indexed once, not once per path it's reachable through.
     let root = tempfile::TempDir::new().unwrap();
     let real = root.path().join("linux");
     std::fs::create_dir(&real).unwrap();
@@ -370,8 +373,36 @@ fn scan_follows_symlinks_within_scan_roots() {
     let shutdown = AtomicBool::new(false);
     let records = scan_paths(&[root.path().to_path_buf()], 5, &[], &[], None, &shutdown).unwrap();
 
-    // Both the real path and the in-root symlink alias are indexed.
-    assert_eq!(records.len(), 2);
+    assert_eq!(
+        records.len(),
+        1,
+        "tool.py is reachable via both linux/ and its alt/ alias, but must be indexed once"
+    );
+}
+
+#[test]
+fn scan_dedupes_symlinked_scan_root_alias() {
+    // Same OS-variant pattern, but this time the symlink IS one of the
+    // configured scan roots (rather than a directory nested inside one) —
+    // mirrors `scan_checkouts_deduplicates_symlinked_scan_roots`.
+    let dir = tempfile::TempDir::new().unwrap();
+    let linux_scripts = dir.path().join("linux").join("scripts");
+    std::fs::create_dir_all(&linux_scripts).unwrap();
+    std::fs::write(linux_scripts.join("tool.py"), "# python").unwrap();
+
+    let alt = dir.path().join("alt");
+    std::fs::create_dir_all(&alt).unwrap();
+    std::os::unix::fs::symlink(&linux_scripts, alt.join("scripts")).unwrap();
+    let alt_scripts = alt.join("scripts");
+
+    let shutdown = AtomicBool::new(false);
+    let records = scan_paths(&[linux_scripts, alt_scripts], 5, &[], &[], None, &shutdown).unwrap();
+
+    assert_eq!(
+        records.len(),
+        1,
+        "linux/scripts and alt/scripts alias the same directory and must be indexed once"
+    );
 }
 
 #[test]

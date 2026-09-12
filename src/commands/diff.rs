@@ -1,27 +1,64 @@
 use anyhow::{Context, Result};
 use scat_core::core::diff::{
-    ScriptDiffResult, diff_catalog_vs_checkout, diff_catalog_vs_file, diff_files, render_diff_text,
+    ScriptDiffResult, diff_catalog_vs_checkout, diff_catalog_vs_file, diff_catalog_vs_revision,
+    diff_files, render_diff_text, select_revision,
 };
 use scat_core::core::search::{CatalogDiff, compare_catalogs};
 
 use crate::output::print_json;
 
-/// `scat diff /catalog/foo.py` or `scat diff /catalog/foo.py --against <file>`
+/// `scat diff /catalog/foo.py`, `scat diff /catalog/foo.py --against <file>`,
+/// or `scat diff /catalog/foo.py --revision-type <type> [--revision-user
+/// <user>] [--revision-timestamp <ts>]`.
+#[allow(clippy::too_many_arguments)]
 pub fn cmd_script_diff_catalog(
     api: &scat_core::core::search::SearchApi,
     logical_path: &str,
     against: Option<&std::path::Path>,
+    revision_type: Option<&str>,
+    revision_user: Option<&str>,
+    revision_timestamp: Option<&str>,
     json: bool,
 ) -> Result<()> {
-    let result = if let Some(file) = against {
-        diff_catalog_vs_file(&api.conn, logical_path, file)
-    } else {
-        diff_catalog_vs_checkout(&api.conn, logical_path)
-    }
+    let result = diff_result(
+        api,
+        logical_path,
+        against,
+        revision_type,
+        revision_user,
+        revision_timestamp,
+    )
     .with_context(|| format!("Script diff failed for '{logical_path}'"))?;
 
     print_script_diff(&result, json);
     Ok(())
+}
+
+fn diff_result(
+    api: &scat_core::core::search::SearchApi,
+    logical_path: &str,
+    against: Option<&std::path::Path>,
+    revision_type: Option<&str>,
+    revision_user: Option<&str>,
+    revision_timestamp: Option<&str>,
+) -> scat_core::error::Result<ScriptDiffResult> {
+    if let Some(file) = against {
+        return diff_catalog_vs_file(&api.conn, logical_path, file);
+    }
+    if let Some(revision_type) = revision_type {
+        let revisions = api.revisions_for(logical_path)?;
+        let picked = select_revision(&revisions, revision_type, revision_user, revision_timestamp)?;
+        let physical_path = picked
+            .get("physical_path")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        return diff_catalog_vs_revision(
+            &api.conn,
+            logical_path,
+            std::path::Path::new(physical_path),
+        );
+    }
+    diff_catalog_vs_checkout(&api.conn, logical_path)
 }
 
 /// `scat diff --old <file> --new <file>`

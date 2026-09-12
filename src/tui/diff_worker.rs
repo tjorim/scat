@@ -5,11 +5,16 @@ use std::thread::{self, JoinHandle};
 use anyhow::{Context, Result, anyhow};
 
 use scat_core::core::db::open_db;
-use scat_core::core::diff::{diff_catalog_vs_checkout, render_diff_text};
+use scat_core::core::diff::{diff_catalog_vs_checkout, diff_catalog_vs_revision, render_diff_text};
 
 pub struct DiffRequest {
     pub id: u64,
     pub path: String,
+    /// When set, diff against this specific revision's physical file
+    /// instead of the most-recent DEVELOP checkout — the Revisions pane's
+    /// Enter key sets this to whichever entry is selected there, reaching
+    /// ARCHIVE/WORKING/ROLLBACK revisions the default (`None`) never does.
+    pub revision_physical_path: Option<String>,
 }
 
 pub struct DiffResponse {
@@ -75,7 +80,11 @@ fn worker_loop(
         while let Ok(next) = request_rx.try_recv() {
             request = next;
         }
-        let output = compute_diff(&db_path, &request.path);
+        let output = compute_diff(
+            &db_path,
+            &request.path,
+            request.revision_physical_path.as_deref(),
+        );
         if response_tx
             .send(DiffResponse {
                 id: request.id,
@@ -88,11 +97,21 @@ fn worker_loop(
     }
 }
 
-fn compute_diff(db_path: &Path, logical_path: &str) -> String {
+fn compute_diff(
+    db_path: &Path,
+    logical_path: &str,
+    revision_physical_path: Option<&str>,
+) -> String {
     match open_db(db_path)
         .map_err(anyhow::Error::from)
         .and_then(|conn| {
-            diff_catalog_vs_checkout(&conn, logical_path)
+            let result = match revision_physical_path {
+                Some(physical_path) => {
+                    diff_catalog_vs_revision(&conn, logical_path, Path::new(physical_path))
+                }
+                None => diff_catalog_vs_checkout(&conn, logical_path),
+            };
+            result
                 .map(|result| render_diff_text(&result))
                 .map_err(anyhow::Error::from)
         }) {
@@ -129,6 +148,7 @@ mod tests {
             .send(DiffRequest {
                 id: 1,
                 path: "/catalog/scripts/missing.py".to_string(),
+                revision_physical_path: None,
             })
             .unwrap();
         let response = recv_response(&worker);

@@ -472,6 +472,17 @@ pub fn list_field_display(view: ScriptView, field: ListField) -> String {
     }
 }
 
+/// Display a multi-line `metadata_json` field (`usage`, `description`) as a
+/// single compact line — the raw newlines survive intact in JSON output via
+/// `view.metadata()` directly; this is only for the table/text view, where
+/// every other field is exactly one line.
+pub fn block_field_display(view: ScriptView, field: &str) -> String {
+    match view.metadata().get(field).and_then(|v| v.as_str()) {
+        Some(value) if !value.is_empty() => value.lines().collect::<Vec<_>>().join(" / "),
+        _ => "—".to_string(),
+    }
+}
+
 pub fn mtime_field(view: ScriptView) -> String {
     let secs = match view.mtime() {
         Some(s) => s,
@@ -514,6 +525,29 @@ mod tests {
             csv,
             "path,owner,purpose\n/catalog/scripts/checkmc.py,\"Alice, Inc.\",\"Checks \"\"mc\"\"\nquickly\"\n"
         );
+    }
+
+    #[test]
+    fn block_field_display_joins_multiline_metadata_with_slashes() {
+        let mut row = sample_row();
+        row.insert(
+            "metadata_json".into(),
+            json!({"usage": "./run.sh <arg>\n  arg: description"})
+                .to_string()
+                .into(),
+        );
+        let view = ScriptView::new(&row);
+        assert_eq!(
+            block_field_display(view, "usage"),
+            "./run.sh <arg> /   arg: description"
+        );
+    }
+
+    #[test]
+    fn block_field_display_dashes_when_absent() {
+        let row = sample_row();
+        let view = ScriptView::new(&row);
+        assert_eq!(block_field_display(view, "usage"), "—");
     }
 
     #[test]

@@ -105,7 +105,11 @@ fn draw_browse_fullscreen(frame: &mut Frame<'_>, app: &mut TuiApp) {
         }
         Focus::Results => {
             draw_results(frame, app, pane);
-            app.record_region(pane, RegionKind::Results, app.results_state.offset());
+            app.record_region_with_row_index(
+                pane,
+                RegionKind::Results,
+                app.results_row_index.clone(),
+            );
         }
         Focus::Preview => {
             draw_preview(frame, app, pane);
@@ -156,7 +160,11 @@ fn draw_body(frame: &mut Frame<'_>, app: &mut TuiApp, area: ratatui::layout::Rec
 
     // Record clickable regions (after drawing, so list scroll offsets are
     // current) for the mouse handler to hit-test against.
-    app.record_region(columns[0], RegionKind::Results, app.results_state.offset());
+    app.record_region_with_row_index(
+        columns[0],
+        RegionKind::Results,
+        app.results_row_index.clone(),
+    );
     app.record_region(right[0], RegionKind::Metadata, 0);
     app.record_region(
         right[1],

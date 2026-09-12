@@ -103,20 +103,29 @@ enum RegionKind {
 }
 
 /// A clickable pane recorded during render.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct ClickRegion {
     /// Inner content rect (inside the pane border).
     area: Rect,
     kind: RegionKind,
     /// Index of the first row/line visible inside `area` (its scroll offset),
-    /// so a click at `area.y + n` maps to entry `scroll + n`.
+    /// so a click at `area.y + n` maps to entry `scroll + n`. Ignored when
+    /// `row_item_index` is set.
     scroll: usize,
+    /// For a pane whose items can span more than one screen row (currently
+    /// only Results, when a symlink target wraps to its own line): maps each
+    /// rendered row within `area` (0-indexed from the top) to the item index
+    /// it belongs to, so every row of a multi-row item resolves to the same
+    /// entry. `None` for every other, uniform single-row-per-item pane,
+    /// which falls back to `scroll + row`.
+    row_item_index: Option<Vec<usize>>,
 }
 
 /// Return the pane a click at `(col, row)` fell in, plus the row/line index
-/// within that pane's content (accounting for the pane's scroll offset).
-/// Regions are searched in recorded order; panes never overlap so the first
-/// hit is unambiguous.
+/// within that pane's content (accounting for the pane's scroll offset, or
+/// its `row_item_index` map for a variable-row-height pane). Regions are
+/// searched in recorded order; panes never overlap so the first hit is
+/// unambiguous.
 fn hit_test(regions: &[ClickRegion], col: u16, row: u16) -> Option<(RegionKind, usize)> {
     regions.iter().find_map(|region| {
         let a = region.area;
@@ -124,7 +133,20 @@ fn hit_test(regions: &[ClickRegion], col: u16, row: u16) -> Option<(RegionKind, 
             && col < a.x.saturating_add(a.width)
             && row >= a.y
             && row < a.y.saturating_add(a.height);
-        inside.then(|| (region.kind, region.scroll + usize::from(row - a.y)))
+        if !inside {
+            return None;
+        }
+        let row_in_area = usize::from(row - a.y);
+        let index = match &region.row_item_index {
+            // A click past the last rendered item (the pane's unused
+            // trailing space) has no entry — no other region can claim this
+            // (col, row) either, since panes never overlap, so the overall
+            // hit-test correctly reports "nothing here" rather than falling
+            // through to flat scroll+row arithmetic.
+            Some(map) => *map.get(row_in_area)?,
+            None => region.scroll + row_in_area,
+        };
+        Some((region.kind, index))
     })
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -185,6 +207,12 @@ struct TuiApp {
     error: Option<String>,
     preview_scroll: u16,
     revisions_scroll: u16,
+    /// Index into `checkouts` (pre-sorted by `compare_revision_rows`, so
+    /// this order matches the pane's visual grouping) of the entry Enter
+    /// diffs the active script against. Up/Down move this instead of
+    /// `revisions_scroll` directly; `revisions_scroll` auto-follows to keep
+    /// the selection on screen — see `render::revisions`.
+    revisions_selected: usize,
     detail_scroll: u16,
     mode: ViewMode,
     detail_diff_output: String,
@@ -193,6 +221,11 @@ struct TuiApp {
     next_diff_id: u64,
     detail_diff_scroll: u16,
     results_state: ListState,
+    /// Rendered-row → item-index map for the results pane's current visible
+    /// window, written by `render::draw_results` and read back by the
+    /// `record_region_with_row_index` call after it — see
+    /// `ClickRegion::row_item_index`.
+    results_row_index: Vec<usize>,
     cached_preview: String,
     /// Syntax-highlighted (Python/Bash) or plain (any other language)
     /// rendering of `cached_preview`, computed once per detail load by

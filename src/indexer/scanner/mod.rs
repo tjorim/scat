@@ -26,7 +26,7 @@ pub use language::{detect_language, read_head, shebang_language};
 pub use mtime::{max_mtime_in_roots, max_mtime_in_roots_with_shutdown};
 
 use candidate::{CandidateOutcome, SCAN_PROCESS_BATCH_SIZE, ScanCandidate, process_candidate};
-use filter::{canonicalize_roots, get_external_ignore_paths, is_within_roots};
+use filter::{canonicalize_roots, get_external_ignore_paths};
 
 #[derive(Debug, Clone)]
 /// Script candidate discovered by filesystem scanning.
@@ -148,11 +148,36 @@ fn scan_paths_with_revisions_impl(
             .collect(),
     );
     // Symlinked directories are only followed if they resolve inside one of
-    // these — see `is_within_roots`.
+    // these (checked directly in the `filter_entry` closure below, since it
+    // already canonicalizes each directory for the dedup check and reusing
+    // that avoids a second canonicalize per directory).
     let canonical_roots: std::sync::Arc<Vec<PathBuf>> =
         std::sync::Arc::new(canonicalize_roots(roots));
+    // Directories already walked, by canonical path — shared across every
+    // root (and within each root's own walk) so a symlinked directory that
+    // aliases another location already covered — an `alt/scripts →
+    // linux/scripts` OS-variant pattern, where a whole OS-flavor subtree is
+    // a symlink to another one rather than a duplicate copy — is walked only
+    // once, whichever side (the real directory or its alias) is reached
+    // first. Without this, the same physical scripts get indexed twice under
+    // two different logical paths.
+    let visited_dirs: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<PathBuf>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
 
     for root in roots {
+        // A root itself can be the alias side of the pattern above (the
+        // whole configured root is a symlink to another configured root's
+        // subtree) — `filter_entry` below only governs descent into a root's
+        // children, so the root's own identity is checked here.
+        if let Ok(canon) = std::fs::canonicalize(root)
+            && !visited_dirs.lock().unwrap().insert(canon)
+        {
+            debug!(
+                root = %root.display(),
+                "scan root resolves to a location already covered by another root, skipping"
+            );
+            continue;
+        }
         let mut found_in_root = 0usize;
         let mut skipped_in_root = 0usize;
         let mut candidates: Vec<ScanCandidate> = Vec::new();
@@ -166,6 +191,7 @@ fn scan_paths_with_revisions_impl(
             .to_string();
         let cds = checkout_dirs_set.clone();
         let croots = canonical_roots.clone();
+        let vdirs = visited_dirs.clone();
         let mut walk = WalkBuilder::new(root);
         walk.follow_links(true)
             .sort_by_file_path(std::cmp::Ord::cmp)
@@ -184,12 +210,34 @@ fn scan_paths_with_revisions_impl(
                     if cds.contains(name) {
                         return false;
                     }
-                    if e.path_is_symlink() && !is_within_roots(e.path(), &croots) {
-                        warn!(
-                            path = %e.path().display(),
-                            "symlinked directory resolves outside configured scan roots, skipping to avoid unbounded traversal"
-                        );
-                        return false;
+                    let is_symlink = e.path_is_symlink();
+                    match std::fs::canonicalize(e.path()) {
+                        Ok(canon) => {
+                            if is_symlink && !croots.iter().any(|r| canon.starts_with(r)) {
+                                warn!(
+                                    path = %e.path().display(),
+                                    "symlinked directory resolves outside configured scan roots, skipping to avoid unbounded traversal"
+                                );
+                                return false;
+                            }
+                            // Dedup by real identity, not by the path it was
+                            // reached through — see `visited_dirs` above.
+                            if !vdirs.lock().unwrap().insert(canon) {
+                                return false;
+                            }
+                        }
+                        Err(_) if is_symlink => {
+                            warn!(
+                                path = %e.path().display(),
+                                "symlinked directory could not be resolved, skipping to avoid unbounded traversal"
+                            );
+                            return false;
+                        }
+                        // A real directory that fails to canonicalize (e.g. a
+                        // permissions error, or removed mid-walk) can't be
+                        // deduped, but that's no reason to prune it — same as
+                        // before this dedup existed.
+                        Err(_) => {}
                     }
                 }
                 true

@@ -178,11 +178,16 @@ pub enum Commands {
 
     /// Compare a cataloged script against its vc checkout or an explicit file.
     ///
-    /// Three modes:
+    /// Four modes:
     ///
-    ///   scat diff /catalog/foo.py            — active catalog vs most-recent checkout
+    ///   scat diff /catalog/foo.py            — active catalog vs most-recent DEVELOP checkout
     ///
     ///   scat diff /catalog/foo.py --against <file>  — active catalog vs explicit file
+    ///
+    ///   scat diff /catalog/foo.py --revision-type ARCHIVE  — active catalog vs a specific
+    ///   revision, selected by type (DEVELOP/WORKING/ARCHIVE/ROLLBACK) and optionally
+    ///   narrowed with --revision-user / --revision-timestamp; unlike the no-flag default,
+    ///   this reaches ARCHIVE/WORKING/ROLLBACK too, not just DEVELOP
     ///
     ///   scat diff --old <file> --new <file>  — two explicit files (no catalog)
     Diff {
@@ -197,8 +202,24 @@ pub enum Commands {
         /// Compare the active script against this file (checkout or archive path).
         /// --against points to a **file**, unlike `scat catalog diff --against` which
         /// points to a database.
-        #[arg(long, conflicts_with_all = ["old", "new"])]
+        #[arg(long, conflicts_with_all = ["old", "new", "revision_type"])]
         against: Option<std::path::PathBuf>,
+
+        /// Compare the active script against a specific revision, selected by type
+        /// instead of a raw file path. Picks the most recent revision of this type
+        /// unless narrowed with --revision-user / --revision-timestamp.
+        #[arg(long, value_enum, conflicts_with_all = ["old", "new", "against"])]
+        revision_type: Option<RevisionTypeArg>,
+
+        /// Narrow --revision-type to a checkout by this user (DEVELOP/ROLLBACK only —
+        /// ARCHIVE/WORKING revisions carry no user). Ignored without --revision-type.
+        #[arg(long, requires = "revision_type")]
+        revision_user: Option<String>,
+
+        /// Narrow --revision-type to this exact timestamp (as shown by `scat status`).
+        /// Ignored without --revision-type.
+        #[arg(long, requires = "revision_type")]
+        revision_timestamp: Option<String>,
 
         /// Old file path for explicit two-file comparison. Must be paired with --new.
         /// Mutually exclusive with positional path.
@@ -355,6 +376,28 @@ pub enum SearchOutput {
 pub enum OutputFormat {
     Table,
     Json,
+}
+
+/// `scat diff --revision-type <...>`: which kind of revision to select — see
+/// `scat_core::core::vc::REVISION_TYPE_*`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
+pub enum RevisionTypeArg {
+    Develop,
+    Working,
+    Archive,
+    Rollback,
+}
+
+impl RevisionTypeArg {
+    /// The exact `revisions.revision_type` value this selects.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Develop => scat_core::core::vc::REVISION_TYPE_DEVELOP,
+            Self::Working => scat_core::core::vc::REVISION_TYPE_WORKING,
+            Self::Archive => scat_core::core::vc::REVISION_TYPE_ARCHIVE,
+            Self::Rollback => scat_core::core::vc::REVISION_TYPE_ROLLBACK,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -938,6 +981,9 @@ mod tests {
             Commands::Diff {
                 path: Some(ref p),
                 against: None,
+                revision_type: None,
+                revision_user: None,
+                revision_timestamp: None,
                 old: None,
                 new: None,
                 json: false,
@@ -966,6 +1012,70 @@ mod tests {
                 ..
             } if p == "/catalog/scripts/foo.py" && a == &PathBuf::from("/dev/LINUX/foo_20240315_1430_user")
         ));
+    }
+
+    #[test]
+    fn clap_parses_diff_revision_type_and_narrowing_flags() {
+        let cli = Cli::try_parse_from([
+            "scat",
+            "--db",
+            "catalog.sqlite",
+            "diff",
+            "/catalog/scripts/foo.py",
+            "--revision-type",
+            "archive",
+            "--revision-user",
+            "alice",
+            "--revision-timestamp",
+            "20240921_135312",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Commands::Diff {
+                path: Some(ref p),
+                revision_type: Some(RevisionTypeArg::Archive),
+                revision_user: Some(ref u),
+                revision_timestamp: Some(ref ts),
+                against: None,
+                ..
+            } if p == "/catalog/scripts/foo.py" && u == "alice" && ts == "20240921_135312"
+        ));
+    }
+
+    #[test]
+    fn clap_rejects_revision_type_combined_with_against() {
+        let Err(err) = Cli::try_parse_from([
+            "scat",
+            "--db",
+            "catalog.sqlite",
+            "diff",
+            "/catalog/scripts/foo.py",
+            "--against",
+            "/some/file",
+            "--revision-type",
+            "develop",
+        ]) else {
+            panic!("expected --against + --revision-type to be rejected");
+        };
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn clap_rejects_revision_user_without_revision_type() {
+        let Err(err) = Cli::try_parse_from([
+            "scat",
+            "--db",
+            "catalog.sqlite",
+            "diff",
+            "/catalog/scripts/foo.py",
+            "--revision-user",
+            "alice",
+        ]) else {
+            panic!("expected --revision-user without --revision-type to be rejected");
+        };
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
     }
 
     #[test]

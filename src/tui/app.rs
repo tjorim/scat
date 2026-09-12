@@ -47,6 +47,7 @@ impl TuiApp {
             error: None,
             preview_scroll: 0,
             revisions_scroll: 0,
+            revisions_selected: 0,
             detail_scroll: 0,
             mode: ViewMode::Browse,
             detail_diff_output: String::new(),
@@ -55,6 +56,7 @@ impl TuiApp {
             next_diff_id: 0,
             detail_diff_scroll: 0,
             results_state: ListState::default(),
+            results_row_index: Vec::new(),
             cached_preview: String::new(),
             cached_preview_lines: Vec::new(),
             preview_total_lines: 0,
@@ -180,6 +182,7 @@ impl TuiApp {
         self.error = None;
         self.results = results;
         self.results_state = ListState::default();
+        self.results_row_index.clear();
         if self.results.is_empty() {
             self.selected = 0;
             self.inflight_detail_id = None;
@@ -194,6 +197,7 @@ impl TuiApp {
             self.function_xref = None;
             self.dep_backstack.clear();
             self.checkouts.clear();
+            self.revisions_selected = 0;
             self.siblings.clear();
             self.sibling_dirs.clear();
             self.folder_dir = None;
@@ -242,6 +246,7 @@ impl TuiApp {
             self.function_call_sites.clear();
             self.function_xref = None;
             self.checkouts.clear();
+            self.revisions_selected = 0;
             self.siblings.clear();
             self.sibling_dirs.clear();
             self.folder_dir = None;
@@ -260,6 +265,7 @@ impl TuiApp {
         self.error = None;
         self.preview_scroll = 0;
         self.revisions_scroll = 0;
+        self.revisions_selected = 0;
         self.detail_scroll = 0;
         self.deps_selected = 0;
         self.functions_selected = 0;
@@ -327,6 +333,7 @@ impl TuiApp {
         self.functions_selected = 0;
         self.function_xref = None;
         self.checkouts = checkouts;
+        self.revisions_selected = 0;
         self.siblings = siblings;
         self.sibling_dirs = sibling_dirs;
         self.cached_preview = cached_preview;

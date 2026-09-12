@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
@@ -57,6 +58,11 @@ struct VcConfigSection {
     /// Directory names treated as ARCHIVE-type checkout containers (default: `["ARCHIVE"]`).
     #[serde(default = "default_archive_dirs")]
     archive_dirs: Vec<String>,
+    /// Path to vc's own manifest of every file path it manages, one absolute
+    /// path per line. Name and location are environment-specific. Optional —
+    /// when unset, no manifest cross-reference warnings are produced. See
+    /// [`infer_manifest_warnings`] and docs/VC_CONTRACT.md.
+    manifest_path: Option<String>,
 }
 
 impl Default for VcConfigSection {
@@ -65,6 +71,7 @@ impl Default for VcConfigSection {
             executable: None,
             develop_dirs: default_develop_dirs(),
             archive_dirs: default_archive_dirs(),
+            manifest_path: None,
         }
     }
 }
@@ -114,6 +121,10 @@ pub struct VcConfig {
     pub develop_dirs: Vec<String>,
     /// Directory names treated as ARCHIVE-type checkout containers.
     pub archive_dirs: Vec<String>,
+    /// Path to vc's own manifest of every file path it manages, one absolute
+    /// path per line. Name and location are environment-specific. `None`
+    /// disables the manifest cross-reference warnings entirely.
+    pub manifest_path: Option<PathBuf>,
     /// Named search aliases; `scat search @name` resolves the alias before dispatch.
     pub bookmarks: std::collections::HashMap<String, String>,
 }
@@ -135,6 +146,7 @@ impl Default for VcConfig {
                 .iter()
                 .map(std::string::ToString::to_string)
                 .collect(),
+            manifest_path: None,
             bookmarks: std::collections::HashMap::new(),
         }
     }
@@ -210,6 +222,20 @@ pub const REVISION_TYPE_ARCHIVE: &str = "ARCHIVE";
 /// Revision type stored in the catalog: a checked-in version copy kept in the
 /// working directory next to the active symlink (`<script>_<timestamp>`).
 pub const REVISION_TYPE_WORKING: &str = "WORKING";
+/// Revision type stored in the catalog: the version a rollback displaced from
+/// the working directory into DEVELOP (`<script>_<timestamp>_RB_<abbr>`), kept
+/// there as a re-editable candidate rather than deleted. Distinct from
+/// [`REVISION_TYPE_DEVELOP`] because vc's own actions put it there, not a user
+/// checking the script out to edit it — it must not be counted as an
+/// in-progress checkout by "RB" (see [`scan_revision_dir`]'s use of
+/// [`ROLLBACK_USER_PREFIX`]).
+pub const REVISION_TYPE_ROLLBACK: &str = "ROLLBACK";
+
+/// Marks a DEVELOP-directory user suffix as a rollback-displaced version
+/// rather than an active checkout: `<script>_<timestamp>_RB_<abbr>`. The
+/// checkout filename regex parses the whole `RB_<abbr>` as the `user` capture
+/// group, so this prefix is stripped back off to recover the real abbreviation.
+const ROLLBACK_USER_PREFIX: &str = "RB_";
 
 /// Render a revision age in compact human-readable form.
 pub fn relative_age(age_seconds: f64) -> String {
@@ -225,9 +251,10 @@ pub fn relative_age(age_seconds: f64) -> String {
 
 /// Compare revision rows by the display order used by CLI and TUI.
 ///
-/// DEVELOP rows sort first, then WORKING (checked-in copies in the working
-/// directory), then ARCHIVE; within a type, rows are grouped by OS flavor,
-/// newest timestamp first, and finally user name.
+/// DEVELOP rows sort first, then ROLLBACK (rollback-displaced versions
+/// sitting in DEVELOP as re-editable candidates), then WORKING (checked-in
+/// copies in the working directory), then ARCHIVE; within a type, rows are
+/// grouped by OS flavor, newest timestamp first, and finally user name.
 pub fn compare_revision_rows(a: &JsonRow, b: &JsonRow) -> Ordering {
     revision_type_rank(row_str(a, "revision_type"))
         .cmp(&revision_type_rank(row_str(b, "revision_type")))
@@ -239,9 +266,10 @@ pub fn compare_revision_rows(a: &JsonRow, b: &JsonRow) -> Ordering {
 fn revision_type_rank(revision_type: &str) -> u8 {
     match revision_type {
         REVISION_TYPE_DEVELOP | "" => 0,
-        REVISION_TYPE_WORKING => 1,
-        REVISION_TYPE_ARCHIVE => 2,
-        _ => 3,
+        REVISION_TYPE_ROLLBACK => 1,
+        REVISION_TYPE_WORKING => 2,
+        REVISION_TYPE_ARCHIVE => 3,
+        _ => 4,
     }
 }
 
@@ -293,6 +321,7 @@ pub fn load_vc_config(config_file: Option<&Path>) -> Result<VcConfig> {
         vc_executable: vc.executable.map(PathBuf::from),
         develop_dirs: vc.develop_dirs,
         archive_dirs: vc.archive_dirs,
+        manifest_path: vc.manifest_path.map(PathBuf::from),
         bookmarks: file_data.bookmarks.unwrap_or_default(),
     })
 }
@@ -325,7 +354,7 @@ pub fn parse_checkout_filename(filename: &str) -> Option<(String, String, String
 /// DEVELOP/ARCHIVE containers, at any nesting depth, so the walk recurses the
 /// whole tree under each scan_root. Directories reached via symlinks are
 /// deduplicated by their canonicalised real path so that OS-variant symlinks
-/// (e.g. `alt/pse → linux/pse`) are not scanned twice, and symlinks resolving
+/// (e.g. `alt/scripts → linux/scripts`) are not scanned twice, and symlinks resolving
 /// outside all scan_roots are not followed.
 /// The `os_flavor` for each record is derived from the parent directory name of the
 /// scan_root (e.g. `linux` from `/catalog/linux/scripts`).
@@ -348,7 +377,7 @@ pub fn scan_checkouts(config: &VcConfig) -> Vec<CheckoutRecord> {
         .filter_map(|r| std::fs::canonicalize(r).ok())
         .collect();
     // Directories already walked, by canonical path — global across
-    // scan_roots so an OS-variant symlink alias (`alt/pse → linux/pse`) is
+    // scan_roots so an OS-variant symlink alias (`alt/scripts → linux/scripts`) is
     // walked once, under the first scan_root that reaches it (keeping
     // os_flavor derivation stable).
     let mut visited: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
@@ -465,9 +494,51 @@ fn scan_revision_dir(
             Some(n) => n,
             None => continue,
         };
+
+        // vc writes a hidden companion file alongside every DEVELOP checkout —
+        // `.<checkout-filename>`, holding a stat value and the canonical
+        // original-version path it was checked out from, used by vc to detect
+        // whether the production target changed since checkout. Its name still
+        // matches the checkout filename convention once the leading dot is
+        // swallowed by the greedy `script` capture (`.deploy_20240315_1430_jdoe`
+        // parses as script `.deploy`), which would otherwise register it as a
+        // second, bogus checkout of a script named `.deploy`. It's vc's own
+        // bookkeeping, not a revision, so skip it.
+        if filename.starts_with('.') {
+            continue;
+        }
+
         let (script_name, timestamp, user) = match parse_checkout_filename(filename) {
             Some(p) => p,
             None => continue,
+        };
+
+        // When the live target changed while a checkout was in progress, vc
+        // runs a merge and leaves `<checkout-filename>.org` — a backup of the
+        // pre-merge checkout — alongside it, plus a transient `.merged` file
+        // during the merge itself. The abbreviation vc encodes in a real
+        // checkout filename is always the fixed-width, dot-free token `utel`
+        // produces, so a user capture ending in one of these suffixes is
+        // never a genuine checkout — it's vc's own merge bookkeeping.
+        if matches!(
+            Path::new(&user).extension().and_then(|e| e.to_str()),
+            Some("org" | "merged")
+        ) {
+            continue;
+        }
+
+        // A rollback moves the version it displaces into DEVELOP as
+        // `<script>_<timestamp>_RB_<abbr>` rather than deleting it — see
+        // `REVISION_TYPE_ROLLBACK`. The checkout filename regex has no way to
+        // tell that apart from a real checkout, so it lands in the `user`
+        // capture as `RB_<abbr>`; recover the real abbreviation and
+        // reclassify. Only DEVELOP filenames carry a user suffix at all, so
+        // this never fires for an ARCHIVE entry.
+        let (revision_type, user) = match user.strip_prefix(ROLLBACK_USER_PREFIX) {
+            Some(abbr) if revision_type == REVISION_TYPE_DEVELOP && !abbr.is_empty() => {
+                (REVISION_TYPE_ROLLBACK, abbr.to_string())
+            }
+            _ => (revision_type, user),
         };
 
         // Relative path of the file's parent within the DEVELOP/ARCHIVE dir
@@ -648,6 +719,48 @@ pub fn infer_warnings(conn: &Connection) -> Result<Vec<VcWarning>> {
         });
     }
 
+    let mut scripttype_stmt = conn.prepare(
+        "SELECT logical_path, language, metadata_json
+         FROM scripts
+         WHERE metadata_json IS NOT NULL AND metadata_json != ''
+         ORDER BY logical_path",
+    )?;
+    let scripttype_rows = scripttype_stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
+    for row in scripttype_rows {
+        let (logical_path, language, metadata_json) = row?;
+        let Ok(metadata) = serde_json::from_str::<Value>(&metadata_json) else {
+            continue;
+        };
+        let Some(declared) = metadata.get("scripttype").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(canonical) = normalize_scripttype(declared) else {
+            continue;
+        };
+        if canonical != language {
+            let mut details = serde_json::Map::new();
+            details.insert(
+                "declared_scripttype".into(),
+                Value::String(declared.to_string()),
+            );
+            details.insert("detected_language".into(), Value::String(language));
+            warnings.push(VcWarning {
+                logical_path,
+                kind: "scripttype_language_mismatch".into(),
+                message:
+                    "The @scripttype header keyword disagrees with the language scat detected."
+                        .into(),
+                details,
+            });
+        }
+    }
+
     debug!(
         warning_count = warnings.len(),
         "completed vc warning inference"
@@ -660,6 +773,102 @@ pub fn infer_warnings(conn: &Connection) -> Result<Vec<VcWarning>> {
             "generated vc warning"
         );
     }
+
+    Ok(warnings)
+}
+
+// ---------------------------------------------------------------------------
+// Managed-file manifest cross-reference (optional; see `VcConfig::manifest_path`)
+// ---------------------------------------------------------------------------
+
+/// Load vc's own manifest of every file path it manages (see
+/// docs/VC_CONTRACT.md), one absolute path per line.
+///
+/// The manifest cross-reference is entirely optional (see
+/// [`VcConfig::manifest_path`]), so a missing or unreadable file must not
+/// fail the whole build — this logs a warning and returns an empty set,
+/// which [`infer_manifest_warnings`] treats as "nothing to cross-reference"
+/// rather than as an error.
+pub fn load_vc_manifest(path: &Path) -> HashSet<String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => text
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect(),
+        Err(err) => {
+            warn!(
+                path = %path.display(),
+                error = %err,
+                "failed to read vc's managed-file manifest, skipping manifest cross-reference"
+            );
+            HashSet::new()
+        }
+    }
+}
+
+/// Cross-reference vc's own manifest of managed files ([`load_vc_manifest`])
+/// against what was actually indexed. Assumes manifest entries and
+/// `scripts.logical_path` use the same absolute-path convention (true when
+/// both are observed from the same host/mount namespace scat scans from).
+///
+/// Two mismatches are worth surfacing, at different confidence:
+/// - `registered_with_vc_but_not_indexed`: vc manages this path but scat
+///   never found it — usually a scan-root or ignore-pattern gap, and a
+///   strong signal something is missing from the catalog.
+/// - `not_registered_with_vc`: scat indexed this path but vc's manifest
+///   doesn't list it. Much weaker — an ordinary, non-vc-managed utility
+///   script sitting inside a vc-managed tree looks the same, so treat this
+///   as a lead to check rather than a confirmed problem.
+///
+/// Returns no warnings when `manifest` is empty (unconfigured or unreadable).
+pub fn infer_manifest_warnings(
+    conn: &Connection,
+    manifest: &HashSet<String>,
+) -> Result<Vec<VcWarning>> {
+    if manifest.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut indexed: HashSet<String> = HashSet::new();
+    {
+        let mut stmt = conn.prepare("SELECT logical_path FROM scripts")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        for row in rows {
+            indexed.insert(row?);
+        }
+    }
+
+    let mut warnings = Vec::new();
+
+    let mut not_indexed: Vec<&String> = manifest.difference(&indexed).collect();
+    not_indexed.sort();
+    for logical_path in not_indexed {
+        warnings.push(VcWarning {
+            logical_path: logical_path.clone(),
+            kind: "registered_with_vc_but_not_indexed".into(),
+            message: "vc's own manifest lists this script, but scanning never found it.".into(),
+            details: serde_json::Map::new(),
+        });
+    }
+
+    let mut not_registered: Vec<&String> = indexed.difference(manifest).collect();
+    not_registered.sort();
+    for logical_path in not_registered {
+        warnings.push(VcWarning {
+            logical_path: logical_path.clone(),
+            kind: "not_registered_with_vc".into(),
+            message: "This script was indexed but does not appear in vc's managed-file manifest."
+                .into(),
+            details: serde_json::Map::new(),
+        });
+    }
+
+    debug!(
+        warning_count = warnings.len(),
+        "completed vc manifest cross-reference"
+    );
 
     Ok(warnings)
 }
@@ -705,6 +914,25 @@ fn target_name_matches(logical_path: &str, target: &str) -> bool {
             .is_some_and(|suffix| suffix.starts_with(['_', '-']))
 }
 
+/// Map a `@scripttype` header value to the canonical language key scat's own
+/// detector would produce, when the value unambiguously names one of the
+/// languages scat recognizes (see `indexer::scanner::detect_language`).
+/// Returns `None` for any other value — an unrecognized taxonomy, a
+/// purpose/category rather than a language, or free text — so
+/// [`infer_warnings`] only compares when it can be confident, rather than
+/// guessing at a `@scripttype` vocabulary this repository has no real sample
+/// of.
+fn normalize_scripttype(value: &str) -> Option<&'static str> {
+    match value.trim().to_lowercase().as_str() {
+        "python" | "py" | "python2" | "python3" => Some("python"),
+        "shell" | "sh" | "bash" | "ksh" | "ksh93" => Some("shell"),
+        "yaml" | "yml" => Some("yaml"),
+        "csv" => Some("csv"),
+        "json" => Some("json"),
+        _ => None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
@@ -712,6 +940,37 @@ fn target_name_matches(logical_path: &str, target: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn load_vc_manifest_parses_one_path_per_line() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            file.path(),
+            "/catalog/scripts/deploy.sh\n/catalog/scripts/health.py\n",
+        )
+        .unwrap();
+
+        let paths = load_vc_manifest(file.path());
+        assert_eq!(paths.len(), 2);
+        assert!(paths.contains("/catalog/scripts/deploy.sh"));
+        assert!(paths.contains("/catalog/scripts/health.py"));
+    }
+
+    #[test]
+    fn load_vc_manifest_trims_whitespace_and_skips_blank_lines() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), "  /catalog/scripts/deploy.sh  \n\n\n").unwrap();
+
+        let paths = load_vc_manifest(file.path());
+        assert_eq!(paths.len(), 1);
+        assert!(paths.contains("/catalog/scripts/deploy.sh"));
+    }
+
+    #[test]
+    fn load_vc_manifest_returns_empty_set_for_missing_file() {
+        let paths = load_vc_manifest(Path::new("/nonexistent/manifest.lst"));
+        assert!(paths.is_empty());
+    }
 
     #[test]
     fn parse_checkout_filename_valid() {
@@ -834,6 +1093,28 @@ mod tests {
             "/catalog/scripts/foo.py",
             "/archive/bar_20240101_1200.py"
         ));
+    }
+
+    #[test]
+    fn normalize_scripttype_recognizes_known_language_tokens() {
+        assert_eq!(normalize_scripttype("python"), Some("python"));
+        assert_eq!(normalize_scripttype("Python3"), Some("python"));
+        assert_eq!(normalize_scripttype("  SHELL  "), Some("shell"));
+        assert_eq!(normalize_scripttype("bash"), Some("shell"));
+        assert_eq!(normalize_scripttype("ksh"), Some("shell"));
+        assert_eq!(normalize_scripttype("YAML"), Some("yaml"));
+        assert_eq!(normalize_scripttype("csv"), Some("csv"));
+        assert_eq!(normalize_scripttype("json"), Some("json"));
+    }
+
+    #[test]
+    fn normalize_scripttype_ignores_unrecognized_values() {
+        // An unknown taxonomy (a purpose/category rather than a language, or
+        // free text) must not be guessed at — no comparison, no false
+        // positive.
+        assert_eq!(normalize_scripttype("utility"), None);
+        assert_eq!(normalize_scripttype("cronjob"), None);
+        assert_eq!(normalize_scripttype(""), None);
     }
 
     fn revision_row(revision_type: &str, os_flavor: &str, user: &str, timestamp: &str) -> JsonRow {

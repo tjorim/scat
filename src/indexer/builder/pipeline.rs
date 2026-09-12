@@ -9,7 +9,10 @@ use serde_json::Value;
 use tracing::{debug, warn};
 
 use crate::core::db::SCHEMA_VERSION;
-use crate::core::vc::{ProcessedScript, VcConfig, infer_warnings, scan_checkouts};
+use crate::core::vc::{
+    ProcessedScript, VcConfig, infer_manifest_warnings, infer_warnings, load_vc_manifest,
+    scan_checkouts,
+};
 use crate::error::{Error, Result};
 use crate::indexer::ast_deps::AstDependencies;
 use crate::indexer::checkpoint::{Checkpoint, write_checkpoint};
@@ -359,7 +362,23 @@ pub(super) fn populate(
 
     set_finalize_msg("Inferring warnings…");
     debug!(phase = "infer_warnings", "starting infer_warnings phase");
-    let warnings = infer_warnings(&tx)?;
+    let mut warnings = infer_warnings(&tx)?;
+    if let Some(manifest_path) = &vc_config.manifest_path {
+        let manifest = load_vc_manifest(manifest_path);
+        let manifest_warnings = infer_manifest_warnings(&tx, &manifest)?;
+        // `registered_with_vc_but_not_indexed` applies to a path with no
+        // `scripts` row — the loop below that writes warnings into
+        // `scripts.vc_warnings` can't attach it anywhere, so it's reported
+        // on `result` instead (surfaced by `scat catalog build`) rather than
+        // silently dropped.
+        result.manifest_paths_not_indexed.extend(
+            manifest_warnings
+                .iter()
+                .filter(|w| w.kind == "registered_with_vc_but_not_indexed")
+                .map(|w| w.logical_path.clone()),
+        );
+        warnings.extend(manifest_warnings);
+    }
     debug!(
         phase = "infer_warnings",
         warning_count = warnings.len(),
@@ -609,6 +628,18 @@ fn extract_for_insert<'a>(
             .into_iter()
             .filter(|reference| reference != &record.logical_path)
             .collect();
+    let mut seen: HashSet<String> = references.iter().cloned().collect();
+
+    // vc's `@parentfile`/`@childfile`/`@inputfile`/`@outputfile`/`@paramfile`
+    // header keywords (see `parse_related_file_keywords`) are author-declared
+    // paths to other managed scripts — as high-confidence as a dependency
+    // edge gets. Same "referenced" resolution and self-reference rule as
+    // above; deduped against the generic pass.
+    for reference in &meta.related {
+        if reference != &record.logical_path && seen.insert(reference.clone()) {
+            references.push(reference.clone());
+        }
+    }
 
     // YAML gets a second, structure-aware pass for Ansible-shaped keys
     // (`include_tasks`, `import_playbook`, `roles`, …) that the generic
@@ -616,7 +647,6 @@ fn extract_for_insert<'a>(
     // see `extract_yaml_reference_paths`. Same "referenced" resolution and
     // self-reference rule as above; deduped against the generic pass.
     if record.language == "yaml" {
-        let mut seen: HashSet<String> = references.iter().cloned().collect();
         for reference in ts.extract_yaml_deps(&meta.content) {
             if reference != record.logical_path && seen.insert(reference.clone()) {
                 references.push(reference);
