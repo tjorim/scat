@@ -113,10 +113,31 @@ fn query_uses_fts_excludes_path_like_queries() {
 
 #[test]
 fn skip_rebuild_requires_existing_older_file_mtime() {
-    assert!(should_skip_catalog_rebuild(100.0, Some(99.9)));
-    assert!(!should_skip_catalog_rebuild(100.0, Some(100.0)));
-    assert!(!should_skip_catalog_rebuild(100.0, Some(100.1)));
-    assert!(!should_skip_catalog_rebuild(100.0, None));
+    assert!(should_skip_catalog_rebuild(
+        100.0,
+        Some(99.9),
+        "same",
+        "same"
+    ));
+    assert!(!should_skip_catalog_rebuild(
+        100.0,
+        Some(100.0),
+        "same",
+        "same"
+    ));
+    assert!(!should_skip_catalog_rebuild(
+        100.0,
+        Some(100.1),
+        "same",
+        "same"
+    ));
+    assert!(!should_skip_catalog_rebuild(100.0, None, "same", "same"));
+    assert!(!should_skip_catalog_rebuild(
+        100.0,
+        Some(99.9),
+        "enabled",
+        "disabled"
+    ));
 }
 
 #[test]

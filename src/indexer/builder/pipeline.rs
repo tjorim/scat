@@ -11,7 +11,7 @@ use tracing::{debug, warn};
 use crate::core::db::SCHEMA_VERSION;
 use crate::core::vc::{
     ProcessedScript, VcConfig, infer_manifest_warnings, infer_warnings, load_vc_manifest,
-    scan_checkouts,
+    manifest_fingerprint, scan_checkouts,
 };
 use crate::error::{Error, Result};
 use crate::indexer::ast_deps::AstDependencies;
@@ -434,9 +434,14 @@ pub(super) fn populate(
     debug!(phase = "rebuild_fts", "completed FTS rebuild phase");
 
     tx.execute(
-        "INSERT OR REPLACE INTO index_metadata (id, build_timestamp, schema_version)
-         VALUES (1, ?1, ?2)",
-        rusqlite::params![build_ts, SCHEMA_VERSION],
+        "INSERT OR REPLACE INTO index_metadata
+         (id, build_timestamp, schema_version, manifest_fingerprint)
+         VALUES (1, ?1, ?2, ?3)",
+        rusqlite::params![
+            build_ts,
+            SCHEMA_VERSION,
+            manifest_fingerprint(vc_config.manifest_path.as_deref()),
+        ],
     )?;
 
     if let Some(pb) = &finalize_pb {

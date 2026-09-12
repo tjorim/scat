@@ -52,10 +52,15 @@ fn diff_result(
             .get("physical_path")
             .and_then(|v| v.as_str())
             .unwrap_or_default();
+        let selected_revision_type = picked
+            .get("revision_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or(revision_type);
         return diff_catalog_vs_revision(
             &api.conn,
             logical_path,
             std::path::Path::new(physical_path),
+            selected_revision_type,
         );
     }
     diff_catalog_vs_checkout(&api.conn, logical_path)

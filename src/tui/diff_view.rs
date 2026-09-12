@@ -5,7 +5,7 @@ use super::{DiffRequest, DiffResponse, Result, TuiApp};
 impl TuiApp {
     /// Diff the active script against the most-recent DEVELOP checkout.
     pub(super) fn dispatch_diff(&mut self) -> Result<()> {
-        self.dispatch_diff_impl(None)
+        self.dispatch_diff_impl(None, None)
     }
 
     /// Diff the active script against the revision currently selected in
@@ -13,15 +13,31 @@ impl TuiApp {
     /// this matches what's on screen) — reaches ARCHIVE/WORKING/ROLLBACK
     /// revisions, unlike `dispatch_diff`'s fixed "most-recent DEVELOP".
     pub(super) fn dispatch_diff_against_selected_revision(&mut self) -> Result<()> {
-        let revision_physical_path = self
-            .checkouts
-            .get(self.revisions_selected)
-            .map(|row| str_field(row, "physical_path"))
-            .filter(|p| !p.is_empty());
-        self.dispatch_diff_impl(revision_physical_path)
+        let Some(revision) = self.checkouts.get(self.revisions_selected) else {
+            self.set_no_revision_selected();
+            return Ok(());
+        };
+        let revision_physical_path = str_field(revision, "physical_path");
+        if revision_physical_path.is_empty() {
+            self.set_no_revision_selected();
+            return Ok(());
+        }
+        let revision_type = str_field(revision, "revision_type");
+        self.dispatch_diff_impl(Some(revision_physical_path), Some(revision_type))
     }
 
-    fn dispatch_diff_impl(&mut self, revision_physical_path: Option<String>) -> Result<()> {
+    fn set_no_revision_selected(&mut self) {
+        self.detail_diff_scroll = 0;
+        self.inflight_diff_id = None;
+        self.detail_diff_loading = false;
+        self.detail_diff_output = "No revision selected".to_string();
+    }
+
+    fn dispatch_diff_impl(
+        &mut self,
+        revision_physical_path: Option<String>,
+        revision_type: Option<String>,
+    ) -> Result<()> {
         self.detail_diff_scroll = 0;
         let Some(logical_path) = self.selected_logical_path() else {
             self.detail_diff_output = "No script selected.".to_string();
@@ -37,6 +53,7 @@ impl TuiApp {
             id,
             path: logical_path,
             revision_physical_path,
+            revision_type,
         })?;
         Ok(())
     }

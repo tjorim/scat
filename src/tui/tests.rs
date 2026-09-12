@@ -542,6 +542,23 @@ fn revisions_pane_enter_diffs_against_the_selected_revision() {
 }
 
 #[test]
+fn revisions_pane_enter_requires_a_selected_revision_path() {
+    let db = super::make_test_db();
+    let mut app = make_app(db.path());
+
+    app.dispatch_diff_against_selected_revision().unwrap();
+    assert_eq!(app.detail_diff_output, "No revision selected");
+    assert!(!app.detail_diff_loading);
+    assert_eq!(app.inflight_diff_id, None);
+
+    app.checkouts = vec![revision_row("ARCHIVE", "20240921_135312", "")];
+    app.dispatch_diff_against_selected_revision().unwrap();
+    assert_eq!(app.detail_diff_output, "No revision selected");
+    assert!(!app.detail_diff_loading);
+    assert_eq!(app.inflight_diff_id, None);
+}
+
+#[test]
 fn revisions_pane_scrolls_to_keep_the_selection_visible() {
     use ratatui::{Terminal, backend::TestBackend};
 

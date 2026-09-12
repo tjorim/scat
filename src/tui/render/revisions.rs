@@ -16,6 +16,7 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use scat_core::core::db::{JsonRow, row_string as str_field};
 use scat_core::core::script_view::ScriptView;
 use scat_core::core::vc::relative_age;
+use unicode_width::UnicodeWidthStr;
 
 use super::super::{Focus, TuiApp};
 use super::common::{clamp_scroll_offset, focus_border, spinner_char};
@@ -57,9 +58,13 @@ pub(super) fn draw_revisions(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect
         revision_lines(&app.checkouts, &active, &selected_physical_path)
     };
     if let Some(selected_line) = selected_line {
-        ensure_line_visible(&mut app.revisions_scroll, selected_line, area);
+        let inner_width = usize::from(area.width.saturating_sub(2)).max(1);
+        let selected_row = wrapped_row_offset(&lines, selected_line, inner_width);
+        ensure_line_visible(&mut app.revisions_scroll, selected_row, area);
     }
-    clamp_scroll_offset(&mut app.revisions_scroll, lines.len(), area);
+    let inner_width = usize::from(area.width.saturating_sub(2)).max(1);
+    let rendered_rows = wrapped_row_offset(&lines, lines.len(), inner_width);
+    clamp_scroll_offset(&mut app.revisions_scroll, rendered_rows, area);
     let title = format!(
         "Revisions (line {})",
         app.revisions_scroll.saturating_add(1)
@@ -76,6 +81,77 @@ pub(super) fn draw_revisions(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect
             ),
         area,
     );
+}
+
+/// Count terminal rows occupied by preceding logical lines under the same
+/// word wrapping and leading-whitespace trimming used by `Paragraph`.
+fn wrapped_row_offset(lines: &[Line<'_>], before_line: usize, width: usize) -> usize {
+    lines
+        .iter()
+        .take(before_line)
+        .map(|line| wrapped_line_rows(&line.to_string(), width))
+        .sum()
+}
+
+/// Count the rows a single line occupies with `Wrap { trim: true }`.
+/// Revision rows contain ordinary whitespace-separated fields, so this keeps
+/// the calculation in sync with ratatui's word wrapping without changing the
+/// rendered text itself.
+fn wrapped_line_rows(line: &str, width: usize) -> usize {
+    let width = width.max(1);
+    let mut rows = 1;
+    let mut used = 0;
+
+    let mut pending_whitespace = 0;
+    let mut word_start = None;
+    for (index, ch) in line.char_indices() {
+        if ch.is_whitespace() {
+            if let Some(start) = word_start.take() {
+                let word_width = UnicodeWidthStr::width(&line[start..index]);
+                (rows, used) =
+                    place_wrapped_word(rows, used, pending_whitespace, word_width, width);
+                pending_whitespace = 0;
+            }
+            pending_whitespace += UnicodeWidthStr::width(&line[index..index + ch.len_utf8()]);
+        } else if word_start.is_none() {
+            word_start = Some(index);
+        }
+    }
+    if let Some(start) = word_start {
+        let word_width = UnicodeWidthStr::width(&line[start..]);
+        (rows, _) = place_wrapped_word(rows, used, pending_whitespace, word_width, width);
+    }
+    rows
+}
+
+/// Add one non-whitespace run after the whitespace that preceded it. With
+/// `trim: true`, whitespace is discarded when it would begin a wrapped row.
+fn place_wrapped_word(
+    mut rows: usize,
+    mut used: usize,
+    whitespace_width: usize,
+    word_width: usize,
+    width: usize,
+) -> (usize, usize) {
+    if used != 0 && used + whitespace_width + word_width > width {
+        rows += 1;
+        used = 0;
+    }
+    if used != 0 {
+        used += whitespace_width;
+    }
+
+    if word_width > width {
+        let chunks = word_width.div_ceil(width);
+        rows += chunks - 1;
+        used = word_width % width;
+        if used == 0 {
+            used = width;
+        }
+    } else {
+        used += word_width;
+    }
+    (rows, used)
 }
 
 /// Scroll the minimal amount to bring rendered line `line_index` into the
@@ -310,7 +386,7 @@ fn is_active_revision(row: &JsonRow, active_target: &str) -> bool {
 mod tests {
     use serde_json::{Map, Value};
 
-    use super::revision_lines;
+    use super::{revision_lines, wrapped_line_rows, wrapped_row_offset};
 
     fn line_text(line: &ratatui::text::Line) -> String {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
@@ -390,6 +466,18 @@ mod tests {
             develop_at < working_at && working_at < archive_at,
             "WORKING belongs between DEVELOP and ARCHIVE: {texts:?}"
         );
+    }
+
+    #[test]
+    fn wrapped_row_offset_counts_rows_before_the_selected_logical_line() {
+        let lines = vec![
+            ratatui::text::Line::raw("DEVELOP"),
+            ratatui::text::Line::raw("  linux alice 20260910_091500"),
+            ratatui::text::Line::raw("  linux bob 20260910_091501"),
+        ];
+
+        assert_eq!(wrapped_line_rows(&lines[1].to_string(), 12), 3);
+        assert_eq!(wrapped_row_offset(&lines, 2, 12), 4);
     }
 
     #[test]

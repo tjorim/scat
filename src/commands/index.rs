@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use scat_core::core::vc::manifest_fingerprint;
 use scat_core::indexer::builder::{BuildOptions, build_index};
 use scat_core::indexer::scanner::max_mtime_in_roots_with_shutdown;
 use tracing::warn;
@@ -69,7 +70,7 @@ pub fn cmd_index(
     if !force
         && !dry_run
         && db_path.exists()
-        && let Some(indexed_at_secs) = read_indexed_at(db_path)
+        && let Some((indexed_at_secs, indexed_manifest_fingerprint)) = read_indexed_at(db_path)
     {
         let checkout_dirs: Vec<&str> = config.all_checkout_dirs().collect();
         let max_mtime = max_mtime_in_roots_with_shutdown(
@@ -79,7 +80,13 @@ pub fn cmd_index(
             &shutdown,
         )
         .with_context(|| "Failed to check scan root modification times")?;
-        if should_skip_catalog_rebuild(indexed_at_secs, max_mtime) {
+        let current_manifest_fingerprint = manifest_fingerprint(config.manifest_path.as_deref());
+        if should_skip_catalog_rebuild(
+            indexed_at_secs,
+            max_mtime,
+            &indexed_manifest_fingerprint,
+            &current_manifest_fingerprint,
+        ) {
             if json {
                 print_json(&serde_json::json!({
                     "up_to_date": true,
@@ -154,22 +161,29 @@ pub fn cmd_index(
     Ok(())
 }
 
-pub fn should_skip_catalog_rebuild(indexed_at_secs: f64, max_mtime: Option<f64>) -> bool {
+pub fn should_skip_catalog_rebuild(
+    indexed_at_secs: f64,
+    max_mtime: Option<f64>,
+    indexed_manifest_fingerprint: &str,
+    current_manifest_fingerprint: &str,
+) -> bool {
     max_mtime.is_some_and(|mtime| mtime.floor() < indexed_at_secs)
+        && indexed_manifest_fingerprint == current_manifest_fingerprint
 }
 
 /// Open the existing catalog database and return the `build_timestamp` as UNIX
 /// epoch seconds, or `None` if the DB cannot be read, has no metadata row, or
 /// has a schema-version mismatch (all of which should trigger a rebuild).
-fn read_indexed_at(db_path: &Path) -> Option<f64> {
+fn read_indexed_at(db_path: &Path) -> Option<(f64, String)> {
     use scat_core::core::db::{SCHEMA_VERSION, open_readonly};
 
     let conn = open_readonly(db_path).ok()?;
-    let (ts, schema_ver): (Option<String>, i64) = conn
+    let (ts, schema_ver, manifest_fingerprint): (Option<String>, i64, String) = conn
         .query_row(
-            "SELECT build_timestamp, schema_version FROM index_metadata WHERE id = 1",
+            "SELECT build_timestamp, schema_version, manifest_fingerprint
+             FROM index_metadata WHERE id = 1",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .ok()?;
 
@@ -181,5 +195,5 @@ fn read_indexed_at(db_path: &Path) -> Option<f64> {
     let ts = ts?;
     chrono::DateTime::parse_from_rfc3339(&ts)
         .ok()
-        .map(|dt| dt.timestamp() as f64)
+        .map(|dt| (dt.timestamp() as f64, manifest_fingerprint))
 }

@@ -31,6 +31,8 @@ pub enum SourceKind {
     Active,
     /// Physical path from an indexed DEVELOP revision.
     Checkout,
+    /// Physical path from an indexed non-DEVELOP revision.
+    Revision,
     /// Explicitly supplied path (via `--against`, `--old`, or `--new`).
     Explicit,
 }
@@ -203,8 +205,15 @@ pub fn diff_catalog_vs_revision(
     conn: &Connection,
     logical_path: &str,
     physical_path: &Path,
+    revision_type: &str,
 ) -> Result<ScriptDiffResult> {
-    diff_catalog_vs_path(conn, logical_path, physical_path, SourceKind::Checkout)
+    let source_kind =
+        if revision_type.is_empty() || revision_type.eq_ignore_ascii_case(REVISION_TYPE_DEVELOP) {
+            SourceKind::Checkout
+        } else {
+            SourceKind::Revision
+        };
+    diff_catalog_vs_path(conn, logical_path, physical_path, source_kind)
 }
 
 /// Select one revision row (as returned by `SearchApi::revisions_for`,
@@ -546,6 +555,58 @@ mod tests {
         )];
         let err = select_revision(&revisions, "DEVELOP", Some("carol"), None).unwrap_err();
         assert!(err.to_string().contains("alice"));
+    }
+
+    #[test]
+    fn selected_non_develop_revision_serializes_as_revision() {
+        let db = tempfile::NamedTempFile::new().unwrap();
+        let conn = crate::core::db::create_db(db.path()).unwrap();
+        conn.execute(
+            "INSERT INTO scripts (logical_path, language, content)
+             VALUES ('/catalog/scripts/tool.py', 'python', 'active')",
+            [],
+        )
+        .unwrap();
+        let revision = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(revision.path(), "archived").unwrap();
+
+        let result = diff_catalog_vs_revision(
+            &conn,
+            "/catalog/scripts/tool.py",
+            revision.path(),
+            "ARCHIVE",
+        )
+        .unwrap();
+
+        assert_eq!(result.new_kind, SourceKind::Revision);
+        assert_eq!(
+            serde_json::to_value(result).unwrap()["new_kind"],
+            "revision"
+        );
+    }
+
+    #[test]
+    fn selected_develop_revision_keeps_checkout_kind() {
+        let db = tempfile::NamedTempFile::new().unwrap();
+        let conn = crate::core::db::create_db(db.path()).unwrap();
+        conn.execute(
+            "INSERT INTO scripts (logical_path, language, content)
+             VALUES ('/catalog/scripts/tool.py', 'python', 'active')",
+            [],
+        )
+        .unwrap();
+        let revision = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(revision.path(), "checkout").unwrap();
+
+        let result = diff_catalog_vs_revision(
+            &conn,
+            "/catalog/scripts/tool.py",
+            revision.path(),
+            "DEVELOP",
+        )
+        .unwrap();
+
+        assert_eq!(result.new_kind, SourceKind::Checkout);
     }
 
     #[test]

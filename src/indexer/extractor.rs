@@ -263,11 +263,26 @@ fn strip_comment_prefix(line: &str) -> &str {
     s.trim()
 }
 
+/// Return only the leading run of comment lines. Metadata belongs to the
+/// file's header, so comment-looking text after the first executable line is
+/// intentionally excluded.
+fn leading_comment_block(content: &str) -> String {
+    content
+        .lines()
+        .take_while(|line| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with("<#") || trimmed.starts_with("//") || trimmed.starts_with('#')
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn parse_header_comments(content: &str, meta: &mut ExtractedMetadata) {
+    let header = leading_comment_block(content);
     let mut found: HashSet<&'static str> = HashSet::new();
     let mut history_raw: Vec<String> = Vec::new();
 
-    for line in content.lines().take(40) {
+    for line in header.lines().take(40) {
         let stripped = strip_comment_prefix(line);
         for pat in HEADER_PATTERNS.iter() {
             if found.contains(pat.field_name) && pat.field_name != "history" {
@@ -322,8 +337,8 @@ fn parse_header_comments(content: &str, meta: &mut ExtractedMetadata) {
         );
     }
 
-    parse_related_file_keywords(content, meta);
-    parse_block_keywords(content, meta);
+    parse_related_file_keywords(&header, meta);
+    parse_block_keywords(&header, meta);
 }
 
 // ---------------------------------------------------------------------------
@@ -555,6 +570,29 @@ mod tests {
             meta.fields.get("scripttype").and_then(|v| v.as_str()),
             Some("shell")
         );
+    }
+
+    #[test]
+    fn ignores_metadata_markers_in_the_body_after_executable_code() {
+        let meta = parse_headers(
+            "# @brief Header purpose\n\
+             echo running\n\
+             # @scripttype shell\n\
+             # @childfile /catalog/scripts/worker.sh\n\
+             # @usage\n\
+             # ./body-only.sh\n\
+             # @endusage\n\
+             # @description\n\
+             # Body-only description\n\
+             # @enddescription\n",
+        );
+
+        assert_eq!(meta.purpose, "Header purpose");
+        assert!(!meta.fields.contains_key("scripttype"));
+        assert!(!meta.fields.contains_key("usage"));
+        assert!(!meta.fields.contains_key("description"));
+        assert!(meta.related.is_empty());
+        assert!(!meta.fields.contains_key("childfile"));
     }
 
     // -----------------------------------------------------------------------

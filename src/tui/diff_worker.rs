@@ -15,6 +15,9 @@ pub struct DiffRequest {
     /// Enter key sets this to whichever entry is selected there, reaching
     /// ARCHIVE/WORKING/ROLLBACK revisions the default (`None`) never does.
     pub revision_physical_path: Option<String>,
+    /// Indexed type for `revision_physical_path`, used to preserve DEVELOP's
+    /// checkout label while distinguishing other revision sources in JSON.
+    pub revision_type: Option<String>,
 }
 
 pub struct DiffResponse {
@@ -84,6 +87,7 @@ fn worker_loop(
             &db_path,
             &request.path,
             request.revision_physical_path.as_deref(),
+            request.revision_type.as_deref(),
         );
         if response_tx
             .send(DiffResponse {
@@ -101,14 +105,18 @@ fn compute_diff(
     db_path: &Path,
     logical_path: &str,
     revision_physical_path: Option<&str>,
+    revision_type: Option<&str>,
 ) -> String {
     match open_db(db_path)
         .map_err(anyhow::Error::from)
         .and_then(|conn| {
             let result = match revision_physical_path {
-                Some(physical_path) => {
-                    diff_catalog_vs_revision(&conn, logical_path, Path::new(physical_path))
-                }
+                Some(physical_path) => diff_catalog_vs_revision(
+                    &conn,
+                    logical_path,
+                    Path::new(physical_path),
+                    revision_type.unwrap_or_default(),
+                ),
                 None => diff_catalog_vs_checkout(&conn, logical_path),
             };
             result
@@ -149,6 +157,7 @@ mod tests {
                 id: 1,
                 path: "/catalog/scripts/missing.py".to_string(),
                 revision_physical_path: None,
+                revision_type: None,
             })
             .unwrap();
         let response = recv_response(&worker);

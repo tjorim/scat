@@ -212,12 +212,12 @@ pub enum Commands {
         revision_type: Option<RevisionTypeArg>,
 
         /// Narrow --revision-type to a checkout by this user (DEVELOP/ROLLBACK only —
-        /// ARCHIVE/WORKING revisions carry no user). Ignored without --revision-type.
+        /// ARCHIVE/WORKING revisions carry no user). Requires --revision-type.
         #[arg(long, requires = "revision_type")]
         revision_user: Option<String>,
 
         /// Narrow --revision-type to this exact timestamp (as shown by `scat status`).
-        /// Ignored without --revision-type.
+        /// Requires --revision-type.
         #[arg(long, requires = "revision_type")]
         revision_timestamp: Option<String>,
 

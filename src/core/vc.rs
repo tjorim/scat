@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::Connection;
 use serde::Deserialize;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 use tracing::{debug, warn};
 
@@ -165,6 +166,34 @@ impl VcConfig {
             .chain(self.archive_dirs.iter())
             .map(std::string::String::as_str)
     }
+}
+
+/// Stable description of the manifest setting that affects vc warnings.
+///
+/// Both the configured path and its bytes are included so changing the
+/// manifest, choosing a different manifest, enabling one, or disabling one
+/// all invalidate a previously built catalog.
+pub fn manifest_fingerprint(manifest_path: Option<&Path>) -> String {
+    let mut hasher = Sha256::new();
+    match manifest_path {
+        None => hasher.update(b"disabled"),
+        Some(path) => {
+            hasher.update(b"enabled\0");
+            hasher.update(path.as_os_str().as_encoded_bytes());
+            hasher.update(b"\0");
+            match std::fs::read(path) {
+                Ok(content) => {
+                    hasher.update(b"present\0");
+                    hasher.update(content);
+                }
+                Err(err) => {
+                    hasher.update(b"unreadable\0");
+                    hasher.update(err.kind().to_string().as_bytes());
+                }
+            }
+        }
+    }
+    hex::encode(hasher.finalize())
 }
 
 #[derive(Debug, Clone)]
@@ -1077,6 +1106,23 @@ mod tests {
             ..Default::default()
         };
         assert!(cfg.configured());
+    }
+
+    #[test]
+    fn manifest_fingerprint_tracks_enabled_state_path_and_content() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let first = dir.path().join("first.manifest");
+        let second = dir.path().join("second.manifest");
+        std::fs::write(&first, "/catalog/scripts/a.py\n").unwrap();
+        std::fs::write(&second, "/catalog/scripts/a.py\n").unwrap();
+
+        let disabled = manifest_fingerprint(None);
+        let first_before = manifest_fingerprint(Some(&first));
+        assert_ne!(disabled, first_before);
+        assert_ne!(first_before, manifest_fingerprint(Some(&second)));
+
+        std::fs::write(&first, "/catalog/scripts/b.py\n").unwrap();
+        assert_ne!(first_before, manifest_fingerprint(Some(&first)));
     }
 
     #[test]
