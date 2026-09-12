@@ -39,7 +39,7 @@ pub(super) fn canonicalize_roots(roots: &[PathBuf]) -> Vec<PathBuf> {
 
 /// Whether `path` canonicalizes to somewhere inside one of `canonical_roots`.
 /// Used to bound symlinked-directory traversal: a symlink pointing at another
-/// location inside the scan roots (e.g. the documented `alt/pse → linux/pse`
+/// location inside the scan roots (e.g. an `alt/scripts → linux/scripts`
 /// OS-variant aliasing) is followed as before, but a symlink pointing outside
 /// all configured roots — into an unrelated, potentially huge tree such as a
 /// home directory or another mount — is not, since following it could turn a

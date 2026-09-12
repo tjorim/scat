@@ -61,6 +61,15 @@ vc:
   # Directory names treated as ARCHIVE-type checkout containers.
   archive_dirs:
     - ARCHIVE
+  # Optional: path to vc's own manifest of every file path it manages (one
+  # absolute path per line; name and location are environment-specific).
+  # When set, the catalog build cross-references it against what was
+  # actually indexed, producing `registered_with_vc_but_not_indexed`
+  # warnings (a scan-root or ignore gap) and `not_registered_with_vc`
+  # warnings (indexed but unlisted — a weaker signal, since ordinary non-vc
+  # scripts can share a vc-managed tree). Omit to skip this cross-reference
+  # entirely.
+  # manifest_path: /home/scripts/.vc/managed_files.lst
 
 # Named search aliases. `scat search @name` expands to the mapped free-text
 # query. Note: this only expands the free-text search argument, not CLI

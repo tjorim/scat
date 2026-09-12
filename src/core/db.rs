@@ -6,7 +6,7 @@ use tracing::{debug, trace};
 use crate::error::{Error, Result};
 
 /// Current SQLite schema version expected by this binary.
-pub const SCHEMA_VERSION: i64 = 13;
+pub const SCHEMA_VERSION: i64 = 14;
 
 /// A database row serialised as a JSON object — every column becomes a key.
 pub type JsonRow = serde_json::Map<String, serde_json::Value>;
@@ -224,7 +224,8 @@ ON function_calls(resolved_target_name);
 CREATE TABLE IF NOT EXISTS index_metadata (
     id              INTEGER PRIMARY KEY CHECK (id = 1),
     build_timestamp TEXT    NOT NULL,
-    schema_version  INTEGER NOT NULL
+    schema_version  INTEGER NOT NULL,
+    manifest_fingerprint TEXT NOT NULL DEFAULT ''
 );
 ";
 

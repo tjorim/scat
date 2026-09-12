@@ -49,6 +49,9 @@ fn run(cli: Cli) -> Result<()> {
     if let Commands::Diff {
         path: None,
         against: _,
+        revision_type: _,
+        revision_user: _,
+        revision_timestamp: _,
         old: Some(ref old_path),
         new: Some(ref new_path),
         json,
@@ -214,10 +217,21 @@ fn run(cli: Cli) -> Result<()> {
         Commands::Diff {
             path: Some(logical_path),
             against,
+            revision_type,
+            revision_user,
+            revision_timestamp,
             old: _,
             new: _,
             json,
-        } => cmd_script_diff_catalog(&api, &logical_path, against.as_deref(), json),
+        } => cmd_script_diff_catalog(
+            &api,
+            &logical_path,
+            against.as_deref(),
+            revision_type.map(cli::RevisionTypeArg::as_str),
+            revision_user.as_deref(),
+            revision_timestamp.as_deref(),
+            json,
+        ),
         Commands::Vc { .. }
         | Commands::Tui { .. }
         | Commands::Catalog { .. }

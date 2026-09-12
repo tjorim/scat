@@ -251,6 +251,51 @@ fn load_detail(api: &SearchApi, path: &str) -> DetailPayload {
             }
         }
     }
+
+    // Symlink relationships are a separate kind of edge from the dependency
+    // graph above (an alias, not a "depends on"), and only the outbound half
+    // (this script's own target, if it's a symlink) is otherwise visible —
+    // in the Metadata pane, as a static, unnavigable line. Both directions
+    // land in `deps` so they're navigable the same way `uses`/`used by`
+    // already are, and so a script with several symlinks pointing at it (the
+    // "alt/scripts → linux/scripts" OS-variant pattern can produce more than
+    // one) shows all of them rather than just the first.
+    if let Some(target) = result
+        .detail
+        .as_ref()
+        .map(|row| ScriptView::new(row).symlink_target().to_string())
+        .filter(|t| !t.is_empty())
+    {
+        let key = ("symlink".to_string(), target);
+        if dep_seen.insert(key.clone()) {
+            deps.push(DependencyItem {
+                kind: key.0,
+                logical_path: key.1,
+            });
+        }
+    }
+    match api.symlinks_to(path) {
+        Ok(inbound) => {
+            for row in inbound {
+                let lp = ScriptView::new(&row).logical_path().to_string();
+                if lp.is_empty() {
+                    continue;
+                }
+                let key = ("linked".to_string(), lp);
+                if dep_seen.insert(key.clone()) {
+                    deps.push(DependencyItem {
+                        kind: key.0,
+                        logical_path: key.1,
+                    });
+                }
+            }
+        }
+        Err(e) => {
+            if result.error.is_none() {
+                result.error = Some(e.to_string());
+            }
+        }
+    }
     result.deps = deps;
 
     result.functions = match api.get_functions_defined_in(path) {
@@ -446,6 +491,81 @@ mod tests {
         let response = recv_response(&worker);
         assert_eq!(response.payload.preview_total_lines, 1);
         assert_eq!(response.payload.cached_preview_lines.len(), 1);
+    }
+
+    #[test]
+    fn deps_include_inbound_symlinks_even_when_there_are_several() {
+        // a.py is the real target of two symlinks (the "alt/scripts →
+        // linux/scripts" OS-variant pattern can produce more than one
+        // pointing at the same file) — both must show up as navigable
+        // `deps` entries, not just the first, since the Metadata pane only
+        // shows the reverse (outbound) direction and has no way to show
+        // "who points at me".
+        let db = super::super::make_test_db();
+        let conn = rusqlite::Connection::open(db.path()).unwrap();
+        conn.execute(
+            "INSERT INTO scripts (logical_path, language, symlink_target) VALUES
+             ('/catalog/linux/a.py', 'python', '/catalog/scripts/a.py'),
+             ('/catalog/alt/a.py', 'python', '/catalog/scripts/a.py')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let worker = DetailWorker::new(db.path()).unwrap();
+        worker
+            .send(DetailRequest {
+                id: 8,
+                path: "/catalog/scripts/a.py".to_string(),
+            })
+            .unwrap();
+        let response = recv_response(&worker);
+        assert_eq!(response.payload.error, None);
+
+        let linked: Vec<&str> = response
+            .payload
+            .deps
+            .iter()
+            .filter(|d| d.kind == "linked")
+            .map(|d| d.logical_path.as_str())
+            .collect();
+        assert_eq!(
+            linked,
+            vec!["/catalog/alt/a.py", "/catalog/linux/a.py"],
+            "both inbound symlinks must be listed, sorted by path"
+        );
+    }
+
+    #[test]
+    fn deps_include_outbound_symlink_target() {
+        let db = super::super::make_test_db();
+        let conn = rusqlite::Connection::open(db.path()).unwrap();
+        conn.execute(
+            "INSERT INTO scripts (logical_path, language, symlink_target) VALUES
+             ('/catalog/scripts/b.py', 'python', '/catalog/scripts/a.py')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let worker = DetailWorker::new(db.path()).unwrap();
+        worker
+            .send(DetailRequest {
+                id: 9,
+                path: "/catalog/scripts/b.py".to_string(),
+            })
+            .unwrap();
+        let response = recv_response(&worker);
+
+        assert!(
+            response
+                .payload
+                .deps
+                .iter()
+                .any(|d| d.kind == "symlink" && d.logical_path == "/catalog/scripts/a.py"),
+            "the symlink's own target must be a navigable deps entry: {:?}",
+            response.payload.deps
+        );
     }
 
     #[test]

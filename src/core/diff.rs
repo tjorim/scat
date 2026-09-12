@@ -31,6 +31,8 @@ pub enum SourceKind {
     Active,
     /// Physical path from an indexed DEVELOP revision.
     Checkout,
+    /// Physical path from an indexed non-DEVELOP revision.
+    Revision,
     /// Explicitly supplied path (via `--against`, `--old`, or `--new`).
     Explicit,
 }
@@ -158,6 +160,31 @@ pub fn diff_catalog_vs_checkout(conn: &Connection, logical_path: &str) -> Result
     })
 }
 
+/// Compare the cataloged active content of `logical_path` against a file,
+/// labeling the "new" side as `new_kind`. Shared by [`diff_catalog_vs_file`]
+/// (an arbitrary `--against` path) and [`diff_catalog_vs_revision`] (a
+/// specific revision's own physical path) — they differ only in how the
+/// path was obtained, not in how the comparison works.
+fn diff_catalog_vs_path(
+    conn: &Connection,
+    logical_path: &str,
+    path: &Path,
+    new_kind: SourceKind,
+) -> Result<ScriptDiffResult> {
+    let old_content = catalog_content(conn, logical_path)?;
+    let new_content = read_file_content(path)?;
+    let hunks = compute_diff(&old_content, &new_content);
+
+    Ok(ScriptDiffResult {
+        logical_path: Some(logical_path.to_string()),
+        old_path: format!("catalog:{logical_path}"),
+        new_path: path.display().to_string(),
+        old_kind: SourceKind::Active,
+        new_kind,
+        hunks,
+    })
+}
+
 /// Compare the cataloged active content of `logical_path` against an
 /// explicitly supplied file path (from `--against`).
 pub fn diff_catalog_vs_file(
@@ -165,17 +192,94 @@ pub fn diff_catalog_vs_file(
     logical_path: &str,
     against: &Path,
 ) -> Result<ScriptDiffResult> {
-    let old_content = catalog_content(conn, logical_path)?;
-    let new_content = read_file_content(against)?;
-    let hunks = compute_diff(&old_content, &new_content);
+    diff_catalog_vs_path(conn, logical_path, against, SourceKind::Explicit)
+}
 
-    Ok(ScriptDiffResult {
-        logical_path: Some(logical_path.to_string()),
-        old_path: format!("catalog:{logical_path}"),
-        new_path: against.display().to_string(),
-        old_kind: SourceKind::Active,
-        new_kind: SourceKind::Explicit,
-        hunks,
+/// Compare the cataloged active content of `logical_path` against a specific
+/// revision's physical file — any DEVELOP, WORKING, ARCHIVE, or ROLLBACK
+/// entry, not just the most-recent DEVELOP checkout `diff_catalog_vs_checkout`
+/// is limited to. `physical_path` should come from a `revisions` row already
+/// known to the caller — see [`select_revision`] to pick one by
+/// type/user/timestamp, or the TUI's Revisions pane selection.
+pub fn diff_catalog_vs_revision(
+    conn: &Connection,
+    logical_path: &str,
+    physical_path: &Path,
+    revision_type: &str,
+) -> Result<ScriptDiffResult> {
+    let source_kind =
+        if revision_type.is_empty() || revision_type.eq_ignore_ascii_case(REVISION_TYPE_DEVELOP) {
+            SourceKind::Checkout
+        } else {
+            SourceKind::Revision
+        };
+    diff_catalog_vs_path(conn, logical_path, physical_path, source_kind)
+}
+
+/// Select one revision row (as returned by `SearchApi::revisions_for`,
+/// ordered `revision_type, timestamp DESC, physical_path`) matching
+/// `revision_type` and, optionally, `user` and/or `timestamp`. When more
+/// than one row matches after filtering, the most recent one wins — the
+/// same "most recent" default `diff_catalog_vs_checkout` already applies to
+/// DEVELOP; `user`/`timestamp` narrow to a specific one instead.
+///
+/// Errors with the list of what *did* match `revision_type` when the
+/// user/timestamp filters eliminate everything, so the caller can see what
+/// was actually available rather than guessing why nothing matched.
+pub fn select_revision<'a>(
+    revisions: &'a [crate::core::db::JsonRow],
+    revision_type: &str,
+    user: Option<&str>,
+    timestamp: Option<&str>,
+) -> Result<&'a crate::core::db::JsonRow> {
+    use crate::core::db::row_str;
+
+    let of_type: Vec<&crate::core::db::JsonRow> = revisions
+        .iter()
+        .filter(|r| row_str(r, "revision_type").eq_ignore_ascii_case(revision_type))
+        .collect();
+
+    if of_type.is_empty() {
+        let available: std::collections::BTreeSet<&str> = revisions
+            .iter()
+            .map(|r| row_str(r, "revision_type"))
+            .collect();
+        return Err(Error::Validation(format!(
+            "No {revision_type} revision found.\n\
+             Hint: available revision types are: {}",
+            if available.is_empty() {
+                "(none indexed)".to_string()
+            } else {
+                available.into_iter().collect::<Vec<_>>().join(", ")
+            }
+        )));
+    }
+
+    let mut narrowed = of_type.clone();
+    if let Some(user) = user {
+        narrowed.retain(|r| row_str(r, "user") == user);
+    }
+    if let Some(timestamp) = timestamp {
+        narrowed.retain(|r| row_str(r, "timestamp") == timestamp);
+    }
+
+    narrowed.into_iter().next().ok_or_else(|| {
+        let candidates: Vec<String> = of_type
+            .iter()
+            .map(|r| {
+                format!(
+                    "{}/{} at {}",
+                    row_str(r, "user"),
+                    row_str(r, "os_flavor"),
+                    row_str(r, "timestamp")
+                )
+            })
+            .collect();
+        Error::Validation(format!(
+            "No {revision_type} revision matches the given user/timestamp filter.\n\
+             Hint: {revision_type} revisions available: {}",
+            candidates.join("; ")
+        ))
     })
 }
 
@@ -346,6 +450,163 @@ mod tests {
             hunks: compute_diff(old, new),
         };
         render_diff_text(&result)
+    }
+
+    // -----------------------------------------------------------------------
+    // select_revision
+    // -----------------------------------------------------------------------
+
+    fn revision_row(
+        revision_type: &str,
+        user: &str,
+        timestamp: &str,
+        physical_path: &str,
+    ) -> crate::core::db::JsonRow {
+        let mut row = crate::core::db::JsonRow::new();
+        row.insert("revision_type".into(), revision_type.into());
+        row.insert("user".into(), user.into());
+        row.insert("timestamp".into(), timestamp.into());
+        row.insert("physical_path".into(), physical_path.into());
+        row.insert("os_flavor".into(), "linux".into());
+        row
+    }
+
+    #[test]
+    fn select_revision_picks_most_recent_of_the_requested_type() {
+        // Already ordered `revision_type, timestamp DESC, ...`, matching
+        // what `SearchApi::revisions_for` actually returns.
+        let revisions = vec![
+            revision_row(
+                "ARCHIVE",
+                "",
+                "20240921_135312",
+                "/archive/tool_20240921_135312",
+            ),
+            revision_row("ARCHIVE", "", "20240610", "/archive/tool_20240610"),
+            revision_row("DEVELOP", "alice", "20260910_091500", "/develop/tool_alice"),
+        ];
+
+        let picked = select_revision(&revisions, "ARCHIVE", None, None).unwrap();
+        assert_eq!(
+            picked.get("physical_path").and_then(|v| v.as_str()),
+            Some("/archive/tool_20240921_135312")
+        );
+    }
+
+    #[test]
+    fn select_revision_is_case_insensitive_on_type() {
+        let revisions = vec![revision_row(
+            "DEVELOP",
+            "alice",
+            "20260910_091500",
+            "/d/tool",
+        )];
+        assert!(select_revision(&revisions, "develop", None, None).is_ok());
+    }
+
+    #[test]
+    fn select_revision_narrows_by_user() {
+        let revisions = vec![
+            revision_row("DEVELOP", "alice", "20260910_091500", "/d/alice"),
+            revision_row("DEVELOP", "bob", "20260910_093000", "/d/bob"),
+        ];
+
+        let picked = select_revision(&revisions, "DEVELOP", Some("alice"), None).unwrap();
+        assert_eq!(
+            picked.get("physical_path").and_then(|v| v.as_str()),
+            Some("/d/alice")
+        );
+    }
+
+    #[test]
+    fn select_revision_narrows_by_timestamp() {
+        let revisions = vec![
+            revision_row("ARCHIVE", "", "20240921_135312", "/a/new"),
+            revision_row("ARCHIVE", "", "20240610", "/a/old"),
+        ];
+
+        let picked = select_revision(&revisions, "ARCHIVE", None, Some("20240610")).unwrap();
+        assert_eq!(
+            picked.get("physical_path").and_then(|v| v.as_str()),
+            Some("/a/old")
+        );
+    }
+
+    #[test]
+    fn select_revision_errors_when_type_absent() {
+        let revisions = vec![revision_row(
+            "DEVELOP",
+            "alice",
+            "20260910_091500",
+            "/d/alice",
+        )];
+        let err = select_revision(&revisions, "ARCHIVE", None, None).unwrap_err();
+        assert!(err.to_string().contains("No ARCHIVE revision found"));
+        assert!(err.to_string().contains("DEVELOP"));
+    }
+
+    #[test]
+    fn select_revision_errors_when_filter_eliminates_everything() {
+        let revisions = vec![revision_row(
+            "DEVELOP",
+            "alice",
+            "20260910_091500",
+            "/d/alice",
+        )];
+        let err = select_revision(&revisions, "DEVELOP", Some("carol"), None).unwrap_err();
+        assert!(err.to_string().contains("alice"));
+    }
+
+    #[test]
+    fn selected_non_develop_revision_serializes_as_revision() {
+        let db = tempfile::NamedTempFile::new().unwrap();
+        let conn = crate::core::db::create_db(db.path()).unwrap();
+        conn.execute(
+            "INSERT INTO scripts (logical_path, language, content)
+             VALUES ('/catalog/scripts/tool.py', 'python', 'active')",
+            [],
+        )
+        .unwrap();
+        let revision = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(revision.path(), "archived").unwrap();
+
+        let result = diff_catalog_vs_revision(
+            &conn,
+            "/catalog/scripts/tool.py",
+            revision.path(),
+            "ARCHIVE",
+        )
+        .unwrap();
+
+        assert_eq!(result.new_kind, SourceKind::Revision);
+        assert_eq!(
+            serde_json::to_value(result).unwrap()["new_kind"],
+            "revision"
+        );
+    }
+
+    #[test]
+    fn selected_develop_revision_keeps_checkout_kind() {
+        let db = tempfile::NamedTempFile::new().unwrap();
+        let conn = crate::core::db::create_db(db.path()).unwrap();
+        conn.execute(
+            "INSERT INTO scripts (logical_path, language, content)
+             VALUES ('/catalog/scripts/tool.py', 'python', 'active')",
+            [],
+        )
+        .unwrap();
+        let revision = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(revision.path(), "checkout").unwrap();
+
+        let result = diff_catalog_vs_revision(
+            &conn,
+            "/catalog/scripts/tool.py",
+            revision.path(),
+            "DEVELOP",
+        )
+        .unwrap();
+
+        assert_eq!(result.new_kind, SourceKind::Checkout);
     }
 
     #[test]

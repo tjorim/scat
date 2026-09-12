@@ -1,4 +1,5 @@
 use super::deps::{cmd_deps, render_tree_lines};
+use super::diff::cmd_script_diff_catalog;
 use super::index::should_skip_catalog_rebuild;
 use super::search::query_uses_fts;
 use super::show::{cmd_show, render_revision_lines, revisions_to_json};
@@ -112,10 +113,31 @@ fn query_uses_fts_excludes_path_like_queries() {
 
 #[test]
 fn skip_rebuild_requires_existing_older_file_mtime() {
-    assert!(should_skip_catalog_rebuild(100.0, Some(99.9)));
-    assert!(!should_skip_catalog_rebuild(100.0, Some(100.0)));
-    assert!(!should_skip_catalog_rebuild(100.0, Some(100.1)));
-    assert!(!should_skip_catalog_rebuild(100.0, None));
+    assert!(should_skip_catalog_rebuild(
+        100.0,
+        Some(99.9),
+        "same",
+        "same"
+    ));
+    assert!(!should_skip_catalog_rebuild(
+        100.0,
+        Some(100.0),
+        "same",
+        "same"
+    ));
+    assert!(!should_skip_catalog_rebuild(
+        100.0,
+        Some(100.1),
+        "same",
+        "same"
+    ));
+    assert!(!should_skip_catalog_rebuild(100.0, None, "same", "same"));
+    assert!(!should_skip_catalog_rebuild(
+        100.0,
+        Some(99.9),
+        "enabled",
+        "disabled"
+    ));
 }
 
 #[test]
@@ -159,6 +181,131 @@ fn cmd_show_accepts_folder_and_siblings_fields() {
         )
         .unwrap();
     }
+}
+
+#[test]
+fn cmd_show_accepts_usage_and_description_fields() {
+    let (api, _file) = make_api();
+    api.conn
+        .execute(
+            "INSERT INTO scripts (logical_path, language, metadata_json) VALUES
+             ('/catalog/scripts/a.py', 'python', ?1)",
+            rusqlite::params![
+                serde_json::json!({"usage": "a.py <arg>", "description": "Does a thing."})
+                    .to_string()
+            ],
+        )
+        .unwrap();
+
+    for output in [OutputFormat::Table, OutputFormat::Json] {
+        cmd_show(
+            &api,
+            "/catalog/scripts/a.py",
+            &["usage".to_string(), "description".to_string()],
+            output,
+            false,
+            false,
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+fn cmd_show_accepts_linked_by_field() {
+    let (api, _file) = make_api();
+    insert_script(&api, "/catalog/scripts/target.py");
+    api.conn
+        .execute(
+            "INSERT INTO scripts (logical_path, language, symlink_target) VALUES
+             ('/catalog/alt/target.py', 'python', '/catalog/scripts/target.py'),
+             ('/catalog/hpux/target.py', 'python', '/catalog/scripts/target.py')",
+            [],
+        )
+        .unwrap();
+
+    for output in [OutputFormat::Table, OutputFormat::Json] {
+        cmd_show(
+            &api,
+            "/catalog/scripts/target.py",
+            &["linked_by".to_string()],
+            output,
+            false,
+            false,
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+fn cmd_script_diff_catalog_selects_revision_by_type_and_narrowing() {
+    let (api, _file) = make_api();
+
+    let archive_old = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(archive_old.path(), "old content\n").unwrap();
+    let archive_new = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(archive_new.path(), "newer archived content\n").unwrap();
+
+    api.conn
+        .execute(
+            "INSERT INTO scripts (logical_path, language, content) VALUES
+             ('/catalog/scripts/a.py', 'python', 'active content\n')",
+            [],
+        )
+        .unwrap();
+    api.conn
+        .execute(
+            "INSERT INTO revisions
+             (logical_path, physical_path, revision_type, os_flavor, user, timestamp) VALUES
+             ('/catalog/scripts/a.py', ?1, 'ARCHIVE', 'linux', '', '20240610'),
+             ('/catalog/scripts/a.py', ?2, 'ARCHIVE', 'linux', '', '20240921_135312')",
+            rusqlite::params![
+                archive_old.path().to_string_lossy(),
+                archive_new.path().to_string_lossy()
+            ],
+        )
+        .unwrap();
+
+    // Default (no narrowing): picks the most recent ARCHIVE entry.
+    cmd_script_diff_catalog(
+        &api,
+        "/catalog/scripts/a.py",
+        None,
+        Some("ARCHIVE"),
+        None,
+        None,
+        false,
+    )
+    .unwrap();
+
+    // Narrowed by timestamp: picks the older one instead.
+    cmd_script_diff_catalog(
+        &api,
+        "/catalog/scripts/a.py",
+        None,
+        Some("ARCHIVE"),
+        None,
+        Some("20240610"),
+        true,
+    )
+    .unwrap();
+}
+
+#[test]
+fn cmd_script_diff_catalog_errors_when_revision_type_absent() {
+    let (api, _file) = make_api();
+    insert_script(&api, "/catalog/scripts/a.py");
+
+    let err = cmd_script_diff_catalog(
+        &api,
+        "/catalog/scripts/a.py",
+        None,
+        Some("ARCHIVE"),
+        None,
+        None,
+        false,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("Script diff failed"));
 }
 
 #[test]

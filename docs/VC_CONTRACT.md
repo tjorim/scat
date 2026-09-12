@@ -109,6 +109,17 @@ Where:
 - Timestamp precision varies and must be tolerated at date, minute, or
   second granularity
 - Multiple checkouts of the same script may exist concurrently
+- Every checkout has a hidden companion file alongside it, `.<checkout‑filename>`,
+  used by vc to detect whether the production target changed since checkout.
+  It is vc's own bookkeeping, not a revision, and must not be treated as one
+  (its name still matches the checkout filename convention once the leading
+  dot is absorbed by a greedy parse)
+- If the production target changed while a checkout was in progress, vc runs
+  a merge and leaves `<checkout‑filename>.org` (a backup of the pre‑merge
+  checkout) and, transiently, `<checkout‑filename>.merged` alongside the
+  checkout. Neither is a revision either — the real abbreviation vc encodes
+  is always the fixed‑width, dot‑free token its abbreviation tool produces,
+  so a `.org`/`.merged` suffix can never be part of a genuine one
 
 ---
 
@@ -157,13 +168,29 @@ A checkin:
 A rollback:
 - Re‑points the symlink for a script to an older version
 - Does **not** restore files from ARCHIVE
-- Does **not** modify DEVELOP
+- Moves the version it displaces into DEVELOP rather than deleting it,
+  making it available as a re‑editable candidate
 
 ### Observable impact
 
 - Symlink target changes
 - File modification times may update
-- No new files are created
+- The displaced version appears in DEVELOP as
+  `<script>_<timestamp>_RB_<abbr>`, alongside its own hidden companion file
+  (`.<script>_<timestamp>_RB_<abbr>`)
+
+### Distinguishing a rollback copy from a real checkout
+
+Both live in DEVELOP and match the same `<script>_<timestamp>_<suffix>`
+filename shape, but they mean different things:
+
+| | Real checkout | Rollback‑displaced copy |
+|---|---|---|
+| Suffix | `<user‑abbreviation>` | `RB_<user‑abbreviation>` |
+| Means | Someone is actively editing this | vc moved a replaced version here |
+
+A consuming tool that doesn't make this distinction will misreport a
+rollback as an in‑progress checkout by a user named `RB_<abbr>`.
 
 ---
 
@@ -205,8 +232,21 @@ Many vc‑managed scripts contain structured header comments, commonly using fie
 @techowner
 @funcowner
 @history
+@parentfile
+@childfile
+@inputfile
+@outputfile
+@paramfile
 
 ```
+
+The last four — `@parentfile`, `@childfile`, `@inputfile`, `@outputfile`,
+`@paramfile` — declare paths to other vc‑managed scripts the script relates
+to. Consuming tools may treat these as dependency‑edge candidates: a
+higher‑confidence signal than a path literal inferred from the script body,
+since the author declared the relationship explicitly. As with any path
+reference, a value that doesn't resolve to an indexed script should be
+dropped rather than surfaced as a dangling edge.
 
 These headers are:
 - Optional
@@ -215,6 +255,35 @@ These headers are:
 
 Consuming tools may parse these headers as **best‑effort metadata**, without assuming
 they are always present or complete.
+
+---
+
+## Managed-file manifest (optional cross-reference)
+
+vc maintains a flat text file recording every path it manages — one
+absolute managed file path per line — plus a companion file deriving each
+entry's parent directory. Name and location are environment-specific; this
+repository never hard-codes or names them, treating the concept generically
+(see `VcConfig::manifest_path`).
+
+Observed facts:
+- Entries are added on checkout, new‑file creation, and checkin
+- Entries are removed when a script is made obsolete
+- The exact name and location are environment‑specific and **must be
+  treated as configurable** in consuming tools — this repository never
+  hard‑codes it
+
+A consuming tool **may** optionally cross‑reference this manifest against
+what it actually indexed, entirely as a best‑effort diagnostic:
+- A path vc manages that scanning never found is a strong signal — usually a
+  scan‑root or ignore‑pattern gap
+- A path that was indexed but isn't in vc's manifest is a much weaker
+  signal — an ordinary, non‑vc‑managed script can legitimately sit inside a
+  vc‑managed tree
+
+This repository does not assume the manifest exists, is current, or is
+reachable from every host — the cross‑reference is opt‑in and absent by
+default (see `VcConfig::manifest_path`).
 
 ---
 

@@ -39,6 +39,11 @@ pub struct IndexResult {
     pub dry_run: bool,
     /// Non-fatal per-file processing errors.
     pub errors: Vec<(String, String)>,
+    /// Paths vc's managed-file manifest lists that scanning never found (see
+    /// `VcConfig::manifest_path`). Reported here rather than via
+    /// `scripts.vc_warnings` because that column belongs to an indexed
+    /// script row, and by definition none exists for these paths.
+    pub manifest_paths_not_indexed: Vec<String>,
 }
 
 #[derive(Debug, Default)]
@@ -201,6 +206,7 @@ pub fn build_index(
         db_path: tmp_path.clone(),
         dry_run: opts.dry_run,
         errors: Vec::new(),
+        manifest_paths_not_indexed: Vec::new(),
     };
 
     // -----------------------------------------------------------------------

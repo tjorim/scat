@@ -8,7 +8,11 @@ impl TuiApp {
     pub(super) fn scroll_target(&mut self) -> Option<&mut u16> {
         match self.focus {
             Focus::Preview => Some(&mut self.preview_scroll),
-            Focus::Revisions => Some(&mut self.revisions_scroll),
+            // Revisions moved to selection-based navigation (Up/Down move
+            // `revisions_selected`, matching Deps/Functions) — its own key
+            // handlers in `handlers.rs` intercept before this fallback runs,
+            // and `revisions_scroll` auto-follows the selection rather than
+            // being driven directly by scroll keys.
             _ => None,
         }
     }
@@ -39,7 +43,30 @@ impl TuiApp {
     /// Record a clickable region using `area` verbatim (no border inset), for
     /// borderless surfaces like the header line.
     pub(super) fn record_click_area(&mut self, area: Rect, kind: RegionKind, scroll: usize) {
-        self.click_regions.push(ClickRegion { area, kind, scroll });
+        self.click_regions.push(ClickRegion {
+            area,
+            kind,
+            scroll,
+            row_item_index: None,
+        });
+    }
+
+    /// Like `record_region`, but for a pane whose items can span more than
+    /// one screen row — see `ClickRegion::row_item_index`. `row_item_index`
+    /// is the render's own row→item map (e.g. `app.results_row_index`),
+    /// covering only the rows actually drawn this frame.
+    pub(super) fn record_region_with_row_index(
+        &mut self,
+        outer: Rect,
+        kind: RegionKind,
+        row_item_index: Vec<usize>,
+    ) {
+        self.click_regions.push(ClickRegion {
+            area: inner_rect(outer),
+            kind,
+            scroll: 0,
+            row_item_index: Some(row_item_index),
+        });
     }
 
     /// Handle a mouse event, returning whether it changed anything (and thus
@@ -189,8 +216,16 @@ impl TuiApp {
                 Ok(true)
             }
             RegionKind::Revisions => {
-                self.revisions_scroll = scroll_by(self.revisions_scroll, delta);
-                Ok(true)
+                let next = move_selection(
+                    self.revisions_selected,
+                    self.checkouts.len(),
+                    delta as isize,
+                );
+                if next != self.revisions_selected {
+                    self.revisions_selected = next;
+                    return Ok(true);
+                }
+                Ok(false)
             }
             RegionKind::DetailBody => {
                 self.detail_scroll = scroll_by(self.detail_scroll, delta);

@@ -88,6 +88,13 @@ impl TuiApp {
                 self.jump_to_selected_function();
             }
             KeyEvent {
+                code: KeyCode::Enter,
+                ..
+            } if self.focus == Focus::Revisions => {
+                self.dispatch_diff_against_selected_revision()?;
+                self.mode = ViewMode::DetailDiff;
+            }
+            KeyEvent {
                 code: KeyCode::Up, ..
             }
             | KeyEvent {
@@ -207,6 +214,27 @@ impl TuiApp {
             } if self.focus == Focus::Functions => {
                 self.functions_selected =
                     move_selection(self.functions_selected, self.functions.len(), 1);
+            }
+            KeyEvent {
+                code: KeyCode::Up, ..
+            }
+            | KeyEvent {
+                code: KeyCode::Char('k'),
+                ..
+            } if self.focus == Focus::Revisions => {
+                self.revisions_selected =
+                    move_selection(self.revisions_selected, self.checkouts.len(), -1);
+            }
+            KeyEvent {
+                code: KeyCode::Down,
+                ..
+            }
+            | KeyEvent {
+                code: KeyCode::Char('j'),
+                ..
+            } if self.focus == Focus::Revisions => {
+                self.revisions_selected =
+                    move_selection(self.revisions_selected, self.checkouts.len(), 1);
             }
             KeyEvent {
                 code: KeyCode::Char('f'),
