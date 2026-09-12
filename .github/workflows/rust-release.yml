@@ -160,7 +160,8 @@ jobs:
           CREATE TABLE index_metadata (
               id INTEGER PRIMARY KEY CHECK (id = 1),
               build_timestamp TEXT NOT NULL,
-              schema_version INTEGER NOT NULL
+              schema_version INTEGER NOT NULL,
+              manifest_fingerprint TEXT NOT NULL DEFAULT ''
           );
           """)
           conn.execute(
@@ -190,7 +191,7 @@ jobs:
           conn.execute(
               "INSERT INTO index_metadata (id, build_timestamp, schema_version) VALUES (1, ?, ?)",
               # Must match scat_core::core::db::SCHEMA_VERSION.
-              ("2026-06-01T00:00:00Z", 13),
+              ("2026-06-01T00:00:00Z", 14),
           )
           conn.commit()
           conn.close()
