@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Indexer
+
+- **`.txt`, `.ini`, `.cfg` and `.autocfg` files are indexed** — the scanner only picked up files whose extension was in its allowlist, so plain-text and config files never reached the catalog. `.txt` (language `text`), `.ini` (`ini`), `.cfg` and `.autocfg` (both `cfg`) are now indexed like the other non-script types (`.csv`, `.json`, `.yml`), including vc working-directory revisions such as `app.ini_20260720_0900`, and `@scripttype: txt`/`ini`/`cfg`/`autocfg` is recognized by the vc consistency check. Run `scat catalog build --force` once to pick up existing files of these types, since an incremental build only visits files whose metadata changed.
+
 ### Platform and Deployment
 
 - **Linux-only** ([#59](https://github.com/tjorim/scat/issues/59)) — Windows client support is dropped; `scat` now targets RHEL/Linux only, and the build fails fast on non-Unix targets. This removes code that existed solely to paper over Windows semantics: the rename-aside-and-retry fallback in `atomic_swap` (POSIX `rename(2)` is unconditionally atomic, including against files a reader holds open, so `MoveFileExW`'s failure mode has no analogue), the `notepad` viewer fallback and the whitespace-splitting parse of unquoted backslash-bearing editor paths, and `PATHEXT`-aware `vc` lookup. The TUI path-mapping file's `windows:` root is no longer read — mapping files carrying one still load unchanged, the key is simply ignored. CI no longer builds or publishes a Windows artifact.

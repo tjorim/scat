@@ -6,7 +6,8 @@ use regex::Regex;
 
 /// Script file extensions the scanner considers indexable.
 pub(super) const SCRIPT_EXTENSIONS: &[&str] = &[
-    ".py", ".sh", ".bash", ".ksh", ".yml", ".yaml", ".csv", ".json",
+    ".py", ".sh", ".bash", ".ksh", ".yml", ".yaml", ".csv", ".json", ".txt", ".ini", ".cfg",
+    ".autocfg",
 ];
 
 /// Detect language from a file extension.
@@ -22,6 +23,9 @@ pub fn detect_language(path: &Path) -> &'static str {
         Some("yml" | "yaml") => "yaml",
         Some("csv") => "csv",
         Some("json") => "json",
+        Some("txt") => "text",
+        Some("ini") => "ini",
+        Some("cfg" | "autocfg") => "cfg",
         _ => "unknown",
     }
 }
@@ -79,6 +83,18 @@ mod tests {
         assert_eq!(detect_language(Path::new("foo.sh")), "shell");
         assert_eq!(detect_language(Path::new("foo.bash")), "shell");
         assert_eq!(detect_language(Path::new("foo.ksh")), "shell");
+    }
+
+    #[test]
+    fn detects_text_and_ini_from_extension() {
+        assert_eq!(detect_language(Path::new("notes.txt")), "text");
+        assert_eq!(detect_language(Path::new("NOTES.TXT")), "text");
+        assert_eq!(detect_language(Path::new("app.ini")), "ini");
+        assert_eq!(detect_language(Path::new("APP.INI")), "ini");
+        assert_eq!(detect_language(Path::new("site.cfg")), "cfg");
+        assert_eq!(detect_language(Path::new("SITE.CFG")), "cfg");
+        assert_eq!(detect_language(Path::new("host.autocfg")), "cfg");
+        assert_eq!(detect_language(Path::new("HOST.AUTOCFG")), "cfg");
     }
 
     #[test]
