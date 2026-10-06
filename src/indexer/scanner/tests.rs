@@ -224,9 +224,10 @@ fn scan_finds_txt_ini_cfg_and_autocfg_files() {
     let records = scan_paths(&[dir.path().to_path_buf()], 5, &[], &[], None, &shutdown).unwrap();
     assert_eq!(records.len(), 4);
     let languages: Vec<&str> = records.iter().map(|r| r.language.as_str()).collect();
-    for expected in ["text", "ini", "cfg", "autocfg"] {
+    for expected in ["text", "ini"] {
         assert!(languages.contains(&expected), "missing {expected}");
     }
+    assert_eq!(languages.iter().filter(|l| **l == "cfg").count(), 2);
 }
 
 #[test]

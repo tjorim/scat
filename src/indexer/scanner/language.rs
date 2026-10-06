@@ -25,8 +25,7 @@ pub fn detect_language(path: &Path) -> &'static str {
         Some("json") => "json",
         Some("txt") => "text",
         Some("ini") => "ini",
-        Some("cfg") => "cfg",
-        Some("autocfg") => "autocfg",
+        Some("cfg" | "autocfg") => "cfg",
         _ => "unknown",
     }
 }
@@ -94,8 +93,8 @@ mod tests {
         assert_eq!(detect_language(Path::new("APP.INI")), "ini");
         assert_eq!(detect_language(Path::new("site.cfg")), "cfg");
         assert_eq!(detect_language(Path::new("SITE.CFG")), "cfg");
-        assert_eq!(detect_language(Path::new("host.autocfg")), "autocfg");
-        assert_eq!(detect_language(Path::new("HOST.AUTOCFG")), "autocfg");
+        assert_eq!(detect_language(Path::new("host.autocfg")), "cfg");
+        assert_eq!(detect_language(Path::new("HOST.AUTOCFG")), "cfg");
     }
 
     #[test]
