@@ -6,7 +6,7 @@ All notable changes to this project will be documented in this file.
 
 ### Indexer
 
-- **`.txt` and `.ini` files are indexed** — the scanner only picked up files whose extension was in its allowlist, so plain-text and INI files never reached the catalog. `.txt` (language `text`) and `.ini` (language `ini`) are now indexed like the other non-script types (`.csv`, `.json`, `.yml`), including vc working-directory revisions such as `app.ini_20260720_0900`, and `@scripttype: txt`/`ini` is recognized by the vc consistency check. Run `scat catalog build --force` once to pick up existing `.txt`/`.ini` files, since an incremental build only visits files whose metadata changed.
+- **`.txt`, `.ini`, `.cfg` and `.autocfg` files are indexed** — the scanner only picked up files whose extension was in its allowlist, so plain-text and config files never reached the catalog. `.txt` (language `text`), `.ini` (`ini`), `.cfg` (`cfg`) and `.autocfg` (`autocfg`) are now indexed like the other non-script types (`.csv`, `.json`, `.yml`), including vc working-directory revisions such as `app.ini_20260720_0900`, and `@scripttype: txt`/`ini`/`cfg`/`autocfg` is recognized by the vc consistency check. Run `scat catalog build --force` once to pick up existing files of these types, since an incremental build only visits files whose metadata changed.
 
 ### Platform and Deployment
 

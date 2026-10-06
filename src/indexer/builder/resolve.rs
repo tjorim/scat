@@ -47,7 +47,17 @@ fn module_candidates_from_logical_path(logical_path: &str) -> Vec<String> {
 fn is_bare_extension(token: &str) -> bool {
     matches!(
         token,
-        "py" | "sh" | "bash" | "ksh" | "csv" | "json" | "yml" | "yaml" | "txt" | "ini"
+        "py" | "sh"
+            | "bash"
+            | "ksh"
+            | "csv"
+            | "json"
+            | "yml"
+            | "yaml"
+            | "txt"
+            | "ini"
+            | "cfg"
+            | "autocfg"
     )
 }
 
@@ -468,7 +478,7 @@ mod tests {
     #[test]
     fn bare_extension_tokens_are_excluded_from_module_map() {
         for ext in [
-            "py", "sh", "bash", "ksh", "csv", "json", "yml", "yaml", "txt", "ini",
+            "py", "sh", "bash", "ksh", "csv", "json", "yml", "yaml", "txt", "ini", "cfg", "autocfg",
         ] {
             assert!(super::is_bare_extension(ext), "{ext} should be excluded");
         }

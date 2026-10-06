@@ -212,18 +212,21 @@ fn scan_finds_py_and_sh_files() {
 }
 
 #[test]
-fn scan_finds_txt_and_ini_files() {
+fn scan_finds_txt_ini_cfg_and_autocfg_files() {
     let dir = tempfile::TempDir::new().unwrap();
     std::fs::write(dir.path().join("notes.txt"), "plain notes").unwrap();
     std::fs::write(dir.path().join("app.ini"), "[main]\nkey=value\n").unwrap();
+    std::fs::write(dir.path().join("site.cfg"), "key = value\n").unwrap();
+    std::fs::write(dir.path().join("host.autocfg"), "key = value\n").unwrap();
     std::fs::write(dir.path().join("skip.rb"), "puts 1").unwrap();
 
     let shutdown = AtomicBool::new(false);
     let records = scan_paths(&[dir.path().to_path_buf()], 5, &[], &[], None, &shutdown).unwrap();
-    assert_eq!(records.len(), 2);
+    assert_eq!(records.len(), 4);
     let languages: Vec<&str> = records.iter().map(|r| r.language.as_str()).collect();
-    assert!(languages.contains(&"text"));
-    assert!(languages.contains(&"ini"));
+    for expected in ["text", "ini", "cfg", "autocfg"] {
+        assert!(languages.contains(&expected), "missing {expected}");
+    }
 }
 
 #[test]

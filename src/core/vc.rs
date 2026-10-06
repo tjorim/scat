@@ -960,6 +960,8 @@ fn normalize_scripttype(value: &str) -> Option<&'static str> {
         "json" => Some("json"),
         "text" | "txt" => Some("text"),
         "ini" => Some("ini"),
+        "cfg" => Some("cfg"),
+        "autocfg" => Some("autocfg"),
         _ => None,
     }
 }
@@ -1154,6 +1156,8 @@ mod tests {
         assert_eq!(normalize_scripttype("csv"), Some("csv"));
         assert_eq!(normalize_scripttype("txt"), Some("text"));
         assert_eq!(normalize_scripttype("ini"), Some("ini"));
+        assert_eq!(normalize_scripttype("cfg"), Some("cfg"));
+        assert_eq!(normalize_scripttype("autocfg"), Some("autocfg"));
         assert_eq!(normalize_scripttype("json"), Some("json"));
     }
 

@@ -6,7 +6,8 @@ use regex::Regex;
 
 /// Script file extensions the scanner considers indexable.
 pub(super) const SCRIPT_EXTENSIONS: &[&str] = &[
-    ".py", ".sh", ".bash", ".ksh", ".yml", ".yaml", ".csv", ".json", ".txt", ".ini",
+    ".py", ".sh", ".bash", ".ksh", ".yml", ".yaml", ".csv", ".json", ".txt", ".ini", ".cfg",
+    ".autocfg",
 ];
 
 /// Detect language from a file extension.
@@ -24,6 +25,8 @@ pub fn detect_language(path: &Path) -> &'static str {
         Some("json") => "json",
         Some("txt") => "text",
         Some("ini") => "ini",
+        Some("cfg") => "cfg",
+        Some("autocfg") => "autocfg",
         _ => "unknown",
     }
 }
@@ -89,6 +92,10 @@ mod tests {
         assert_eq!(detect_language(Path::new("NOTES.TXT")), "text");
         assert_eq!(detect_language(Path::new("app.ini")), "ini");
         assert_eq!(detect_language(Path::new("APP.INI")), "ini");
+        assert_eq!(detect_language(Path::new("site.cfg")), "cfg");
+        assert_eq!(detect_language(Path::new("SITE.CFG")), "cfg");
+        assert_eq!(detect_language(Path::new("host.autocfg")), "autocfg");
+        assert_eq!(detect_language(Path::new("HOST.AUTOCFG")), "autocfg");
     }
 
     #[test]
