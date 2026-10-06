@@ -33,8 +33,8 @@ fn build_indexes_py_and_sh_scripts() {
 
     std::fs::write(root.join("deploy.py"), "# @author alice\nimport os\n").unwrap();
     std::fs::write(root.join("health.sh"), "#!/bin/bash\necho ok\n").unwrap();
-    // A .txt file that should be ignored by the scanner
-    std::fs::write(root.join("README.txt"), "not a script").unwrap();
+    // An unsupported extension that should be ignored by the scanner
+    std::fs::write(root.join("README.md"), "not a script").unwrap();
 
     let db_path = dir.path().join("catalog.sqlite");
     let result = build_index(

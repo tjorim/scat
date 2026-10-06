@@ -958,6 +958,8 @@ fn normalize_scripttype(value: &str) -> Option<&'static str> {
         "yaml" | "yml" => Some("yaml"),
         "csv" => Some("csv"),
         "json" => Some("json"),
+        "text" | "txt" => Some("text"),
+        "ini" => Some("ini"),
         _ => None,
     }
 }
@@ -1150,6 +1152,8 @@ mod tests {
         assert_eq!(normalize_scripttype("ksh"), Some("shell"));
         assert_eq!(normalize_scripttype("YAML"), Some("yaml"));
         assert_eq!(normalize_scripttype("csv"), Some("csv"));
+        assert_eq!(normalize_scripttype("txt"), Some("text"));
+        assert_eq!(normalize_scripttype("ini"), Some("ini"));
         assert_eq!(normalize_scripttype("json"), Some("json"));
     }
 
