@@ -76,6 +76,9 @@ This tool provides a **single searchable index** without:
 - JSON output where applicable
 - Suitable for power users and CI jobs
 - Transitive dependency trees: `scat deps <path> --tree [--depth N]`
+- Data files (`.csv`, `.txt`, `.lst`) are catalogued but only their first 20
+  lines are stored — enough to show the data format, without full-text indexing
+  feeds and exports that are large and refresh constantly
 - Files declared in vc headers (`@inputfile`, `@outputfile`, …) are searchable
   and navigable even when they aren't cataloged:
   `scat search --declares report.csv [--role outputfile]`, and

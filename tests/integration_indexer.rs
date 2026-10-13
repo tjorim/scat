@@ -974,6 +974,94 @@ fn build_records_declared_file_edges_from_vc_related_file_keywords() {
 }
 
 #[test]
+fn data_files_keep_only_a_leading_sample_of_their_content() {
+    use scat_core::core::db::SAMPLED_CONTENT_LINES;
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path().join("scripts");
+    std::fs::create_dir(&root).unwrap();
+
+    let body = |name: &str| -> String {
+        std::iter::once("id,value".to_string())
+            .chain((0..500).map(|i| format!("{name}{i},row-{i}-uniquetoken{i}")))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n"
+    };
+    std::fs::write(root.join("feed.csv"), body("c")).unwrap();
+    std::fs::write(root.join("names.lst"), body("l")).unwrap();
+    std::fs::write(root.join("notes.txt"), body("t")).unwrap();
+    // Config-like types and scripts are still stored in full.
+    let json_body = format!("{{\n{}\n}}\n", "\"k\": 1,\n".repeat(60));
+    std::fs::write(root.join("conf.json"), &json_body).unwrap();
+
+    let db_path = dir.path().join("catalog.sqlite");
+    build_index(
+        std::slice::from_ref(&root),
+        &db_path,
+        BuildOptions {
+            head_lines: 5,
+            keep_copies: 0,
+            vc_config: Some(VcConfig::default()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let conn = open_ro(&db_path);
+    let row = |file: &str| -> (String, String, String) {
+        conn.query_row(
+            "SELECT language, content, content_hash FROM scripts WHERE logical_path = ?1",
+            rusqlite::params![root.join(file).to_string_lossy()],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap()
+    };
+
+    for (file, language) in [
+        ("feed.csv", "csv"),
+        ("names.lst", "lst"),
+        ("notes.txt", "text"),
+    ] {
+        let (lang, content, hash) = row(file);
+        assert_eq!(lang, language, "{file}");
+        assert_eq!(content.lines().count(), SAMPLED_CONTENT_LINES, "{file}");
+        assert!(content.starts_with("id,value\n"), "{file}");
+        assert!(!hash.is_empty(), "{file}");
+    }
+    assert_eq!(row("conf.json").1, json_body, "json is not sampled");
+
+    // The hash covers the whole file, not the sample: a change past the
+    // sample must still be detectable.
+    let (_, _, before) = row("feed.csv");
+    assert_ne!(before, {
+        use sha2::{Digest, Sha256};
+        hex::encode(Sha256::digest(
+            std::fs::read_to_string(root.join("feed.csv"))
+                .unwrap()
+                .lines()
+                .take(SAMPLED_CONTENT_LINES)
+                .collect::<Vec<_>>()
+                .join("\n")
+                .as_bytes(),
+        ))
+    });
+
+    // Bodies past the sample are not searchable; the sample is.
+    let api = scat_core::core::search::open_search_api(&db_path).unwrap();
+    assert!(
+        api.search_with_filters("uniquetoken400", 10, None, None, None)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        !api.search_with_filters("uniquetoken3", 10, None, None, None)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
 fn declared_files_outside_scan_roots_show_which_scripts_share_them() {
     // Data files (feeds, reports) live outside the scan roots and are never
     // indexed; the point is only to see which scripts rely on the same one.

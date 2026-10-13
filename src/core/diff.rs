@@ -15,7 +15,7 @@ use rusqlite::Connection;
 use serde::Serialize;
 use similar::{ChangeTag, TextDiff};
 
-use crate::core::db::query_rows;
+use crate::core::db::{query_rows, row_str};
 use crate::core::vc::REVISION_TYPE_DEVELOP;
 use crate::error::{Error, Result};
 
@@ -346,7 +346,7 @@ pub fn render_diff_text(result: &ScriptDiffResult) -> String {
 fn catalog_content(conn: &Connection, logical_path: &str) -> Result<String> {
     let rows = query_rows(
         conn,
-        "SELECT content FROM scripts WHERE logical_path = ?",
+        "SELECT content, language FROM scripts WHERE logical_path = ?",
         &[&logical_path],
     )?;
 
@@ -358,6 +358,14 @@ fn catalog_content(conn: &Connection, logical_path: &str) -> Result<String> {
              • Use 'scat diff --old <file> --new <file>' to compare without catalog metadata."
         ))),
         Some(mut row) => {
+            if crate::core::db::has_sampled_content(row_str(&row, "language")) {
+                return Err(Error::Validation(format!(
+                    "Script '{logical_path}' is a data file; the catalog stores only its first {} lines, \
+                     so it cannot be diffed against the catalog.\n\
+                     Hint: Use 'scat diff --old <file> --new <file>' to compare files directly.",
+                    crate::core::db::SAMPLED_CONTENT_LINES
+                )));
+            }
             let content = match row.remove("content") {
                 Some(serde_json::Value::String(s)) => s,
                 _ => String::new(),
@@ -450,6 +458,24 @@ mod tests {
             hunks: compute_diff(old, new),
         };
         render_diff_text(&result)
+    }
+
+    #[test]
+    fn catalog_content_refuses_data_files_that_only_store_a_sample() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE scripts (logical_path TEXT, language TEXT, content TEXT);
+             INSERT INTO scripts VALUES ('/d/feed.csv', 'csv', 'id,value\n');
+             INSERT INTO scripts VALUES ('/d/run.sh', 'shell', 'echo hi\n');",
+        )
+        .unwrap();
+
+        let err = catalog_content(&conn, "/d/feed.csv")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("data file"), "{err}");
+        assert!(err.contains("first 20 lines"), "{err}");
+        assert_eq!(catalog_content(&conn, "/d/run.sh").unwrap(), "echo hi\n");
     }
 
     // -----------------------------------------------------------------------
