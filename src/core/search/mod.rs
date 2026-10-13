@@ -43,7 +43,9 @@ pub struct DependencyEntry {
     pub purpose: Value,
     /// Whether the dependency resolved to an indexed script.
     pub indexed: bool,
-    /// Edge kind: `import` (language-level) or `referenced` (path literal).
+    /// Edge kind: `import` (language-level), `referenced` (path literal), or
+    /// a header keyword (`parentfile`, `childfile`, `inputfile`, `outputfile`,
+    /// `paramfile`) for an author-declared file, which may be unindexed.
     pub kind: String,
 }
 
@@ -72,8 +74,8 @@ pub struct DepsTreeNode {
     /// Children exist but were cut off by the depth limit.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub truncated: bool,
-    /// Edge kind by which the parent reaches this node: `import` or
-    /// `referenced`. `None` on the root, which has no incoming edge.
+    /// Edge kind by which the parent reaches this node: `import`,
+    /// `referenced`, or a declared-file keyword such as `inputfile`. `None` on the root, which has no incoming edge.
     #[serde(rename = "via", skip_serializing_if = "Option::is_none")]
     pub via_kind: Option<String>,
     /// Expanded child nodes.

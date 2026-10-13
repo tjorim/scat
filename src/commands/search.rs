@@ -11,6 +11,8 @@ pub struct SearchOpts<'a> {
     pub(crate) text: Option<String>,
     pub(crate) regex: Option<String>,
     pub(crate) function: Option<String>,
+    pub(crate) declares: Option<String>,
+    pub(crate) role: Option<String>,
     pub(crate) lang: Option<String>,
     pub(crate) owner: Option<String>,
     pub(crate) tag: Option<String>,
@@ -25,6 +27,8 @@ pub fn cmd_search(api: &scat_core::core::search::SearchApi, opts: SearchOpts<'_>
         text,
         regex,
         function,
+        declares,
+        role,
         lang,
         owner,
         tag,
@@ -34,7 +38,19 @@ pub fn cmd_search(api: &scat_core::core::search::SearchApi, opts: SearchOpts<'_>
         no_color,
     } = opts;
 
-    let (results, is_fts) = if let Some(ref name) = function {
+    let (results, is_fts) = if let Some(ref file) = declares {
+        let rows = api
+            .search_scripts_by_declared_file_with_filters(
+                file,
+                role.as_deref(),
+                limit,
+                lang.as_deref(),
+                owner.as_deref(),
+                tag.as_deref(),
+            )
+            .with_context(|| format!("Declared-file search failed for {file:?}"))?;
+        (rows, false)
+    } else if let Some(ref name) = function {
         let rows = api
             .search_scripts_by_function_with_filters(
                 name,

@@ -597,6 +597,8 @@ struct ExtractedRow<'a> {
     ast_result: Option<AstDependencies>,
     deps: Vec<String>,
     references: Vec<String>,
+    /// `(kind, normalised path)` for vc's `@inputfile`-style header keywords.
+    declared_files: Vec<(&'static str, String)>,
     tags_json: String,
     ep_json: String,
     related_json: String,
@@ -637,14 +639,17 @@ fn extract_for_insert<'a>(
 
     // vc's `@parentfile`/`@childfile`/`@inputfile`/`@outputfile`/`@paramfile`
     // header keywords (see `parse_related_file_keywords`) are author-declared
-    // paths to other managed scripts — as high-confidence as a dependency
-    // edge gets. Same "referenced" resolution and self-reference rule as
-    // above; deduped against the generic pass.
-    for reference in &meta.related {
-        if reference != &record.logical_path && seen.insert(reference.clone()) {
-            references.push(reference.clone());
-        }
-    }
+    // paths — as high-confidence as a dependency edge gets. Each keyword is its
+    // own edge kind, and unlike "referenced" edges they are kept when they
+    // name no indexed script (a config, data or report file scat doesn't
+    // catalog is still worth searching for). The declared path is normalised
+    // against this script's directory so the same file declared from
+    // different scripts collapses to one path.
+    let declared_files = declared_file_edges(&record.logical_path, &meta.fields);
+    // A path declared in the header is already covered by its declared edge;
+    // don't also record it as a generic "referenced" edge.
+    references.retain(|reference| declared_files.iter().all(|(_, path)| path != reference));
+    seen.extend(declared_files.iter().map(|(_, path)| path.clone()));
 
     // YAML gets a second, structure-aware pass for Ansible-shaped keys
     // (`include_tasks`, `import_playbook`, `roles`, …) that the generic
@@ -665,11 +670,65 @@ fn extract_for_insert<'a>(
         ast_result,
         deps,
         references,
+        declared_files,
         tags_json,
         ep_json,
         related_json,
         fields_json,
     })
+}
+
+/// A declared path that is not relative to the catalog: an absolute POSIX
+/// path, a path anchored on an environment variable or `~`
+/// (`$DATA_DIR/in.txt`, `%DATA%\in.txt`), a Windows drive path
+/// (`C:\feeds\in.txt`) or a UNC share. These are the typical locations of
+/// data files outside the scan roots; joining them to the script's directory
+/// would invent a path that exists nowhere. Backslashes become `/` so the
+/// same file declared from different scripts still matches.
+fn external_declared_path(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    let drive = bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/');
+    let external = value.starts_with('/')
+        || value.starts_with('~')
+        || value.starts_with("\\\\")
+        || value.starts_with('$')
+        || value.starts_with('%')
+        || drive;
+    external.then(|| value.replace('\\', "/"))
+}
+
+/// Declared-file edges for one script, from the per-keyword arrays that
+/// `parse_related_file_keywords` stores in `fields`, in keyword order.
+///
+/// Each value is resolved against the script's logical directory (external
+/// paths pass through, see [`external_declared_path`]; a value that escapes
+/// the catalog root is kept as written). A script naming itself is not a dependency and is skipped.
+fn declared_file_edges(
+    logical_path: &str,
+    fields: &std::collections::BTreeMap<String, serde_json::Value>,
+) -> Vec<(&'static str, String)> {
+    let base_dir = super::resolve::logical_parent_dir(logical_path);
+    let mut edges: Vec<(&'static str, String)> = Vec::new();
+    for kind in crate::core::db::DECLARED_FILE_KINDS {
+        let Some(serde_json::Value::Array(values)) = fields.get(kind) else {
+            continue;
+        };
+        for value in values.iter().filter_map(serde_json::Value::as_str) {
+            let path = if let Some(external) = external_declared_path(value) {
+                external
+            } else {
+                super::resolve::resolve_relative_reference(base_dir, value)
+                    .unwrap_or_else(|| value.to_string())
+            };
+            if path != logical_path && !edges.iter().any(|(k, p)| *k == kind && *p == path) {
+                edges.push((kind, path));
+            }
+        }
+    }
+    edges
 }
 
 /// Writes one already-extracted script into the database. Must run
@@ -722,6 +781,14 @@ fn insert_extracted_row(
              VALUES (?1, ?2, 'referenced')",
         )?
         .execute(rusqlite::params![script_id, reference])?;
+    }
+
+    for (kind, path) in &row.declared_files {
+        conn.prepare_cached(
+            "INSERT OR IGNORE INTO dependencies (script_id, depends_on_path, kind)
+             VALUES (?1, ?2, ?3)",
+        )?
+        .execute(rusqlite::params![script_id, path, kind])?;
     }
 
     if let Some(ast) = &row.ast_result {
@@ -802,4 +869,55 @@ fn apply_checkout_summaries(conn: &Connection) -> Result<()> {
         [],
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{declared_file_edges, external_declared_path};
+    use serde_json::json;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn external_paths_are_not_joined_to_the_script_directory() {
+        assert_eq!(
+            external_declared_path("/data/in.txt").as_deref(),
+            Some("/data/in.txt")
+        );
+        assert_eq!(
+            external_declared_path("$FEEDS/in.txt").as_deref(),
+            Some("$FEEDS/in.txt")
+        );
+        assert_eq!(
+            external_declared_path("%FEEDS%\\in.txt").as_deref(),
+            Some("%FEEDS%/in.txt")
+        );
+        assert_eq!(
+            external_declared_path("C:\\feeds\\in.txt").as_deref(),
+            Some("C:/feeds/in.txt")
+        );
+        assert_eq!(
+            external_declared_path("\\\\srv\\share\\in.txt").as_deref(),
+            Some("//srv/share/in.txt")
+        );
+        assert_eq!(external_declared_path("data/in.txt"), None);
+        assert_eq!(external_declared_path("../data/in.txt"), None);
+    }
+
+    #[test]
+    fn declared_edges_resolve_relative_paths_and_skip_self() {
+        let mut fields = BTreeMap::new();
+        fields.insert(
+            "inputfile".to_string(),
+            json!(["../data/in.txt", "$FEEDS/in.txt", "/catalog/s/self.sh"]),
+        );
+        fields.insert("outputfile".to_string(), json!(["/data/out.lst"]));
+        assert_eq!(
+            declared_file_edges("/catalog/s/self.sh", &fields),
+            vec![
+                ("inputfile", "/catalog/data/in.txt".to_string()),
+                ("inputfile", "$FEEDS/in.txt".to_string()),
+                ("outputfile", "/data/out.lst".to_string()),
+            ]
+        );
+    }
 }

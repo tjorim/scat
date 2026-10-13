@@ -813,10 +813,11 @@ fn build_records_referenced_path_dependencies() {
 }
 
 #[test]
-fn build_records_referenced_dependencies_from_vc_related_file_keywords() {
+fn build_records_declared_file_edges_from_vc_related_file_keywords() {
     // vc's @parentfile/@childfile/@inputfile/@outputfile/@paramfile header
-    // keywords are author-declared paths to other managed scripts — as
-    // high-confidence a dependency edge as scat records.
+    // keywords are author-declared paths — as high-confidence a dependency
+    // edge as scat records. Each keyword is its own edge kind; targets that
+    // are not indexed scripts are kept (searchable/navigable), not dropped.
     let dir = tempfile::TempDir::new().unwrap();
     let root = dir.path().join("scripts");
     std::fs::create_dir(&root).unwrap();
@@ -829,6 +830,7 @@ fn build_records_referenced_dependencies_from_vc_related_file_keywords() {
          # @parentfile launcher.sh\n\
          # @inputfile config.yaml\n\
          # @inputfile missing.yaml\n\
+         # @outputfile out/report.csv\n\
          echo worker\n",
     )
     .unwrap();
@@ -873,7 +875,7 @@ fn build_records_referenced_dependencies_from_vc_related_file_keywords() {
     let resolved_targets: Vec<i64> = conn
         .prepare(
             "SELECT resolved_script_id FROM dependencies
-             WHERE kind = 'referenced' AND script_id = ?1 AND resolved_script_id IS NOT NULL
+             WHERE kind IN ('parentfile','inputfile') AND script_id = ?1 AND resolved_script_id IS NOT NULL
              ORDER BY resolved_script_id",
         )
         .unwrap()
@@ -889,17 +891,66 @@ fn build_records_referenced_dependencies_from_vc_related_file_keywords() {
         "@parentfile and @inputfile must resolve to the scripts they name"
     );
 
-    let unresolved: i64 = conn
+    // Unindexed declared files stay as unresolved edges, with their role and a
+    // path normalised against the declaring script's directory.
+    let unresolved: Vec<(String, String)> = conn
+        .prepare(
+            "SELECT kind, depends_on_path FROM dependencies
+             WHERE script_id = ?1 AND resolved_script_id IS NULL ORDER BY kind, depends_on_path",
+        )
+        .unwrap()
+        .query_map(rusqlite::params![worker_id], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    let root_str = root.to_string_lossy();
+    assert_eq!(
+        unresolved,
+        vec![
+            ("inputfile".to_string(), format!("{root_str}/missing.yaml")),
+            (
+                "outputfile".to_string(),
+                format!("{root_str}/out/report.csv")
+            ),
+        ],
+        "unindexed declared files must be kept as unresolved edges"
+    );
+
+    // Declared edges are not duplicated as generic 'referenced' edges.
+    let referenced: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM dependencies
-             WHERE kind = 'referenced' AND script_id = ?1 AND resolved_script_id IS NULL",
+            "SELECT COUNT(*) FROM dependencies WHERE kind = 'referenced' AND script_id = ?1",
             rusqlite::params![worker_id],
             |r| r.get(0),
         )
         .unwrap();
+    assert_eq!(referenced, 0);
+
+    // And they are searchable through the API, by substring and by role.
+    let api = scat_core::core::search::open_search_api(&db_path).unwrap();
+    let hits = api
+        .search_scripts_by_declared_file_with_filters("REPORT.csv", None, 10, None, None, None)
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert!(
+        api.search_scripts_by_declared_file_with_filters(
+            "report.csv",
+            Some("inputfile"),
+            10,
+            None,
+            None,
+            None
+        )
+        .unwrap()
+        .is_empty()
+    );
+    let declared = api
+        .declared_by(&format!("{root_str}/out/report.csv"))
+        .unwrap();
+    assert_eq!(declared.len(), 1);
     assert_eq!(
-        unresolved, 0,
-        "@inputfile missing.yaml does not resolve to an indexed script and must be dropped"
+        declared[0].get("kind").and_then(|v| v.as_str()),
+        Some("outputfile")
     );
 
     // `related` also carries the declared paths for display in `scat show`.
@@ -911,7 +962,87 @@ fn build_records_referenced_dependencies_from_vc_related_file_keywords() {
         )
         .unwrap();
     let related: Vec<String> = serde_json::from_str(&related_json).unwrap();
-    assert_eq!(related, vec!["launcher.sh", "config.yaml", "missing.yaml"]);
+    assert_eq!(
+        related,
+        vec![
+            "launcher.sh",
+            "config.yaml",
+            "missing.yaml",
+            "out/report.csv"
+        ]
+    );
+}
+
+#[test]
+fn declared_files_outside_scan_roots_show_which_scripts_share_them() {
+    // Data files (feeds, reports) live outside the scan roots and are never
+    // indexed; the point is only to see which scripts rely on the same one.
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path().join("scripts");
+    std::fs::create_dir(&root).unwrap();
+
+    // A blank separator line before the keywords, as real scripts have.
+    std::fs::write(
+        root.join("producer.sh"),
+        "#!/bin/bash\n# @brief produce\n\n# @outputfile /data/feeds/daily.lst\necho p\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("consumer.sh"),
+        "#!/bin/bash\n# @inputfile \"/data/feeds/daily.lst\"\n# @inputfile $FEEDS/extra.txt\necho c\n",
+    )
+    .unwrap();
+
+    let db_path = dir.path().join("catalog.sqlite");
+    build_index(
+        std::slice::from_ref(&root),
+        &db_path,
+        BuildOptions {
+            head_lines: 5,
+            keep_copies: 0,
+            vc_config: Some(VcConfig::default()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let api = scat_core::core::search::open_search_api(&db_path).unwrap();
+    let root_str = root.to_string_lossy();
+
+    let graph = api
+        .dependency_graph(&format!("{root_str}/consumer.sh"))
+        .unwrap();
+    let uses: Vec<(&str, &str, bool)> = graph
+        .uses
+        .iter()
+        .map(|u| (u.kind.as_str(), u.depends_on_path.as_str(), u.indexed))
+        .collect();
+    assert_eq!(
+        uses,
+        vec![
+            ("inputfile", "$FEEDS/extra.txt", false),
+            ("inputfile", "/data/feeds/daily.lst", false),
+        ]
+    );
+
+    let declarers: Vec<(String, String)> = api
+        .declared_by("/data/feeds/daily.lst")
+        .unwrap()
+        .iter()
+        .map(|r| {
+            (
+                r["logical_path"].as_str().unwrap().replace(&*root_str, ""),
+                r["kind"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        declarers,
+        vec![
+            ("/consumer.sh".to_string(), "inputfile".to_string()),
+            ("/producer.sh".to_string(), "outputfile".to_string()),
+        ]
+    );
 }
 
 // ---------------------------------------------------------------------------
