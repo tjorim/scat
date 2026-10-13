@@ -153,9 +153,26 @@ pub fn extract(record: &ScriptRecord) -> ExtractedMetadata {
         parse_python_docstring(&content, &mut meta);
     }
 
-    meta.content = content;
+    // Headers are parsed above from the full text; only then is a data file's
+    // body cut down to its leading sample (see `SAMPLED_CONTENT_LANGUAGES`).
+    meta.content = if crate::core::db::has_sampled_content(&record.language) {
+        sample_leading_lines(&content, crate::core::db::SAMPLED_CONTENT_LINES)
+    } else {
+        content
+    };
     meta.content_hash = content_hash;
     meta
+}
+
+/// The first `max_lines` lines of `content`, newline-terminated like the
+/// original when anything was kept.
+fn sample_leading_lines(content: &str, max_lines: usize) -> String {
+    let mut sample = String::new();
+    for line in content.lines().take(max_lines) {
+        sample.push_str(line);
+        sample.push('\n');
+    }
+    sample
 }
 
 // ---------------------------------------------------------------------------
@@ -724,6 +741,13 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn sample_leading_lines_keeps_only_the_first_lines() {
+        assert_eq!(sample_leading_lines("a\nb\nc\n", 2), "a\nb\n");
+        assert_eq!(sample_leading_lines("a\nb", 5), "a\nb\n");
+        assert_eq!(sample_leading_lines("", 5), "");
     }
 
     #[test]

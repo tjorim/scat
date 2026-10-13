@@ -58,6 +58,7 @@ fn is_bare_extension(token: &str) -> bool {
             | "ini"
             | "cfg"
             | "autocfg"
+            | "lst"
     )
 }
 
@@ -509,7 +510,8 @@ mod tests {
     #[test]
     fn bare_extension_tokens_are_excluded_from_module_map() {
         for ext in [
-            "py", "sh", "bash", "ksh", "csv", "json", "yml", "yaml", "txt", "ini", "cfg", "autocfg",
+            "py", "sh", "bash", "ksh", "csv", "json", "yml", "yaml", "txt", "ini", "cfg",
+            "autocfg", "lst",
         ] {
             assert!(super::is_bare_extension(ext), "{ext} should be excluded");
         }

@@ -28,6 +28,22 @@ pub fn is_declared_file_kind(kind: &str) -> bool {
     DECLARED_FILE_KINDS.contains(&kind)
 }
 
+/// Languages whose files are data (feeds, exports, reports, lists), not
+/// scripts. They are catalogued so they can be found and linked to, but only
+/// the first [`SAMPLED_CONTENT_LINES`] lines are stored as `content` — enough
+/// to show the data format, without full-text indexing a body that is large,
+/// refreshed constantly, and not searchable material. `content_hash` still
+/// covers the whole file.
+pub const SAMPLED_CONTENT_LANGUAGES: [&str; 3] = ["csv", "text", "lst"];
+
+/// How many leading lines of a [`SAMPLED_CONTENT_LANGUAGES`] file are stored.
+pub const SAMPLED_CONTENT_LINES: usize = 20;
+
+/// Whether `language` is one whose stored `content` is only a leading sample.
+pub fn has_sampled_content(language: &str) -> bool {
+    SAMPLED_CONTENT_LANGUAGES.contains(&language)
+}
+
 /// A database row serialised as a JSON object — every column becomes a key.
 pub type JsonRow = serde_json::Map<String, serde_json::Value>;
 
