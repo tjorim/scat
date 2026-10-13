@@ -277,6 +277,27 @@ fn leading_comment_block(content: &str) -> String {
         .join("\n")
 }
 
+/// Like [`leading_comment_block`], but blank lines inside the header do not
+/// end it — only the first line of code does. Declaring files after a blank
+/// separator line (`#!/bin/bash`, blank, `# @inputfile …`) is common, and a
+/// blank line is not executable code, so it must not hide the declaration.
+fn leading_comment_block_allowing_blanks(content: &str) -> String {
+    let mut lines: Vec<&str> = content
+        .lines()
+        .take_while(|line| {
+            let trimmed = line.trim_start();
+            trimmed.is_empty()
+                || trimmed.starts_with("<#")
+                || trimmed.starts_with("//")
+                || trimmed.starts_with('#')
+        })
+        .collect();
+    while lines.last().is_some_and(|line| line.trim().is_empty()) {
+        lines.pop();
+    }
+    lines.join("\n")
+}
+
 fn parse_header_comments(content: &str, meta: &mut ExtractedMetadata) {
     let header = leading_comment_block(content);
     let mut found: HashSet<&'static str> = HashSet::new();
@@ -337,7 +358,7 @@ fn parse_header_comments(content: &str, meta: &mut ExtractedMetadata) {
         );
     }
 
-    parse_related_file_keywords(&header, meta);
+    parse_related_file_keywords(&leading_comment_block_allowing_blanks(content), meta);
     parse_block_keywords(&header, meta);
 }
 
@@ -345,6 +366,9 @@ fn parse_header_comments(content: &str, meta: &mut ExtractedMetadata) {
 // vc related-file keyword parsing (@parentfile/@childfile/@inputfile/
 // @outputfile/@paramfile)
 // ---------------------------------------------------------------------------
+
+/// How far into the file to look for related-file keywords.
+const RELATED_FILE_SCAN_LINES: usize = 40;
 
 struct RelatedFilePattern {
     re: Regex,
@@ -397,11 +421,16 @@ fn parse_related_file_keywords(content: &str, meta: &mut ExtractedMetadata) {
     // in the order the author declared these, not alphabetically by keyword.
     let mut matches: Vec<(&'static str, String)> = Vec::new();
 
-    for line in content.lines().take(40) {
+    for line in content.lines().take(RELATED_FILE_SCAN_LINES) {
         let stripped = strip_comment_prefix(line);
         for pat in RELATED_FILE_PATTERNS.iter() {
             if let Some(cap) = pat.re.captures(stripped) {
-                let value = cap[1].trim().to_string();
+                // Paths are often quoted in shell-flavoured headers.
+                let value = cap[1]
+                    .trim()
+                    .trim_matches(|c| c == '"' || c == '\'')
+                    .trim()
+                    .to_string();
                 if value.is_empty() {
                     continue;
                 }
@@ -733,6 +762,32 @@ mod tests {
     fn dedupes_identical_related_file_values() {
         let meta = parse_headers("# @parentfile shared.sh\n# @childfile shared.sh\n");
         assert_eq!(meta.related, vec!["shared.sh".to_string()]);
+    }
+
+    #[test]
+    fn related_file_keywords_survive_blank_lines_before_them() {
+        let meta = parse_headers(
+            "#!/bin/bash\n# @brief demo\n\n# @inputfile /data/in.txt\n\n# @outputfile /data/out.lst\necho a\n",
+        );
+        assert_eq!(
+            meta.related,
+            vec!["/data/in.txt".to_string(), "/data/out.lst".to_string()]
+        );
+    }
+
+    #[test]
+    fn related_file_keywords_after_code_are_still_ignored() {
+        let meta = parse_headers("#!/bin/bash\nset -e\n# @inputfile /data/in.txt\n");
+        assert!(meta.related.is_empty());
+    }
+
+    #[test]
+    fn related_file_values_drop_surrounding_quotes() {
+        let meta = parse_headers("# @inputfile \"/data/in.txt\"\n# @outputfile '/data/out.lst'\n");
+        assert_eq!(
+            meta.related,
+            vec!["/data/in.txt".to_string(), "/data/out.lst".to_string()]
+        );
     }
 
     #[test]

@@ -973,6 +973,78 @@ fn build_records_declared_file_edges_from_vc_related_file_keywords() {
     );
 }
 
+#[test]
+fn declared_files_outside_scan_roots_show_which_scripts_share_them() {
+    // Data files (feeds, reports) live outside the scan roots and are never
+    // indexed; the point is only to see which scripts rely on the same one.
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path().join("scripts");
+    std::fs::create_dir(&root).unwrap();
+
+    // A blank separator line before the keywords, as real scripts have.
+    std::fs::write(
+        root.join("producer.sh"),
+        "#!/bin/bash\n# @brief produce\n\n# @outputfile /data/feeds/daily.lst\necho p\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("consumer.sh"),
+        "#!/bin/bash\n# @inputfile \"/data/feeds/daily.lst\"\n# @inputfile $FEEDS/extra.txt\necho c\n",
+    )
+    .unwrap();
+
+    let db_path = dir.path().join("catalog.sqlite");
+    build_index(
+        std::slice::from_ref(&root),
+        &db_path,
+        BuildOptions {
+            head_lines: 5,
+            keep_copies: 0,
+            vc_config: Some(VcConfig::default()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let api = scat_core::core::search::open_search_api(&db_path).unwrap();
+    let root_str = root.to_string_lossy();
+
+    let graph = api
+        .dependency_graph(&format!("{root_str}/consumer.sh"))
+        .unwrap();
+    let uses: Vec<(&str, &str, bool)> = graph
+        .uses
+        .iter()
+        .map(|u| (u.kind.as_str(), u.depends_on_path.as_str(), u.indexed))
+        .collect();
+    assert_eq!(
+        uses,
+        vec![
+            ("inputfile", "$FEEDS/extra.txt", false),
+            ("inputfile", "/data/feeds/daily.lst", false),
+        ]
+    );
+
+    let declarers: Vec<(String, String)> = api
+        .declared_by("/data/feeds/daily.lst")
+        .unwrap()
+        .iter()
+        .map(|r| {
+            (
+                r["logical_path"].as_str().unwrap().replace(&*root_str, ""),
+                r["kind"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        declarers,
+        vec![
+            ("/consumer.sh".to_string(), "inputfile".to_string()),
+            ("/producer.sh".to_string(), "outputfile".to_string()),
+        ]
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Ansible-shaped YAML dependency edges (issue #100)
 // ---------------------------------------------------------------------------

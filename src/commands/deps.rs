@@ -67,6 +67,7 @@ pub fn cmd_deps(
             render_table(&["Path", "Kind", "Language", "Indexed"], &rows, no_color)
         );
     }
+    print_shared_declared_files(api, path, &graph.uses, no_color)?;
     if !graph.used_by.is_empty() {
         println!("Used by:");
         print_script_table(&graph.used_by, no_color);
@@ -83,6 +84,45 @@ fn kind_label(kind: &str) -> &str {
         "import" => "import",
         other => other.strip_suffix("file").unwrap_or(other),
     }
+}
+
+/// For each declared file that is not an indexed script, list the *other*
+/// scripts that declare the same file — the "who else relies on this" view for
+/// data files (feeds, reports) that scat deliberately doesn't catalog.
+fn print_shared_declared_files(
+    api: &scat_core::core::search::SearchApi,
+    path: &str,
+    uses: &[scat_core::core::search::DependencyEntry],
+    no_color: bool,
+) -> Result<()> {
+    use scat_core::core::db::{is_declared_file_kind, row_str};
+
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    for entry in uses
+        .iter()
+        .filter(|u| !u.indexed && is_declared_file_kind(&u.kind))
+    {
+        for other in api.declared_by(&entry.depends_on_path)? {
+            let other_path = row_str(&other, "logical_path");
+            if other_path == path {
+                continue;
+            }
+            rows.push(vec![
+                entry.depends_on_path.clone(),
+                kind_label(&entry.kind).to_string(),
+                other_path.to_string(),
+                kind_label(row_str(&other, "kind")).to_string(),
+            ]);
+        }
+    }
+    if !rows.is_empty() {
+        println!("Shared with other scripts (declared files not in the catalog):");
+        println!(
+            "{}",
+            render_table(&["File", "Here", "Other script", "There"], &rows, no_color)
+        );
+    }
+    Ok(())
 }
 
 /// `scat deps <path>` for a path that isn't a cataloged script but is declared
