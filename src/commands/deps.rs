@@ -16,10 +16,17 @@ pub fn cmd_deps(
     output: OutputFormat,
     no_color: bool,
 ) -> Result<()> {
-    let _ = match api.get_script(path)? {
-        Some(s) => s,
-        None => anyhow::bail!("script '{path}' not found in catalog"),
-    };
+    if api.get_script(path)?.is_none() {
+        // Not a cataloged script, but a header may still declare it
+        // (`@inputfile config.yaml`): list who does, so a declared file is
+        // navigable from the file side too.
+        let declared_by = api.declared_by(path)?;
+        if declared_by.is_empty() {
+            anyhow::bail!("script '{path}' not found in catalog");
+        }
+        cmd_deps_declared_file(path, &declared_by, output, no_color);
+        return Ok(());
+    }
 
     if tree || depth.is_some() {
         return cmd_deps_tree(api, path, depth.unwrap_or(DEFAULT_TREE_DEPTH), output);
@@ -68,13 +75,68 @@ pub fn cmd_deps(
 }
 
 /// Short display label for a dependency edge kind. `referenced` edges (a script
-/// invoked by path rather than imported) show as `ref`.
+/// invoked by path rather than imported) show as `ref`; header-declared files
+/// show their keyword without the `file` suffix (`@inputfile` → `input`).
 fn kind_label(kind: &str) -> &str {
     match kind {
         "referenced" => "ref",
         "import" => "import",
-        other => other,
+        other => other.strip_suffix("file").unwrap_or(other),
     }
+}
+
+/// `scat deps <path>` for a path that isn't a cataloged script but is declared
+/// by one or more `@…file` headers.
+fn cmd_deps_declared_file(
+    path: &str,
+    declared_by: &[scat_core::core::db::JsonRow],
+    output: OutputFormat,
+    no_color: bool,
+) {
+    use scat_core::core::db::row_str;
+
+    if output == OutputFormat::Json {
+        let rows: Vec<serde_json::Value> = declared_by
+            .iter()
+            .map(|row| {
+                serde_json::json!({
+                    "path": row_str(row, "logical_path"),
+                    "role": row_str(row, "kind"),
+                    "language": row.get("language").cloned().unwrap_or_default(),
+                    "owner": row.get("owner").cloned().unwrap_or_default(),
+                    "purpose": row.get("purpose").cloned().unwrap_or_default(),
+                })
+            })
+            .collect();
+        print_json(&serde_json::json!({
+            "path": path,
+            "indexed": false,
+            "declared_by": rows,
+        }));
+        return;
+    }
+
+    println!("{path} is not a cataloged script; it is declared in script headers.");
+    println!("Declared by:");
+    let rows = declared_by
+        .iter()
+        .map(|row| {
+            vec![
+                row_str(row, "logical_path").to_string(),
+                kind_label(row_str(row, "kind")).to_string(),
+                dash_if_empty(row_str(row, "owner")),
+                dash_if_empty(row_str(row, "purpose")),
+            ]
+        })
+        .collect::<Vec<_>>();
+    println!(
+        "{}",
+        render_table(&["Script", "Role", "Owner", "Purpose"], &rows, no_color)
+    );
+}
+
+fn dash_if_empty(value: &str) -> String {
+    if value.is_empty() { "—" } else { value }.to_string()
 }
 
 fn cmd_deps_tree(
@@ -110,6 +172,7 @@ fn cmd_deps_tree(
     let mut legend_cycle = false;
     let mut legend_truncated = false;
     let mut legend_ref = false;
+    let mut legend_declared = false;
     for (heading, tree) in [("Uses", &uses), ("Used by", &used_by)] {
         if tree.children.is_empty() {
             continue;
@@ -123,9 +186,13 @@ fn cmd_deps_tree(
         legend_cycle |= tree_has(tree, &|n| n.cycle);
         legend_truncated |= tree_has(tree, &|n| n.truncated);
         legend_ref |= tree_has(tree, &|n| n.via_kind.as_deref() == Some("referenced"));
+        legend_declared |= tree_has(tree, &|n| n.via_kind.as_deref().is_some_and(is_declared));
     }
     if legend_ref {
         println!("(ref) referenced by path (copied/executed/manifested), not imported");
+    }
+    if legend_declared {
+        println!("(input/output/parent/child/param) declared in an @…file header");
     }
     if legend_repeat {
         println!("(*) subtree already shown above");
@@ -139,6 +206,10 @@ fn cmd_deps_tree(
     Ok(())
 }
 
+fn is_declared(kind: &str) -> bool {
+    scat_core::core::db::is_declared_file_kind(kind)
+}
+
 fn tree_has(
     node: &scat_core::core::search::DepsTreeNode,
     predicate: &impl Fn(&scat_core::core::search::DepsTreeNode) -> bool,
@@ -149,8 +220,12 @@ fn tree_has(
 pub fn render_tree_lines(root: &scat_core::core::search::DepsTreeNode) -> Vec<String> {
     fn node_label(node: &scat_core::core::search::DepsTreeNode) -> String {
         let mut label = node.logical_path.clone();
-        if node.via_kind.as_deref() == Some("referenced") {
-            label.push_str(" (ref)");
+        match node.via_kind.as_deref() {
+            Some("referenced") => label.push_str(" (ref)"),
+            Some(kind) if is_declared(kind) => {
+                label.push_str(&format!(" ({})", kind_label(kind)));
+            }
+            _ => {}
         }
         if !node.indexed {
             label.push_str(" (not indexed)");

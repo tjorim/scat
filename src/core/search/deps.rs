@@ -2,7 +2,9 @@ use rusqlite::{OptionalExtension, types::Value as SqlValue};
 use serde_json::Value;
 use std::collections::BTreeSet;
 
-use crate::core::db::{JsonRow, append_script_filters, query_rows, row_string, row_to_map};
+use crate::core::db::{
+    DECLARED_FILE_KINDS, JsonRow, append_script_filters, query_rows, row_string, row_to_map,
+};
 use crate::error::{Error, Result};
 
 use super::{
@@ -372,6 +374,73 @@ impl SearchApi {
         sql.push_str(" ORDER BY s.logical_path LIMIT ?");
         params.push(SqlValue::Integer(lim));
         query_script_rows(&self.conn, &sql, params)
+    }
+
+    // ------------------------------------------------------------------
+    // Header-declared files (@inputfile, @outputfile, ...)
+    // ------------------------------------------------------------------
+
+    /// Return scripts that declare a file whose path contains `needle`
+    /// (case-insensitive) in an `@parentfile`/`@childfile`/`@inputfile`/
+    /// `@outputfile`/`@paramfile` header — whether or not that file is itself
+    /// an indexed script. `role` narrows to one keyword (`inputfile`, ...).
+    pub fn search_scripts_by_declared_file_with_filters(
+        &self,
+        needle: &str,
+        role: Option<&str>,
+        limit: usize,
+        language: Option<&str>,
+        owner: Option<&str>,
+        tag: Option<&str>,
+    ) -> Result<Vec<JsonRow>> {
+        let escaped = needle
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let mut sql = String::from(
+            "SELECT DISTINCT s.*
+             FROM dependencies d
+             JOIN scripts s ON s.id = d.script_id
+             WHERE LOWER(d.depends_on_path) LIKE LOWER(?) ESCAPE '\\'",
+        );
+        let mut params = vec![SqlValue::Text(format!("%{escaped}%"))];
+        if let Some(role) = role {
+            sql.push_str(" AND d.kind = ?");
+            params.push(SqlValue::Text(role.to_string()));
+        } else {
+            let kinds = DECLARED_FILE_KINDS
+                .iter()
+                .map(|k| format!("'{k}'"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            sql.push_str(&format!(" AND d.kind IN ({kinds})"));
+        }
+        append_script_filters(&mut sql, &mut params, Some("s."), language, owner, tag);
+        sql.push_str(" ORDER BY s.logical_path LIMIT ?");
+        params.push(SqlValue::Integer(limit as i64));
+        query_script_rows(&self.conn, &sql, params)
+    }
+
+    /// Return every script that declares exactly `path` in a related-file
+    /// header, with the keyword used (`kind`). Works for paths that aren't
+    /// indexed scripts, which is how `scat deps` navigates to a declared
+    /// config/data/report file. Ordered by script path, then keyword.
+    pub fn declared_by(&self, path: &str) -> Result<Vec<JsonRow>> {
+        let kinds = DECLARED_FILE_KINDS
+            .iter()
+            .map(|k| format!("'{k}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        query_rows(
+            &self.conn,
+            &format!(
+                "SELECT s.logical_path, s.language, s.owner, s.purpose, d.kind
+                 FROM dependencies d JOIN scripts s ON s.id = d.script_id
+                 WHERE d.depends_on_path = ? AND d.kind IN ({kinds})
+                 ORDER BY s.logical_path, d.kind"
+            ),
+            &[&path],
+        )
     }
 
     // ------------------------------------------------------------------

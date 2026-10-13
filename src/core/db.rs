@@ -8,6 +8,26 @@ use crate::error::{Error, Result};
 /// Current SQLite schema version expected by this binary.
 pub const SCHEMA_VERSION: i64 = 14;
 
+/// Edge kinds for vc's author-declared related-file header keywords
+/// (`@parentfile`, `@childfile`, `@inputfile`, `@outputfile`, `@paramfile`),
+/// in the `dependencies.kind` column. Each keyword is its own kind so the
+/// role survives in the catalog. Unlike `referenced` edges, these are kept
+/// even when the target is not an indexed script — the file may be a config,
+/// data or report file that scat doesn't catalog, but the declaration is
+/// still worth searching for and navigating.
+pub const DECLARED_FILE_KINDS: [&str; 5] = [
+    "parentfile",
+    "childfile",
+    "inputfile",
+    "outputfile",
+    "paramfile",
+];
+
+/// Whether a `dependencies.kind` is one of [`DECLARED_FILE_KINDS`].
+pub fn is_declared_file_kind(kind: &str) -> bool {
+    DECLARED_FILE_KINDS.contains(&kind)
+}
+
 /// A database row serialised as a JSON object — every column becomes a key.
 pub type JsonRow = serde_json::Map<String, serde_json::Value>;
 
@@ -157,6 +177,10 @@ CREATE TABLE IF NOT EXISTS dependencies (
     -- depends_on_path). 'referenced': a path-literal edge (a full logical
     -- path found in the script body, e.g. a manifest entry or an
     -- `ssh host python3 <path>` invocation), resolved by exact path match.
+    -- 'parentfile' / 'childfile' / 'inputfile' / 'outputfile' / 'paramfile':
+    -- vc header keywords (see DECLARED_FILE_KINDS). depends_on_path is the
+    -- declared path resolved against the declaring script's directory; unlike
+    -- 'referenced', the row is kept when it names no indexed script.
     kind               TEXT    NOT NULL DEFAULT 'import',
     UNIQUE (script_id, depends_on_path, kind)
 );

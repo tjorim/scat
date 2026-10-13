@@ -104,6 +104,24 @@ pub enum Commands {
         /// Search by function name (substring): returns scripts that define a matching function.
         #[arg(long, conflicts_with = "text", conflicts_with = "regex")]
         function: Option<String>,
+        /// Find scripts whose `@parentfile`/`@childfile`/`@inputfile`/`@outputfile`/
+        /// `@paramfile` header declares a file matching this substring. The file
+        /// itself need not be an indexed script (configs, data and reports count).
+        #[arg(
+            long,
+            conflicts_with = "text",
+            conflicts_with = "regex",
+            conflicts_with = "function"
+        )]
+        declares: Option<String>,
+        /// With --declares, only match this header keyword (e.g. `outputfile` to
+        /// find the scripts that produce a file).
+        #[arg(
+            long,
+            requires = "declares",
+            value_parser = ["parentfile", "childfile", "inputfile", "outputfile", "paramfile"]
+        )]
+        role: Option<String>,
     },
 
     /// Show details, dep counts, and relationships for a single script.

@@ -145,6 +145,8 @@ fn run(cli: Cli) -> Result<()> {
             output,
             regex,
             function,
+            declares,
+            role,
         } => {
             // Resolve @bookmark alias when text starts with '@'.
             let text = text.map(|t| {
@@ -165,6 +167,8 @@ fn run(cli: Cli) -> Result<()> {
                     text,
                     regex,
                     function,
+                    declares,
+                    role,
                     lang,
                     owner,
                     tag,

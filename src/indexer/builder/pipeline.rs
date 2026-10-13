@@ -597,6 +597,8 @@ struct ExtractedRow<'a> {
     ast_result: Option<AstDependencies>,
     deps: Vec<String>,
     references: Vec<String>,
+    /// `(kind, normalised path)` for vc's `@inputfile`-style header keywords.
+    declared_files: Vec<(&'static str, String)>,
     tags_json: String,
     ep_json: String,
     related_json: String,
@@ -637,14 +639,17 @@ fn extract_for_insert<'a>(
 
     // vc's `@parentfile`/`@childfile`/`@inputfile`/`@outputfile`/`@paramfile`
     // header keywords (see `parse_related_file_keywords`) are author-declared
-    // paths to other managed scripts — as high-confidence as a dependency
-    // edge gets. Same "referenced" resolution and self-reference rule as
-    // above; deduped against the generic pass.
-    for reference in &meta.related {
-        if reference != &record.logical_path && seen.insert(reference.clone()) {
-            references.push(reference.clone());
-        }
-    }
+    // paths — as high-confidence as a dependency edge gets. Each keyword is its
+    // own edge kind, and unlike "referenced" edges they are kept when they
+    // name no indexed script (a config, data or report file scat doesn't
+    // catalog is still worth searching for). The declared path is normalised
+    // against this script's directory so the same file declared from
+    // different scripts collapses to one path.
+    let declared_files = declared_file_edges(&record.logical_path, &meta.fields);
+    // A path declared in the header is already covered by its declared edge;
+    // don't also record it as a generic "referenced" edge.
+    references.retain(|reference| declared_files.iter().all(|(_, path)| path != reference));
+    seen.extend(declared_files.iter().map(|(_, path)| path.clone()));
 
     // YAML gets a second, structure-aware pass for Ansible-shaped keys
     // (`include_tasks`, `import_playbook`, `roles`, …) that the generic
@@ -665,11 +670,43 @@ fn extract_for_insert<'a>(
         ast_result,
         deps,
         references,
+        declared_files,
         tags_json,
         ep_json,
         related_json,
         fields_json,
     })
+}
+
+/// Declared-file edges for one script, from the per-keyword arrays that
+/// `parse_related_file_keywords` stores in `fields`, in keyword order.
+///
+/// Each value is resolved against the script's logical directory (absolute
+/// values pass through; a value that escapes the catalog root is kept as
+/// written). A script naming itself is not a dependency and is skipped.
+fn declared_file_edges(
+    logical_path: &str,
+    fields: &std::collections::BTreeMap<String, serde_json::Value>,
+) -> Vec<(&'static str, String)> {
+    let base_dir = super::resolve::logical_parent_dir(logical_path);
+    let mut edges: Vec<(&'static str, String)> = Vec::new();
+    for kind in crate::core::db::DECLARED_FILE_KINDS {
+        let Some(serde_json::Value::Array(values)) = fields.get(kind) else {
+            continue;
+        };
+        for value in values.iter().filter_map(serde_json::Value::as_str) {
+            let path = if value.starts_with('/') {
+                value.to_string()
+            } else {
+                super::resolve::resolve_relative_reference(base_dir, value)
+                    .unwrap_or_else(|| value.to_string())
+            };
+            if path != logical_path && !edges.iter().any(|(k, p)| *k == kind && *p == path) {
+                edges.push((kind, path));
+            }
+        }
+    }
+    edges
 }
 
 /// Writes one already-extracted script into the database. Must run
@@ -722,6 +759,14 @@ fn insert_extracted_row(
              VALUES (?1, ?2, 'referenced')",
         )?
         .execute(rusqlite::params![script_id, reference])?;
+    }
+
+    for (kind, path) in &row.declared_files {
+        conn.prepare_cached(
+            "INSERT OR IGNORE INTO dependencies (script_id, depends_on_path, kind)
+             VALUES (?1, ?2, ?3)",
+        )?
+        .execute(rusqlite::params![script_id, path, kind])?;
     }
 
     if let Some(ast) = &row.ast_result {

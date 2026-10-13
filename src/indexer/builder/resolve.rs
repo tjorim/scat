@@ -185,7 +185,7 @@ pub(super) fn resolve_dependency_targets(
 
 /// Directory portion of a logical path (everything before the last `/`).
 /// A top-level path like `/foo.py` yields `/`; a bare name yields `""`.
-fn logical_parent_dir(logical_path: &str) -> &str {
+pub(super) fn logical_parent_dir(logical_path: &str) -> &str {
     match logical_path.rfind('/') {
         Some(0) => "/",
         Some(idx) => &logical_path[..idx],
@@ -197,7 +197,7 @@ fn logical_parent_dir(logical_path: &str) -> &str {
 /// the referencing script's logical directory, collapsing `.`/`..` on the
 /// `/`-separated logical path. Returns `None` if the reference escapes the
 /// root or is empty. Backslashes are normalised to `/` first.
-fn resolve_relative_reference(base_dir: &str, reference: &str) -> Option<String> {
+pub(super) fn resolve_relative_reference(base_dir: &str, reference: &str) -> Option<String> {
     let reference = reference.replace('\\', "/");
     let mut components: Vec<&str> = base_dir.split('/').filter(|c| !c.is_empty()).collect();
     for part in reference.split('/') {
@@ -231,6 +231,8 @@ fn resolve_relative_reference(base_dir: &str, reference: &str) -> Option<String>
 /// source's own logical path — rather than a genuine script edge. Keeping only
 /// edges that resolve to an indexed script is what makes this high-precision.
 pub(super) fn resolve_reference_targets(conn: &Connection) -> Result<()> {
+    resolve_declared_file_targets(conn)?;
+
     // Pass 1: absolute references — exact logical-path match.
     conn.execute(
         "UPDATE dependencies
@@ -304,6 +306,35 @@ pub(super) fn resolve_reference_targets(conn: &Connection) -> Result<()> {
 
     conn.execute(
         "DELETE FROM dependencies WHERE kind = 'referenced' AND resolved_script_id IS NULL",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Link header-declared file edges (`@inputfile` and friends) to the indexed
+/// script they name, when there is one.
+///
+/// The declared path was already normalised against the declaring script's
+/// directory at extraction time, so an exact logical-path match is enough.
+/// Unresolved rows are deliberately kept: they are what lets `scat deps` and
+/// `scat search --declares` surface config, data and report files that aren't
+/// cataloged.
+fn resolve_declared_file_targets(conn: &Connection) -> Result<()> {
+    let kinds = crate::core::db::DECLARED_FILE_KINDS
+        .iter()
+        .map(|k| format!("'{k}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    conn.execute(
+        &format!(
+            "UPDATE dependencies
+             SET resolved_script_id = (
+                 SELECT s.id FROM scripts s
+                 WHERE s.logical_path = dependencies.depends_on_path
+                   AND s.id != dependencies.script_id
+             )
+             WHERE kind IN ({kinds}) AND resolved_script_id IS NULL"
+        ),
         [],
     )?;
     Ok(())

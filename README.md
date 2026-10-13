@@ -76,6 +76,10 @@ This tool provides a **single searchable index** without:
 - JSON output where applicable
 - Suitable for power users and CI jobs
 - Transitive dependency trees: `scat deps <path> --tree [--depth N]`
+- Files declared in vc headers (`@inputfile`, `@outputfile`, …) are searchable
+  and navigable even when they aren't cataloged:
+  `scat search --declares report.csv [--role outputfile]`, and
+  `scat deps <declared-path>` lists the scripts that declare it
 - Shell completions: `scat completions bash|zsh|fish|powershell|elvish`
 - Find related scripts by embedding similarity: `scat similar <path> [--limit N]`
   — requires an `embeddings.sqlite` sidecar built separately by `scat-embed`
@@ -170,6 +174,14 @@ Two kinds of dependency edges are recorded:
     Resolution is language-agnostic, so cross-language edges (a shell script
     invoking a Python one, or vice versa) are captured. In `scat deps` they show
     as `ref` (flat table) or `(ref)` (tree).
+  - **Header-declared files** — vc's `@parentfile`, `@childfile`, `@inputfile`,
+    `@outputfile` and `@paramfile` keywords. Each keyword is its own edge kind,
+    shown as `parent`/`child`/`input`/`output`/`param`. Unlike path literals,
+    these are kept even when the target isn't an indexed script (a config, data
+    or report file), since the author declared the relationship explicitly.
+    Relative paths are resolved against the declaring script's directory. Find
+    them with `scat search --declares <substring> [--role <keyword>]`, and run
+    `scat deps <path>` on a declared file to see which scripts declare it.
 
 ***
 

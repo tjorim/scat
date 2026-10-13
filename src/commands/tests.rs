@@ -478,6 +478,9 @@ fn render_tree_lines_draws_branches_and_markers() {
     shared_again.repeated = true;
     let mut referenced = node("/catalog/runner.sh", vec![]);
     referenced.via_kind = Some("referenced".to_string());
+    let mut declared = node("/catalog/out/report.csv", vec![]);
+    declared.via_kind = Some("outputfile".to_string());
+    declared.indexed = false;
     let root = node(
         "/catalog/a.py",
         vec![
@@ -488,7 +491,10 @@ fn render_tree_lines_draws_branches_and_markers() {
                     vec![node("/catalog/leaf.py", vec![])],
                 )],
             ),
-            node("/catalog/c.py", vec![shared_again, external, referenced]),
+            node(
+                "/catalog/c.py",
+                vec![shared_again, external, referenced, declared],
+            ),
         ],
     );
 
@@ -502,7 +508,8 @@ fn render_tree_lines_draws_branches_and_markers() {
             "└── /catalog/c.py",
             "    ├── /catalog/shared.py (*)",
             "    ├── /external/lib.py (not indexed)",
-            "    └── /catalog/runner.sh (ref)",
+            "    ├── /catalog/runner.sh (ref)",
+            "    └── /catalog/out/report.csv (output) (not indexed)",
         ]
     );
 }
