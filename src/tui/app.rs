@@ -15,6 +15,18 @@ impl TuiApp {
         resolver: PathResolver,
     ) -> Result<Self> {
         let mut app = Self {
+            workflow: None,
+            workflow_config: None,
+            workflow_sources: None,
+            inspection_worker: None,
+            inspection: None,
+            inspection_return: None,
+            inspection_return_mode: ViewMode::Browse,
+            search_options: search_worker::SearchOptions::default(),
+            result_limit: RESULT_LIMIT,
+            bookmarks: std::collections::HashMap::default(),
+            expanded_query: None,
+            search_settings: None,
             search_worker,
             detail_worker,
             diff_worker,
@@ -156,10 +168,42 @@ impl TuiApp {
         self.error = None;
         let id = self.next_query_id;
         self.next_query_id = self.next_query_id.saturating_add(1);
+        let query = if self.search_options.mode == search_worker::SearchMode::Text {
+            if let Some(alias) = self.query.strip_prefix('@') {
+                let expanded = self
+                    .bookmarks
+                    .get(alias)
+                    .cloned()
+                    .unwrap_or_else(|| alias.to_owned());
+                self.expanded_query = Some(format!(
+                    "{} → {}{}",
+                    self.query,
+                    expanded,
+                    if self.bookmarks.contains_key(alias) {
+                        ""
+                    } else {
+                        " (bookmark missing; fallback)"
+                    }
+                ));
+                expanded
+            } else {
+                self.expanded_query = None;
+                self.query.clone()
+            }
+        } else {
+            self.expanded_query = None;
+            self.query.clone()
+        };
+        self.filter_labels = if self.search_options.mode == search_worker::SearchMode::Text {
+            search_worker::parse_query_filters(&query).filter_labels()
+        } else {
+            Vec::new()
+        };
         self.search_worker.send(SearchRequest {
             id,
-            query: self.query.clone(),
-            limit: RESULT_LIMIT,
+            query,
+            limit: self.result_limit,
+            options: self.search_options.clone(),
         })?;
         self.pending_query = None;
         self.inflight_query_id = Some(id);
@@ -223,6 +267,7 @@ impl TuiApp {
     }
 
     pub(super) fn schedule_query(&mut self) {
+        self.inflight_query_id = None;
         self.pending_query = Some(self.query.clone());
         self.last_keystroke_at = Some(Instant::now());
         // Recompute the filter labels once per query change so the render loop

@@ -7,6 +7,7 @@ use ratatui::{
 };
 
 pub(super) fn draw_popup(frame: &mut Frame<'_>, app: &TuiApp) {
+    super::super::search_settings::draw(frame, app);
     let Some(popup) = &app.popup else {
         return;
     };

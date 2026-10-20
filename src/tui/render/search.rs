@@ -17,6 +17,21 @@ pub(super) fn draw_search(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
     if !app.filter_labels.is_empty() {
         title = format!("{title} [{}]", app.filter_labels.join(" "));
     }
+    title.push_str(&format!(
+        " | {} limit={} F6 settings",
+        app.search_options.mode.label(),
+        app.result_limit
+    ));
+    for (key, value) in [
+        ("role", &app.search_options.role),
+        ("lang", &app.search_options.lang),
+        ("owner", &app.search_options.owner),
+        ("tag", &app.search_options.tag),
+    ] {
+        if let Some(value) = value {
+            title.push_str(&format!(" {key}={value}"));
+        }
+    }
     let inner = area.inner(ratatui::layout::Margin::new(1, 1));
     // Preserve the viewport while clicking/dragging; scroll only when needed.
     let limit = app.query_view_start.min(app.query_cursor);
@@ -66,6 +81,7 @@ pub(super) fn draw_search(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
             Block::default()
                 .borders(Borders::ALL)
                 .title(title)
+                .title_bottom(app.expanded_query.clone().unwrap_or_default())
                 .border_style(focus_border(app.focus, Focus::Search)),
         ),
         area,

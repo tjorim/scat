@@ -7,11 +7,41 @@ use anyhow::{Context, Result, anyhow};
 use scat_core::core::db::JsonRow;
 use scat_core::core::search::{SearchApi, open_search_api};
 
+/// Structured settings shared by the editor and background worker.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SearchOptions {
+    pub mode: SearchMode,
+    pub role: Option<String>,
+    pub lang: Option<String>,
+    pub owner: Option<String>,
+    pub tag: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SearchMode {
+    #[default]
+    Text,
+    Regex,
+    Function,
+    Declares,
+}
+impl SearchMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Text => "text (live prefix)",
+            Self::Regex => "regex",
+            Self::Function => "function",
+            Self::Declares => "declares",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SearchRequest {
     pub id: u64,
     pub query: String,
     pub limit: usize,
+    pub options: SearchOptions,
 }
 
 #[derive(Debug)]
@@ -81,7 +111,8 @@ fn worker_loop(
         }
         let result = match &api {
             Ok(api) => {
-                run_search(api, &request.query, request.limit).map_err(|err| err.to_string())
+                run_search_with_options(api, &request.query, request.limit, &request.options)
+                    .map_err(|err| err.to_string())
             }
             Err(err) => Err(err.clone()),
         };
@@ -147,14 +178,85 @@ pub fn parse_query_filters(query: &str) -> ParsedQuery {
     parsed
 }
 
-fn run_search(api: &SearchApi, query: &str, limit: usize) -> Result<Vec<JsonRow>> {
-    let parsed = parse_query_filters(query);
+fn run_search_with_options(
+    api: &SearchApi,
+    query: &str,
+    limit: usize,
+    options: &SearchOptions,
+) -> Result<Vec<JsonRow>> {
+    anyhow::ensure!(
+        limit > 0 && i64::try_from(limit).is_ok(),
+        "Result limit must be a positive integer within SQLite range"
+    );
+    anyhow::ensure!(
+        options.role.is_none() || options.mode == SearchMode::Declares,
+        "Role requires declared-file mode"
+    );
+    if let Some(role) = &options.role {
+        anyhow::ensure!(
+            [
+                "parentfile",
+                "childfile",
+                "inputfile",
+                "outputfile",
+                "paramfile"
+            ]
+            .contains(&role.as_str()),
+            "Invalid declared-file role: {role}"
+        );
+    }
+    let mut parsed = if options.mode == SearchMode::Text {
+        parse_query_filters(query)
+    } else {
+        ParsedQuery {
+            text: query.to_owned(),
+            ..Default::default()
+        }
+    };
+    if options.lang.is_some() {
+        parsed.lang.clone_from(&options.lang);
+    }
+    if options.owner.is_some() {
+        parsed.owner.clone_from(&options.owner);
+    }
+    if options.tag.is_some() {
+        parsed.tag.clone_from(&options.tag);
+    }
     let (lang, owner, tag) = (
         parsed.lang.as_deref(),
         parsed.owner.as_deref(),
         parsed.tag.as_deref(),
     );
-    let text = parsed.text.trim();
+    let text = if options.mode == SearchMode::Text {
+        parsed.text.trim()
+    } else {
+        parsed.text.as_str()
+    };
+    match options.mode {
+        SearchMode::Regex => {
+            return api
+                .search_by_regex_with_filters(text, limit, lang, owner, tag)
+                .context("Invalid regex or regex search failed");
+        }
+        SearchMode::Function => {
+            return api
+                .search_scripts_by_function_with_filters(text, limit, lang, owner, tag)
+                .context("Function search failed");
+        }
+        SearchMode::Declares => {
+            return api
+                .search_scripts_by_declared_file_with_filters(
+                    text,
+                    options.role.as_deref(),
+                    limit,
+                    lang,
+                    owner,
+                    tag,
+                )
+                .context("Declared-file search failed");
+        }
+        SearchMode::Text => {}
+    }
     if text.is_empty() {
         return api
             .list_scripts(lang, owner, tag, limit, 0)
@@ -209,7 +311,7 @@ fn auto_prefix_last_term(text: &str) -> String {
 mod tests {
     use std::time::{Duration, Instant};
 
-    use super::{SearchRequest, SearchWorker};
+    use super::{SearchOptions, SearchRequest, SearchWorker};
     use scat_core::core::db::{SCHEMA_VERSION, create_db};
     use tempfile::NamedTempFile;
 
@@ -250,6 +352,88 @@ mod tests {
     }
 
     #[test]
+    fn advanced_modes_match_cli_api_and_validate_options() {
+        use super::{SearchMode, SearchOptions, run_search_with_options};
+        let db = make_db();
+        let conn = rusqlite::Connection::open(db.path()).unwrap();
+        conn.execute("INSERT INTO function_definitions(script_id,name,kind,line) VALUES(1,'build_report','function',1)", []).unwrap();
+        for role in [
+            "parentfile",
+            "childfile",
+            "inputfile",
+            "outputfile",
+            "paramfile",
+        ] {
+            conn.execute("INSERT INTO dependencies(script_id,depends_on_path,kind) VALUES(1,'/data/report.csv',?)", [role]).unwrap();
+        }
+        let api = scat_core::core::search::open_search_api(db.path()).unwrap();
+        let mut options = SearchOptions {
+            mode: SearchMode::Function,
+            lang: Some("python".into()),
+            owner: Some("alice".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            run_search_with_options(&api, "report", 10, &options).unwrap(),
+            api.search_scripts_by_function_with_filters(
+                "report",
+                10,
+                Some("python"),
+                Some("alice"),
+                None
+            )
+            .unwrap()
+        );
+        options.mode = SearchMode::Declares;
+        for role in [
+            "parentfile",
+            "childfile",
+            "inputfile",
+            "outputfile",
+            "paramfile",
+        ] {
+            options.role = Some(role.into());
+            let actual = run_search_with_options(&api, "report.csv", 10, &options).unwrap();
+            assert_eq!(actual.len(), 1);
+            assert_eq!(
+                actual,
+                api.search_scripts_by_declared_file_with_filters(
+                    "report.csv",
+                    Some(role),
+                    10,
+                    Some("python"),
+                    Some("alice"),
+                    None
+                )
+                .unwrap()
+            );
+        }
+        options.mode = SearchMode::Regex;
+        assert!(run_search_with_options(&api, "needle", 10, &options).is_err());
+        options.role = None;
+        assert_eq!(
+            run_search_with_options(&api, "needle.*alpha", 10, &options).unwrap(),
+            api.search_by_regex_with_filters(
+                "needle.*alpha",
+                10,
+                Some("python"),
+                Some("alice"),
+                None
+            )
+            .unwrap()
+        );
+        assert!(run_search_with_options(&api, "[", 10, &options).is_err());
+        assert!(run_search_with_options(&api, "needle", 0, &options).is_err());
+        options.mode = SearchMode::Text;
+        assert_eq!(
+            run_search_with_options(&api, r"scripts\a.py", 1, &options)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
     fn empty_query_returns_all_scripts() {
         let db = make_db();
         let worker = SearchWorker::new(db.path()).unwrap();
@@ -258,6 +442,7 @@ mod tests {
                 id: 1,
                 query: String::new(),
                 limit: 200,
+                options: SearchOptions::default(),
             })
             .unwrap();
         let response = recv_response(&worker);
@@ -309,6 +494,7 @@ mod tests {
                 id: 2,
                 query: "owner:alice".to_string(),
                 limit: 200,
+                options: SearchOptions::default(),
             })
             .unwrap();
         let rows = recv_response(&worker).result.unwrap();
@@ -328,6 +514,7 @@ mod tests {
                 id: 3,
                 query: "owner:alice beta".to_string(),
                 limit: 200,
+                options: SearchOptions::default(),
             })
             .unwrap();
         let rows = recv_response(&worker).result.unwrap();
@@ -343,6 +530,7 @@ mod tests {
                 id: 4,
                 query: "scripts/a".to_string(),
                 limit: 200,
+                options: SearchOptions::default(),
             })
             .unwrap();
         let rows = recv_response(&worker).result.unwrap();
@@ -383,6 +571,7 @@ mod tests {
                 id: 9,
                 query: "prepare_release".to_string(),
                 limit: 200,
+                options: SearchOptions::default(),
             })
             .unwrap();
         let rows = recv_response(&worker).result.unwrap();
@@ -436,6 +625,7 @@ mod tests {
                 id: 9,
                 query: "alph".to_string(),
                 limit: 200,
+                options: SearchOptions::default(),
             })
             .unwrap();
         let response = recv_response(&worker);
@@ -461,6 +651,7 @@ mod tests {
                 id: 10,
                 query: "\"alph\"".to_string(),
                 limit: 200,
+                options: SearchOptions::default(),
             })
             .unwrap();
         let response = recv_response(&worker);
@@ -472,6 +663,7 @@ mod tests {
                 id: 11,
                 query: "\"alph".to_string(),
                 limit: 200,
+                options: SearchOptions::default(),
             })
             .unwrap();
         let response = recv_response(&worker);
@@ -494,6 +686,7 @@ mod tests {
                 id: 7,
                 query: "\"".to_string(),
                 limit: 200,
+                options: SearchOptions::default(),
             })
             .unwrap();
         let response = recv_response(&worker);
@@ -505,6 +698,7 @@ mod tests {
                 id: 8,
                 query: "needle-alpha".to_string(),
                 limit: 200,
+                options: SearchOptions::default(),
             })
             .unwrap();
         let response = recv_response(&worker);

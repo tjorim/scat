@@ -36,14 +36,17 @@ mod folder_worker;
 mod handlers;
 mod helpers;
 mod highlight;
+mod inspection;
 mod mouse;
 mod render;
 mod search_input;
+mod search_settings;
 mod search_worker;
 mod stats_worker;
 #[cfg(test)]
 mod tests;
 mod viewer;
+mod workflows;
 mod xref;
 
 use self::detail_worker::{
@@ -167,6 +170,18 @@ enum ScrollCommand {
     Bottom,
 }
 struct TuiApp {
+    workflow: Option<workflows::Dialog>,
+    workflow_config: Option<PathBuf>,
+    workflow_sources: Option<(PathBuf, PathBuf)>,
+    inspection_worker: Option<inspection::Worker>,
+    inspection: Option<inspection::Page>,
+    inspection_return: Option<inspection::Page>,
+    inspection_return_mode: ViewMode,
+    search_options: search_worker::SearchOptions,
+    result_limit: usize,
+    bookmarks: std::collections::HashMap<String, String>,
+    expanded_query: Option<String>,
+    search_settings: Option<search_settings::Editor>,
     search_worker: SearchWorker,
     detail_worker: DetailWorker,
     diff_worker: DiffWorker,
@@ -306,7 +321,15 @@ fn inner_rect(outer: Rect) -> Rect {
         height: outer.height.saturating_sub(2),
     }
 }
-pub fn run(db_path: &Path, resolver: PathResolver) -> Result<()> {
+pub fn run(
+    db_path: &Path,
+    embeddings_path: &Path,
+    source_db: &Path,
+    source_embeddings: &Path,
+    source_config: Option<&Path>,
+    resolver: PathResolver,
+    bookmarks: std::collections::HashMap<String, String>,
+) -> Result<()> {
     let search_worker = SearchWorker::new(db_path)?;
     let detail_worker = DetailWorker::new(db_path)?;
     let diff_worker = DiffWorker::new(db_path)?;
@@ -320,6 +343,10 @@ pub fn run(db_path: &Path, resolver: PathResolver) -> Result<()> {
         stats_worker,
         resolver,
     )?;
+    app.inspection_worker = Some(inspection::Worker::new(db_path, embeddings_path)?);
+    app.workflow_sources = Some((source_db.to_owned(), source_embeddings.to_owned()));
+    app.workflow_config = source_config.map(Path::to_owned);
+    app.bookmarks = bookmarks;
     let mut terminal = TerminalGuard::enter()?;
     let debounce = Duration::from_millis(DEBOUNCE_MS);
     let poll_tick = Duration::from_millis(POLL_TICK_MS);
@@ -332,6 +359,8 @@ pub fn run(db_path: &Path, resolver: PathResolver) -> Result<()> {
             app.drain_file_check_channel();
             app.drain_folder_channel();
             app.drain_stats_channel();
+            app.drain_inspection();
+            app.drain_workflow();
             if app
                 .last_keystroke_at
                 .is_some_and(|keystroke| keystroke.elapsed() >= debounce)

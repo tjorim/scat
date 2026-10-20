@@ -98,6 +98,8 @@ scat tui
 | `Ctrl+W` / `Ctrl+Backspace` / `Ctrl+Delete` (in search) | Delete the previous/next word |
 | `Ctrl+U` / `Ctrl+K` (in search) | Delete from the cursor to the start/end |
 | `F2` | Toggle native terminal text selection; Esc also resumes the TUI |
+| `F11` | Compare catalog scripts with files/revisions, two files, or catalog snapshots |
+| `F12` | Export JSON/search CSV; choose scope, fields and a local save path |
 | `F3` | Copy the search selection/query, preview content, script details, diff, or selected script path |
 | `Enter` | Move from search to results, or open the selected script detail view |
 | `Tab` / `Shift+Tab` | Cycle between search, results, preview, and related panes |

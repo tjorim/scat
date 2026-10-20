@@ -115,7 +115,15 @@ fn run(cli: Cli) -> Result<()> {
                     .with_context(|| format!("Failed to load mapping file: {}", path.display()))?,
                 None => PathResolver::new(),
             };
-            return tui::run(&catalog_read_path(db_path, &cache_options), resolver);
+            return tui::run(
+                &catalog_read_path(db_path, &cache_options),
+                &catalog_read_path(&embeddings_path, &cache_options),
+                db_path,
+                &embeddings_path,
+                cli.config.as_deref(),
+                resolver,
+                scat_config.bookmarks,
+            );
         }
         Commands::Catalog { command } => {
             return cmd_catalog(

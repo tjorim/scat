@@ -32,6 +32,23 @@ impl TuiApp {
                 available,
             });
         };
+        add(
+            "Search mode, filters and result limit",
+            "F6",
+            KeyCode::F(6),
+            true,
+        );
+        add(
+            "Compare files, revisions or catalog snapshots",
+            "F11",
+            KeyCode::F(11),
+            true,
+        );
+        add("Export JSON / search CSV", "F12", KeyCode::F(12), true);
+        add("Similar scripts", "F7", KeyCode::F(7), true);
+        add("Catalog checkout status", "F8", KeyCode::F(8), true);
+        add("Transitive dependency trees", "F9", KeyCode::F(9), true);
+        add("Symlink inspection", "F10", KeyCode::F(10), true);
         add("Contextual help", "F1", KeyCode::F(1), true);
         add("Command palette", "F4", KeyCode::F(4), true);
         add("Native text selection", "F2", KeyCode::F(2), true);
@@ -41,6 +58,16 @@ impl TuiApp {
             KeyCode::F(3),
             self.copy_target().is_some(),
         );
+        if self.inspection.is_some() {
+            add("Open inspected script", "Enter", KeyCode::Enter, true);
+            add("Back to browsing", "Esc", KeyCode::Esc, true);
+            add("Move up", "Up", KeyCode::Up, true);
+            add("Move down", "Down", KeyCode::Down, true);
+            add("Increase limit / depth", "+", KeyCode::Char('+'), true);
+            add("Decrease limit / depth", "-", KeyCode::Char('-'), true);
+            add("Reload inspection", "r", KeyCode::Char('r'), true);
+            return actions;
+        }
         let browse = self.mode == ViewMode::Browse;
         let input = browse && self.focus == Focus::Search;
         if browse {

@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### TUI
+
+- Add F11 file/revision/catalog comparisons and F12 JSON/search CSV exports using CLI validation and serializers, with explicit scope/limits, field selection, terminal clipboard requests, and background saves that refuse existing files.
+
+- Add worker-backed similar scripts (F7), catalog checkout/warning status (F8), transitive dependency trees (F9), and bidirectional symlink inspection (F10), with navigation back from script details and adjustable similarity limits/tree depth.
+
 ### Indexer
 
 - **Data files keep only a leading sample of their content; `.lst` is indexed** — `.csv` and `.txt` files (and the newly indexed `.lst`, language `lst`) are data — feeds, exports, report and list files — not scripts, but the catalog stored and full-text indexed their whole body (up to the 8 MiB cap), so a daily-refreshed export meant a large, churning, noisy search index. They are still catalogued, so they can be found by name, resolve `@inputfile`/`@outputfile` links and show up in `deps`, but `content` now holds just the first 20 lines (`core::db::SAMPLED_CONTENT_LINES`) so people can see the data format. Header fields are still parsed from the full text and `content_hash` still covers the whole file. Because the stored content is only a sample, `scat diff` of such a file against the catalog now explains that instead of showing a misleading diff; `--old`/`--new` file comparison still works. `@scripttype: lst` is recognized. Run `scat catalog build --force` to shrink existing catalogs.
