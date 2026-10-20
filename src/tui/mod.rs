@@ -46,7 +46,7 @@ mod search_worker;
 mod stats_worker;
 #[cfg(test)]
 mod tests;
-mod viewer;
+pub mod viewer;
 mod workflows;
 mod xref;
 
@@ -175,6 +175,7 @@ struct TuiApp {
     workflow: Option<workflows::Dialog>,
     pending_administration: Option<Vec<String>>,
     workflow_config: Option<PathBuf>,
+    doctor_flags: Vec<String>,
     workflow_sources: Option<(PathBuf, PathBuf)>,
     inspection_worker: Option<inspection::Worker>,
     inspection: Option<inspection::Page>,
@@ -325,6 +326,7 @@ fn inner_rect(outer: Rect) -> Rect {
     }
 }
 pub struct RunOptions {
+    pub doctor_flags: Vec<String>,
     pub bookmarks: std::collections::HashMap<String, String>,
     pub terminal_modes: capabilities::Capabilities,
 }
@@ -355,6 +357,7 @@ pub fn run(
     app.inspection_worker = Some(inspection::Worker::new(db_path, embeddings_path)?);
     app.workflow_sources = Some((source_db.to_owned(), source_embeddings.to_owned()));
     app.workflow_config = source_config.map(Path::to_owned);
+    app.doctor_flags = options.doctor_flags;
     app.bookmarks = options.bookmarks;
     app.terminal_modes = options.terminal_modes;
     // Keep the parent alive when the foreground child handles Ctrl+C. In raw

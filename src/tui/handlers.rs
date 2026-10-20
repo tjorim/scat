@@ -17,12 +17,13 @@ impl TuiApp {
             return Ok(false);
         }
         if key.modifiers == KeyModifiers::ALT
-            && let KeyCode::Char(c @ ('i' | 'a' | 'b' | 'v')) = key.code
+            && let KeyCode::Char(c @ ('i' | 'a' | 'b' | 'v' | 'd')) = key.code
         {
             self.open_catalog_workflow(match c {
                 'i' => 0,
                 'a' => 1,
                 'b' => 2,
+                'd' => 4,
                 _ => 3,
             });
             return Ok(false);

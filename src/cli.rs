@@ -73,6 +73,22 @@ pub fn resolve_no_cache(flag: bool, no_cache_env: Option<&OsStr>) -> bool {
 
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Read-only host, catalog, cache and permission diagnostics (no refresh).
+    Doctor {
+        /// Stable structured support output.
+        #[arg(long)]
+        json: bool,
+        /// Optional logical or local script path for host-local RPM provenance.
+        path: Option<String>,
+        /// Path mapping file for the script.
+        #[arg(long)]
+        mapping: Option<PathBuf>,
+        /// Query the local RPM database for the selected file only.
+        #[arg(long, requires = "path")]
+        rpm: bool,
+        #[arg(long, hide = true)]
+        probe: Option<String>,
+    },
     /// Full-text search across indexed scripts.
     Search {
         /// Full-text search query (omit to list all). Prefix with `@` to expand a config bookmark.

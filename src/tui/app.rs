@@ -19,6 +19,7 @@ impl TuiApp {
             workflow: None,
             pending_administration: None,
             workflow_config: None,
+            doctor_flags: Vec::new(),
             workflow_sources: None,
             inspection_worker: None,
             inspection: None,
