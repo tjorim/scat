@@ -93,6 +93,49 @@ This tool provides a **single searchable index** without:
   [tjorim/scat#73](https://github.com/tjorim/scat/issues/73) for why.
 
 ### TUI
+
+Use **F7** for similar scripts, **F8** for catalog-wide checkout/warning status,
+**F9** for transitive uses/used-by trees, and **F10** for incoming/outgoing symlinks.
+These actions are also in F1 help and the F4 palette. Move with Up/Down, press
+Enter for script details, then Esc to return to the inspection results. Esc
+closes the results. Use `+`/`-` to adjust the similarity limit or tree depth
+(minimum 1), and `r` to reload. Trees show edge kinds, unresolved paths, cycles,
+repeated subtrees and depth cutoffs. Similarity uses the same configured
+`--embeddings` sidecar and local cache as the CLI; clients never load a model.
+
+
+Press **F11** for script/file/revision or whole-catalog comparisons, and **F12**
+for JSON or search CSV export. The dialog accepts the same read-only command
+arguments as the CLI (without `scat`), including `--against`, `--old`/`--new`,
+revision selectors, `--fields`, and output formats. Tab selects a field; Ctrl+U
+clears it; Enter generates output. F1 shows examples for every comparison mode.
+PageUp/PageDown scroll the output.
+
+Search export defaults to **displayed**: the captured search rows, with their
+count and TUI limit shown. Only format and selected fields apply in this scope.
+Select **requested** to run a fresh query; an explicit search `--limit` makes
+larger exports deliberate. Inspection exports run fresh requests using the
+shown limit/depth. F3 sends a terminal clipboard request; Ctrl+S saves generated
+output to the absolute local path you enter, refusing existing files (including
+symlinks). Comparison, export and save work runs in the background; errors stay
+in the dialog. Esc closes it and preserves the underlying view and selection.
+
+Press **F6** (also listed in F1 help and the F4 palette) to edit search mode,
+role, language, owner, tag and the positive result limit. Tab selects a field,
+Ctrl+U clears it, Enter applies settings and Esc cancels. The search box supplies
+the pattern for text, regex, function-name substring or declared-file search.
+Role applies only to declared-file search; leave it blank to match all roles.
+Settings remain active across searches. Explicit editor filters override matching
+text filter tokens. Advanced patterns are literal patterns, so `lang:`/`owner:`/
+`tag:` tokens are interpreted only in text mode.
+
+Text mode expands an exact `@bookmark` from configuration, showing the expansion
+in the search title; unknown bookmarks use the alias without `@`, like the CLI.
+Unlike CLI text search, live TUI text search prefixes the final term as you type.
+Other modes use the CLI SearchApi directly. The results title shows the configured
+window and warns when the cap is reached (more matches may exist); ranking applies
+to that result window. F6 settings keep expensive searches on the worker thread.
+
 - Interactive search and filtering
   - `lang:`, `owner:`, and `tag:` tokens in the search box filter results the
     same way the CLI's `--lang`/`--owner`/`--tag` flags do
@@ -121,6 +164,22 @@ scat catalog stats
 scat tui
 scat completions bash
 ````
+
+### TUI discovery and small terminals
+
+Press **F1** in any TUI view for contextual help, or **F4** to search the
+command palette. The palette shows shortcuts and marks unavailable actions;
+Enter runs the selected action and Esc closes either popup. Search input keeps
+ordinary characters, including `?`, as text. F2 toggles native terminal text
+selection and F3 copies the focused content.
+
+Wide terminals show all panes. Below 110 columns or 30 body rows, the active
+pane is shown with tabs; use Tab/Shift+Tab or click a tab to switch panes.
+Focus and selection survive resizing and fullscreen changes. Scrollbars are
+position indicators; use the existing keyboard shortcuts or mouse wheel to
+navigate. Revision tables keep type and checkout path visible, hide owner
+below 72 columns, and hide timestamp below 48 columns. `*` marks the active
+revision; Enter opens the selected revision diff and Esc returns to its row.
 
 ***
 

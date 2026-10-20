@@ -253,7 +253,7 @@ fn search_title_prioritizes_error_then_searching() {
     assert_eq!(search_title(true, true), "Search (invalid query)");
 }
 
-fn make_app(db_path: &std::path::Path) -> TuiApp {
+pub(super) fn make_app(db_path: &std::path::Path) -> TuiApp {
     let search_worker = SearchWorker::new(db_path).unwrap();
     let detail_worker = DetailWorker::new(db_path).unwrap();
     let diff_worker = DiffWorker::new(db_path).unwrap();
@@ -579,7 +579,7 @@ fn revisions_pane_scrolls_to_keep_the_selection_visible() {
 
     // Tall enough that the Revisions pane (24% of the body's leftover
     // height) gets more than a couple of rows to scroll within.
-    let mut terminal = Terminal::new(TestBackend::new(80, 150)).unwrap();
+    let mut terminal = Terminal::new(TestBackend::new(160, 150)).unwrap();
     terminal
         .draw(|frame| super::render::draw(frame, &mut app))
         .unwrap();
@@ -1779,7 +1779,7 @@ fn deps_pane_virtualizes_and_never_wraps_a_long_path() {
 
     // Tall enough that the Deps pane (18% of the body's leftover height)
     // gets more than a couple of rows to scroll within.
-    let mut terminal = Terminal::new(TestBackend::new(80, 120)).unwrap();
+    let mut terminal = Terminal::new(TestBackend::new(160, 120)).unwrap();
     terminal
         .draw(|frame| super::render::draw(frame, &mut app))
         .unwrap();
@@ -1839,7 +1839,7 @@ fn functions_pane_virtualizes_large_lists() {
 
     // Tall enough that the Functions pane (20% of the body's leftover
     // height) gets more than a couple of rows to scroll within.
-    let mut terminal = Terminal::new(TestBackend::new(80, 120)).unwrap();
+    let mut terminal = Terminal::new(TestBackend::new(160, 120)).unwrap();
     terminal
         .draw(|frame| super::render::draw(frame, &mut app))
         .unwrap();
@@ -2275,4 +2275,263 @@ fn every_printable_ascii_character_can_be_entered_into_search() {
     assert_eq!(app.query, text);
     assert_eq!(app.focus, Focus::Search);
     assert_eq!(app.mode, ViewMode::Browse);
+}
+
+#[test]
+fn contextual_popups_capture_keys_and_mouse_in_every_view() {
+    use crossterm::event::{MouseEvent, MouseEventKind};
+    let db = super::make_test_db();
+    let mut app = make_app(db.path());
+    for mode in [
+        ViewMode::Browse,
+        ViewMode::Detail,
+        ViewMode::DetailDiff,
+        ViewMode::Stats,
+        ViewMode::DepGraph,
+    ] {
+        app.mode = mode;
+        app.focus = Focus::Search;
+        app.handle_key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.popup.is_some());
+        app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.mode, mode);
+        assert_eq!(app.query, "");
+        assert!(
+            !app.handle_mouse(MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: 1,
+                row: 1,
+                modifiers: KeyModifiers::NONE
+            })
+            .unwrap()
+        );
+        assert!(
+            !app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+                .unwrap()
+        );
+        assert!(app.popup.is_none());
+        assert_eq!(app.mode, mode);
+    }
+    app.mode = ViewMode::Browse;
+    app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.query, "?");
+}
+
+#[test]
+fn palette_filters_and_executes_the_keyboard_handler() {
+    let db = super::make_test_db();
+    let mut app = make_app(db.path());
+    app.focus = Focus::Results;
+    app.handle_key(KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE))
+        .unwrap();
+    for c in "fullscreen".chars() {
+        app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+            .unwrap();
+    }
+    assert_eq!(app.filtered_actions().len(), 1);
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    assert!(app.fullscreen);
+    assert!(app.popup.is_none());
+    app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
+        .unwrap();
+    assert!(!app.fullscreen);
+}
+
+#[test]
+fn adaptive_layout_retains_focus_and_selection_at_all_sizes() {
+    use ratatui::{Terminal, backend::TestBackend};
+    let db = super::make_test_db();
+    let mut app = make_app(db.path());
+    app.results = (0..20)
+        .map(|i| detail_row(&format!("/scripts/{i}")))
+        .collect();
+    app.selected = 12;
+    for focus in [
+        Focus::Results,
+        Focus::Preview,
+        Focus::Deps,
+        Focus::Functions,
+        Focus::Revisions,
+    ] {
+        app.focus = focus;
+        for (width, height) in [(160, 60), (80, 24), (24, 8), (1, 1), (80, 24), (160, 60)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|f| super::render::draw(f, &mut app)).unwrap();
+            assert_eq!(app.focus, focus);
+            assert_eq!(app.selected, 12);
+            if width == 80 {
+                assert!(!app.pane_tabs.is_empty());
+                let tab = app
+                    .pane_tabs
+                    .iter()
+                    .find(|(_, f)| *f == Focus::Preview)
+                    .unwrap()
+                    .0;
+                app.handle_left_click(tab.x, tab.y).unwrap();
+                assert_eq!(app.focus, Focus::Preview);
+                app.focus = focus;
+            }
+        }
+    }
+}
+
+#[test]
+fn compact_tab_click_hits_label_midpoint() {
+    use ratatui::{Terminal, backend::TestBackend};
+    let db = super::make_test_db();
+    let mut app = make_app(db.path());
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    terminal.draw(|f| super::render::draw(f, &mut app)).unwrap();
+    let tab = app
+        .pane_tabs
+        .iter()
+        .find(|(_, f)| *f == Focus::Revisions)
+        .unwrap()
+        .0;
+    app.handle_left_click(tab.x + tab.width / 2, tab.y).unwrap();
+    assert_eq!(app.focus, Focus::Revisions);
+}
+
+#[test]
+fn revision_table_groups_rows_and_navigates_original_indices() {
+    use ratatui::{Terminal, backend::TestBackend};
+    let db = super::make_test_db();
+    let mut app = make_app(db.path());
+    app.focus = Focus::Revisions;
+    app.checkouts = vec![
+        revision_row("ARCHIVE", "old", "/archive/tool"),
+        revision_row("DEVELOP", "new", "/develop/tool"),
+        revision_row("WORKING", "live", "/working/tool"),
+    ];
+    app.revisions_selected = 1;
+    assert_eq!(app.revision_order(), vec![1, 2, 0]);
+    app.move_revision(1);
+    assert_eq!(app.revisions_selected, 2);
+    for width in [100, 60, 30] {
+        let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
+        terminal.draw(|f| super::render::draw(f, &mut app)).unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect();
+        assert!(text.contains("Checkout path"));
+        assert_eq!(text.contains("Timestamp"), width >= 48);
+        assert_eq!(text.contains("Owner"), width >= 72);
+    }
+}
+
+#[test]
+fn wrapped_preview_scrollbar_and_scroll_clamp_follow_rendered_rows() {
+    use ratatui::{Terminal, backend::TestBackend};
+    let db = super::make_test_db();
+    let mut app = make_app(db.path());
+    app.focus = Focus::Preview;
+    app.fullscreen = true;
+    app.cached_preview_lines = vec![ratatui::text::Line::raw("long words ".repeat(100))];
+    app.preview_scroll = u16::MAX;
+    let mut terminal = Terminal::new(TestBackend::new(30, 12)).unwrap();
+    terminal.draw(|f| super::render::draw(f, &mut app)).unwrap();
+    assert!(
+        app.preview_scroll > 1,
+        "wrapped rows must scroll even with one logical line"
+    );
+    let previous = app.preview_scroll;
+    app.cached_preview_lines.clear();
+    terminal.draw(|f| super::render::draw(f, &mut app)).unwrap();
+    assert_eq!(app.preview_scroll, 0);
+    assert!(previous > app.preview_scroll);
+}
+
+#[test]
+fn advanced_settings_invalidate_old_results_and_preserve_query() {
+    let db = super::make_test_db();
+    let mut app = make_app(db.path());
+    app.query = "[".into();
+    app.query_cursor = 1;
+    app.inflight_query_id = Some(99);
+    app.handle_key(KeyEvent::new(KeyCode::F(6), KeyModifiers::NONE))
+        .unwrap();
+    let editor = app.search_settings.as_mut().unwrap();
+    editor.fields[0] = "regex".into();
+    editor.fields[5] = "0".into();
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    assert!(app.search_settings.as_ref().unwrap().error.is_some());
+    app.search_settings.as_mut().unwrap().fields[5] = "1".into();
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    assert!(app.search_settings.is_none());
+    assert_eq!(app.inflight_query_id, None);
+    assert_eq!(app.query, "[");
+    assert_eq!(app.result_limit, 1);
+    assert_eq!(
+        app.search_options.mode,
+        super::search_worker::SearchMode::Regex
+    );
+}
+
+#[test]
+fn bookmarks_expand_exact_alias_with_cli_fallback() {
+    let db = super::make_test_db();
+    let mut app = make_app(db.path());
+    app.bookmarks.insert("mine".into(), "scripts\\a.py".into());
+    app.query = "@mine".into();
+    app.dispatch_query().unwrap();
+    assert!(
+        app.expanded_query
+            .as_deref()
+            .unwrap()
+            .contains("scripts\\a.py")
+    );
+    assert_eq!(app.query, "@mine");
+    app.query = "@missing".into();
+    app.dispatch_query().unwrap();
+    assert!(
+        app.expanded_query
+            .as_deref()
+            .unwrap()
+            .contains("missing → missing (bookmark missing; fallback)")
+    );
+}
+
+#[test]
+fn inspection_navigation_keeps_results_and_terminal_selection_usable() {
+    let db = super::make_test_db();
+    let conn = rusqlite::Connection::open(db.path()).unwrap();
+    conn.execute(
+        "UPDATE scripts SET vc_warnings='[{\"kind\":\"stale\"}]'",
+        [],
+    )
+    .unwrap();
+    let mut app = make_app(db.path());
+    app.inspection_worker =
+        Some(super::inspection::Worker::new(db.path(), std::path::Path::new("/missing")).unwrap());
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    app.handle_key(key(KeyCode::F(8))).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while app.inspection.as_ref().unwrap().loading {
+        app.drain_inspection();
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert_eq!(app.inspection.as_ref().unwrap().rows.len(), 1);
+    app.handle_key(key(KeyCode::F(2))).unwrap();
+    app.handle_key(key(KeyCode::Enter)).unwrap();
+    assert!(app.inspection.is_some());
+    app.handle_key(key(KeyCode::Esc)).unwrap();
+    assert!(!app.native_selection);
+    app.handle_key(key(KeyCode::Enter)).unwrap();
+    assert!(app.inspection.is_none());
+    assert_eq!(app.mode, ViewMode::Detail);
+    app.handle_key(key(KeyCode::Esc)).unwrap();
+    assert_eq!(app.inspection.as_ref().unwrap().rows.len(), 1);
+    app.handle_key(key(KeyCode::Esc)).unwrap();
+    assert!(app.inspection.is_none());
 }

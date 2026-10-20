@@ -5,7 +5,30 @@ use super::{
 
 impl TuiApp {
     pub(super) fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
+        if self.workflow.is_some() {
+            self.workflow_key(key);
+            return Ok(false);
+        }
+        if self.popup.is_some() && self.search_settings.is_none() {
+            return self.handle_popup_key(key);
+        }
+        if !self.native_selection && matches!(key.code, KeyCode::F(11 | 12)) {
+            self.open_workflow(key.code == KeyCode::F(11));
+            return Ok(false);
+        }
         self.query_dragging = false;
+        if self.search_settings.is_some() {
+            self.handle_settings_key(key);
+            return Ok(false);
+        }
+        if key.code == KeyCode::F(6) {
+            self.open_search_settings();
+            return Ok(false);
+        }
+        if matches!(key.code, KeyCode::F(1 | 4)) {
+            self.popup = Some(super::actions::Popup::new(key.code == KeyCode::F(4)));
+            return Ok(false);
+        }
         if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
             return Ok(true);
         }
@@ -18,6 +41,29 @@ impl TuiApp {
             if key.code == KeyCode::Esc {
                 self.native_selection = false;
             }
+            return Ok(false);
+        }
+        let kind = match key.code {
+            KeyCode::F(7) => Some(super::inspection::Kind::Similar),
+            KeyCode::F(8) => Some(super::inspection::Kind::Status),
+            KeyCode::F(9) => Some(super::inspection::Kind::Tree),
+            KeyCode::F(10) => Some(super::inspection::Kind::Symlinks),
+            _ => None,
+        };
+        if let Some(kind) = kind {
+            self.open_inspection(kind)?;
+            return Ok(false);
+        }
+        if self.inspection.is_some() {
+            self.inspection_key(key)?;
+            return Ok(false);
+        }
+        if key.code == KeyCode::Esc
+            && self.mode == ViewMode::Detail
+            && self.inspection_return.is_some()
+        {
+            self.inspection = self.inspection_return.take();
+            self.mode = self.inspection_return_mode;
             return Ok(false);
         }
         if key.code == KeyCode::F(3) {
@@ -236,8 +282,7 @@ impl TuiApp {
                 code: KeyCode::Char('k'),
                 ..
             } if self.focus == Focus::Revisions => {
-                self.revisions_selected =
-                    move_selection(self.revisions_selected, self.checkouts.len(), -1);
+                self.move_revision(-1);
             }
             KeyEvent {
                 code: KeyCode::Down,
@@ -247,8 +292,7 @@ impl TuiApp {
                 code: KeyCode::Char('j'),
                 ..
             } if self.focus == Focus::Revisions => {
-                self.revisions_selected =
-                    move_selection(self.revisions_selected, self.checkouts.len(), 1);
+                self.move_revision(1);
             }
             KeyEvent {
                 code: KeyCode::Char('f'),

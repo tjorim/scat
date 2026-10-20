@@ -36,6 +36,7 @@ pub(super) fn draw_preview(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) 
         Text::from(app.cached_preview_lines.clone())
     };
     let paragraph = Paragraph::new(text).wrap(Wrap { trim: false });
+    let rendered_rows = paragraph.line_count(area.width.saturating_sub(2));
     clamp_scroll_offset(
         &mut app.preview_scroll,
         paragraph.line_count(area.width.saturating_sub(2)),
@@ -63,6 +64,13 @@ pub(super) fn draw_preview(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) 
                     .border_style(focus_border(app.focus, Focus::Preview)),
             ),
         area,
+    );
+    super::common::draw_scrollbar(
+        frame,
+        area,
+        rendered_rows,
+        usize::from(app.preview_scroll),
+        usize::from(area.height.saturating_sub(2)),
     );
 }
 

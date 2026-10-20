@@ -14,7 +14,7 @@ use super::common::{clamp_scroll_offset, hint_key, spinner_char};
 pub(super) fn draw_detail_view(frame: &mut Frame<'_>, app: &mut TuiApp) {
     let root = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(10), Constraint::Length(1)])
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
         .split(frame.area());
 
     let lines = detail::detail_lines(app);
@@ -31,6 +31,7 @@ pub(super) fn draw_detail_view(frame: &mut Frame<'_>, app: &mut TuiApp) {
         }
     }
     let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+    let rendered_rows = paragraph.line_count(root[0].width.saturating_sub(2));
     clamp_scroll_offset(
         &mut app.detail_scroll,
         paragraph.line_count(root[0].width.saturating_sub(2)),
@@ -51,6 +52,13 @@ pub(super) fn draw_detail_view(frame: &mut Frame<'_>, app: &mut TuiApp) {
                 ),
         ),
         root[0],
+    );
+    super::common::draw_scrollbar(
+        frame,
+        root[0],
+        rendered_rows,
+        usize::from(app.detail_scroll),
+        usize::from(root[0].height.saturating_sub(2)),
     );
     app.record_region(
         root[0],
@@ -96,7 +104,7 @@ pub(super) fn draw_detail_view(frame: &mut Frame<'_>, app: &mut TuiApp) {
 pub(super) fn draw_detail_diff_view(frame: &mut Frame<'_>, app: &mut TuiApp) {
     let root = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(10), Constraint::Length(1)])
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
         .split(frame.area());
 
     let spinner = spinner_char(app.tick);
@@ -104,6 +112,7 @@ pub(super) fn draw_detail_diff_view(frame: &mut Frame<'_>, app: &mut TuiApp) {
         app.detail_diff_scroll = 0;
     }
     let paragraph = Paragraph::new(app.detail_diff_output.as_str()).wrap(Wrap { trim: false });
+    let rendered_rows = paragraph.line_count(root[0].width.saturating_sub(2));
     clamp_scroll_offset(
         &mut app.detail_diff_scroll,
         paragraph.line_count(root[0].width.saturating_sub(2)),
@@ -145,6 +154,17 @@ pub(super) fn draw_detail_diff_view(frame: &mut Frame<'_>, app: &mut TuiApp) {
                     ),
             ),
         root[0],
+    );
+    super::common::draw_scrollbar(
+        frame,
+        root[0],
+        if app.detail_diff_loading {
+            0
+        } else {
+            rendered_rows
+        },
+        usize::from(app.detail_diff_scroll),
+        usize::from(root[0].height.saturating_sub(2)),
     );
     app.record_region(
         root[0],
