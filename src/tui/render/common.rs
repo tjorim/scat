@@ -4,9 +4,11 @@
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::widgets::{Block, List, ListItem, ListState};
+use ratatui::text::Line;
+use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Wrap};
 
 use super::super::Focus;
+use super::super::wrapped_text::{WrappedText, line_rows};
 
 const SPINNER_FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
@@ -23,7 +25,7 @@ pub(super) fn spinner_char(tick: u64) -> char {
 /// Functions, Revisions) so their scrolling can't silently drift apart; see
 /// [`scroll_window_variable`] for the Results pane, whose items don't all
 /// render as exactly one row.
-pub(super) fn scroll_window(
+pub(in crate::tui) fn scroll_window(
     prev_offset: usize,
     selected: usize,
     len: usize,
@@ -165,23 +167,22 @@ pub(super) fn render_window(
     frame.render_stateful_widget(list, area, &mut window_state);
 }
 
-/// Render a bordered pane as a virtualized, single-selection list of
-/// pre-formatted `labels`: only the rows inside the visible window become
-/// `ListItem`s (truncated, never wrapped), and the real full-list offset is
-/// written back into `state` for mouse hit-testing. Shared by the Deps and
-/// Functions panes — Results uses the same `scroll_window` math but builds
-/// its window lazily from `JsonRow`s since its item count can run into the
-/// thousands, where Deps/Functions labels are cheap to format in full.
+/// Render a bordered pane as a virtualized, single-selection list of `len`
+/// labels: only the rows inside the visible window are formatted (via
+/// `label(index)`) and become `ListItem`s (truncated, never wrapped), and
+/// the real full-list offset is written back into `state` for mouse
+/// hit-testing. Shared by the Deps and Functions panes — Results uses the
+/// same windowing but its items can span two rows.
 pub(super) fn render_list_pane(
     frame: &mut Frame<'_>,
     area: Rect,
     block: Block<'_>,
-    labels: &[String],
+    len: usize,
+    label: impl Fn(usize) -> String,
     selected: usize,
     state: &mut ListState,
 ) {
     let inner_height = area.height.saturating_sub(2) as usize;
-    let len = labels.len();
     if len == 0 {
         frame.render_widget(block, area);
         return;
@@ -192,13 +193,66 @@ pub(super) fn render_list_pane(
 
     let end = (offset + inner_height.max(1)).min(len);
     let max_chars = area.width.saturating_sub(4) as usize;
-    let items: Vec<ListItem> = labels[offset..end]
-        .iter()
-        .map(|line| ListItem::new(truncate_line(line, max_chars)))
+    let items: Vec<ListItem> = (offset..end)
+        .map(|i| ListItem::new(truncate_line(&label(i), max_chars)))
         .collect();
 
     render_window(frame, area, block, items, selected - offset);
     draw_scrollbar(frame, area, len, offset, inner_height);
+}
+
+/// Draw `head` followed by `tail` as one wrapped, vertically scrolled
+/// paragraph inside the block `block(scroll)` returns, plus its scrollbar.
+/// `*scroll` is clamped to the content first, so the block's title sees the
+/// final value. Only the lines intersecting the viewport are cloned and
+/// wrapped: `tail` (the long part) keeps its per-width layout cached, and
+/// `head` is expected to be short per-frame chrome.
+pub(super) fn draw_wrapped<'b>(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    scroll: &mut u16,
+    head: Vec<Line<'static>>,
+    tail: &mut WrappedText,
+    block: impl FnOnce(u16) -> Block<'b>,
+) {
+    let width = area.width.saturating_sub(2);
+    let height = usize::from(area.height.saturating_sub(2));
+    let head_rows: Vec<usize> = head.iter().map(|line| line_rows(line, width)).collect();
+    let head_total: usize = head_rows.iter().sum();
+    let total = head_total + tail.row_count(width);
+    clamp_scroll_offset(scroll, total, area);
+
+    let first = usize::from(*scroll);
+    let end = first.saturating_add(height);
+    let mut lines = Vec::new();
+    let mut skip = 0;
+    let mut row = 0;
+    for (line, rows) in head.into_iter().zip(head_rows) {
+        if row + rows > first && row < end {
+            if lines.is_empty() {
+                skip = first - row;
+            }
+            lines.push(line);
+        }
+        row += rows;
+    }
+    if end > head_total {
+        let tail_first = first.max(head_total);
+        let (tail_lines, tail_skip) = tail.window(width, tail_first - head_total, end - tail_first);
+        if lines.is_empty() {
+            skip = tail_skip;
+        }
+        lines.extend_from_slice(tail_lines);
+    }
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((u16::try_from(skip).unwrap_or(u16::MAX), 0))
+            .block(block(*scroll)),
+        area,
+    );
+    draw_scrollbar(frame, area, total, first, height);
 }
 
 pub(super) fn clamp_scroll_offset(scroll: &mut u16, line_count: usize, area: Rect) {

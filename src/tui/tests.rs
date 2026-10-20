@@ -1991,10 +1991,8 @@ fn bottom_shortcuts_show_the_last_wrapped_line_in_preview_detail_and_diff() {
     let db = super::make_test_db();
     let mut app = make_app(db.path());
     let content = format!("{} LAST", "word ".repeat(300));
-    app.cached_preview = content.clone();
-    app.cached_preview_lines = vec![Line::raw(content.clone())];
-    app.preview_total_lines = 1;
-    app.detail_diff_output = content;
+    app.set_preview_content(content.clone(), vec![Line::raw(content.clone())], 1);
+    app.set_diff_output(content);
     app.detail = Some(detail_row("/catalog/scripts/a.py"));
     app.detail
         .as_mut()
@@ -2253,7 +2251,7 @@ fn copy_uses_focused_content_and_leaves_selection_intact() {
     assert!(text.contains("/catalog/scripts/a.py"));
     assert!(!text.contains('\x1b'));
     app.mode = ViewMode::DetailDiff;
-    app.detail_diff_output = "-old\n+new".into();
+    app.set_diff_output("-old\n+new".into());
     assert_eq!(app.copy_target(), Some(("-old\n+new".into(), "diff")));
     app.detail_diff_loading = true;
     assert!(app.copy_target().is_none());
@@ -2434,7 +2432,11 @@ fn wrapped_preview_scrollbar_and_scroll_clamp_follow_rendered_rows() {
     let mut app = make_app(db.path());
     app.focus = Focus::Preview;
     app.fullscreen = true;
-    app.cached_preview_lines = vec![ratatui::text::Line::raw("long words ".repeat(100))];
+    app.set_preview_content(
+        String::new(),
+        vec![ratatui::text::Line::raw("long words ".repeat(100))],
+        1,
+    );
     app.preview_scroll = u16::MAX;
     let mut terminal = Terminal::new(TestBackend::new(30, 12)).unwrap();
     terminal.draw(|f| super::render::draw(f, &mut app)).unwrap();
@@ -2443,7 +2445,7 @@ fn wrapped_preview_scrollbar_and_scroll_clamp_follow_rendered_rows() {
         "wrapped rows must scroll even with one logical line"
     );
     let previous = app.preview_scroll;
-    app.cached_preview_lines.clear();
+    app.set_preview_content(String::new(), Vec::new(), 0);
     terminal.draw(|f| super::render::draw(f, &mut app)).unwrap();
     assert_eq!(app.preview_scroll, 0);
     assert!(previous > app.preview_scroll);
@@ -2545,7 +2547,11 @@ fn constrained_terminal_modes_cover_views_and_overlays() {
     let mut app = make_app(db.path());
     app.terminal_modes = Capabilities::detect(GlyphMode::Ascii, ColorMode::Mono, true);
     app.detail = Some(detail_row("/catalog/scripts/a.py"));
-    app.cached_preview_lines = super::highlight::highlight_lines("print(1)", "python");
+    app.set_preview_content(
+        "print(1)".into(),
+        super::highlight::highlight_lines("print(1)", "python"),
+        1,
+    );
     for (width, height) in [(120, 40), (45, 15)] {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         for mode in [
@@ -2596,4 +2602,101 @@ fn help_popup_draws_a_scrollbar_when_actions_overflow() {
         .filter(|cell| cell.symbol() == "█")
         .count();
     assert!(thumbs > 0);
+}
+
+pub(super) fn settle(app: &mut TuiApp) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while app.has_pending_work() || app.is_animating() {
+        app.advance(std::time::Instant::now()).unwrap();
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out settling the app"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
+#[test]
+fn idle_loop_neither_redraws_nor_churns_state() {
+    use std::time::{Duration, Instant};
+
+    let db = super::make_test_db();
+    let mut app = make_app(db.path());
+    settle(&mut app);
+    // The frame that showed the settled state has been drawn.
+    app.needs_redraw = false;
+    let tick = app.tick;
+    let results = app.results.clone();
+    let start = Instant::now();
+    for i in 0..200 {
+        let now = start + Duration::from_millis(i * super::POLL_TICK_MS);
+        app.advance(now).unwrap();
+        assert!(!app.needs_redraw, "idle iteration {i} requested a draw");
+        assert_eq!(
+            app.poll_timeout(now),
+            Duration::from_millis(super::IDLE_POLL_MS),
+            "idle iteration {i} should block for input"
+        );
+    }
+    assert_eq!(app.tick, tick, "spinner advanced while idle");
+    assert_eq!(app.results, results);
+    assert!(app.pending_query.is_none() && !app.search_in_flight);
+}
+
+#[test]
+fn poll_timeout_wakes_for_debounce_and_pending_work() {
+    use std::time::{Duration, Instant};
+
+    let db = super::make_test_db();
+    let mut app = make_app(db.path());
+    settle(&mut app);
+    let tick = Duration::from_millis(super::POLL_TICK_MS);
+
+    // A typed query sleeps exactly until its debounce deadline, then fires.
+    app.query = "a".into();
+    app.schedule_query();
+    let typed = app.last_keystroke_at.unwrap();
+    let debounce = Duration::from_millis(super::DEBOUNCE_MS);
+    assert_eq!(app.poll_timeout(typed), debounce);
+    assert_eq!(
+        app.poll_timeout(typed + Duration::from_millis(100)),
+        debounce - Duration::from_millis(100)
+    );
+    app.advance(typed + Duration::from_millis(100)).unwrap();
+    assert!(
+        app.pending_query.is_some(),
+        "dispatched before the debounce"
+    );
+    app.advance(typed + debounce).unwrap();
+    assert!(app.pending_query.is_none() && app.search_in_flight);
+    assert!(app.needs_redraw);
+    // An in-flight search (even behind previous results) keeps the tick.
+    assert_eq!(app.poll_timeout(Instant::now()), tick);
+    settle(&mut app);
+
+    for set in [
+        |app: &mut TuiApp| app.inflight_diff_id = Some(7),
+        |app: &mut TuiApp| app.inflight_filecheck_id = Some(7),
+        |app: &mut TuiApp| app.inflight_folder_id = Some(7),
+        |app: &mut TuiApp| app.inflight_stats_id = Some(7),
+        |app: &mut TuiApp| app.detail_loading = true,
+    ] {
+        let mut app = make_app(db.path());
+        settle(&mut app);
+        set(&mut app);
+        assert_eq!(app.poll_timeout(Instant::now()), tick);
+    }
+
+    // A frozen display (F2) advances nothing, so it just waits for input.
+    app.detail_loading = true;
+    app.native_selection = true;
+    assert_eq!(
+        app.poll_timeout(Instant::now()),
+        Duration::from_millis(super::IDLE_POLL_MS)
+    );
+    let before = app.tick;
+    app.needs_redraw = false;
+    app.advance(Instant::now()).unwrap();
+    assert_eq!(app.tick, before);
+    assert!(!app.needs_redraw);
 }

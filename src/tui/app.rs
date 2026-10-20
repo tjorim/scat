@@ -1,3 +1,5 @@
+use ratatui::text::Line;
+
 use super::{
     DetailPayload, DetailRequest, DetailResponse, DetailWorker, DiffWorker, FileCheckWorker, Focus,
     FolderWorker, Instant, JsonRow, ListState, PathResolver, RESULT_LIMIT, Result, ScriptView,
@@ -75,6 +77,7 @@ impl TuiApp {
             mode: ViewMode::Browse,
             diff_return_mode: ViewMode::Detail,
             detail_diff_output: String::new(),
+            detail_diff_text: super::wrapped_text::WrappedText::default(),
             detail_diff_loading: false,
             inflight_diff_id: None,
             next_diff_id: 0,
@@ -82,7 +85,7 @@ impl TuiApp {
             results_state: ListState::default(),
             results_row_index: Vec::new(),
             cached_preview: String::new(),
-            cached_preview_lines: Vec::new(),
+            preview_text: super::wrapped_text::WrappedText::default(),
             preview_total_lines: 0,
             detail_loading: false,
             inflight_detail_id: None,
@@ -310,9 +313,7 @@ impl TuiApp {
             self.folder_focused = false;
             self.siblings_selected = 0;
             self.inflight_folder_id = None;
-            self.cached_preview.clear();
-            self.cached_preview_lines.clear();
-            self.preview_total_lines = 0;
+            self.set_preview_content(String::new(), Vec::new(), 0);
             return Ok(());
         };
 
@@ -393,9 +394,7 @@ impl TuiApp {
         self.revisions_selected = 0;
         self.siblings = siblings;
         self.sibling_dirs = sibling_dirs;
-        self.cached_preview = cached_preview;
-        self.cached_preview_lines = cached_preview_lines;
-        self.preview_total_lines = preview_total_lines;
+        self.set_preview_content(cached_preview, cached_preview_lines, preview_total_lines);
         if error.is_some() {
             self.error = error;
         }
@@ -403,6 +402,25 @@ impl TuiApp {
 }
 
 impl TuiApp {
+    /// Replace the catalog preview (raw text, its rendered lines, and its
+    /// source line count) shown by the preview pane and the detail view.
+    pub(super) fn set_preview_content(
+        &mut self,
+        text: String,
+        lines: Vec<Line<'static>>,
+        total_lines: usize,
+    ) {
+        self.cached_preview = text;
+        self.preview_text = super::wrapped_text::WrappedText::new(lines);
+        self.preview_total_lines = total_lines;
+    }
+
+    /// Replace the diff view's body text.
+    pub(super) fn set_diff_output(&mut self, output: String) {
+        self.detail_diff_text = super::wrapped_text::WrappedText::from_plain(&output);
+        self.detail_diff_output = output;
+    }
+
     pub(super) fn revision_order(&self) -> Vec<usize> {
         let mut indices: Vec<usize> = (0..self.checkouts.len()).collect();
         indices.sort_by_key(|i| {

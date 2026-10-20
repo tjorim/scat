@@ -13,7 +13,6 @@ use crossterm::terminal::{
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
-use ratatui::text::Line;
 use ratatui::widgets::ListState;
 use ratatui::{Frame, Terminal};
 use serde_json::Value;
@@ -39,6 +38,8 @@ mod helpers;
 mod highlight;
 mod inspection;
 mod mouse;
+#[cfg(test)]
+mod perf_tests;
 mod render;
 mod search_input;
 mod search_settings;
@@ -48,6 +49,7 @@ mod stats_worker;
 mod tests;
 pub mod viewer;
 mod workflows;
+mod wrapped_text;
 mod xref;
 
 use self::detail_worker::{
@@ -70,7 +72,12 @@ use self::stats_worker::{StatsRequest, StatsResponse, StatsWorker};
 // without making rendering more expensive.
 const RESULT_LIMIT: usize = 2000;
 const DEBOUNCE_MS: u64 = 150;
+/// Input-poll timeout while a worker reply is pending or a spinner animates.
 const POLL_TICK_MS: u64 = 50;
+/// Input-poll timeout when nothing is pending: input (including resize)
+/// wakes the loop immediately regardless, so this only bounds how late any
+/// worker reply that `TuiApp::has_pending_work` misses would be noticed.
+const IDLE_POLL_MS: u64 = 1000;
 const PAGE_SCROLL_LINES: i16 = 40;
 const HALF_PAGE_SCROLL_LINES: i16 = 20;
 const FULL_PAGE_SCROLL_LINES: i16 = 40;
@@ -248,7 +255,10 @@ struct TuiApp {
     detail_scroll: u16,
     mode: ViewMode,
     diff_return_mode: ViewMode,
+    /// Raw diff text, kept for copying; `detail_diff_text` is what renders.
+    /// Replace both only through `set_diff_output`.
     detail_diff_output: String,
+    detail_diff_text: wrapped_text::WrappedText,
     detail_diff_loading: bool,
     inflight_diff_id: Option<u64>,
     next_diff_id: u64,
@@ -264,8 +274,10 @@ struct TuiApp {
     /// rendering of `cached_preview`, computed once per detail load by
     /// `detail_worker::load_detail` and reused as-is by both the catalog
     /// preview pane (`render::preview`) and the detail view's content tail
-    /// (`detail::detail_lines`), rather than re-parsing per pane/frame.
-    cached_preview_lines: Vec<Line<'static>>,
+    /// (`render::detail_view`), rather than re-parsing per pane/frame. Its
+    /// wrapped layout is cached too, so a frame only touches visible lines.
+    /// Replace it only through `set_preview_content`.
+    preview_text: wrapped_text::WrappedText,
     preview_total_lines: usize,
     detail_loading: bool,
     inflight_detail_id: Option<u64>,
@@ -375,29 +387,9 @@ pub fn run(
         );
     }
     let mut terminal = TerminalGuard::enter()?;
-    let debounce = Duration::from_millis(DEBOUNCE_MS);
-    let poll_tick = Duration::from_millis(POLL_TICK_MS);
 
     loop {
-        if !app.native_selection {
-            app.apply_results()?;
-            app.drain_detail_channel();
-            app.drain_diff_channel();
-            app.drain_file_check_channel();
-            app.drain_folder_channel();
-            app.drain_stats_channel();
-            app.drain_inspection();
-            app.drain_workflow();
-            if app
-                .last_keystroke_at
-                .is_some_and(|keystroke| keystroke.elapsed() >= debounce)
-                && app.pending_query.is_some()
-            {
-                app.last_keystroke_at = None;
-                app.dispatch_query()?;
-                app.needs_redraw = true;
-            }
-        }
+        app.advance(Instant::now())?;
         // A view target may be queued synchronously (catalog content) or
         // asynchronously once the file-check worker confirms the live source,
         // so open it from the loop body rather than only after a keystroke.
@@ -431,13 +423,6 @@ pub fn run(
             }
             app.needs_redraw = true;
         }
-        // Advance the spinner only while something is loading; a frozen tick
-        // when idle keeps the buffer identical so no repaint is emitted.
-        if !app.native_selection && app.is_animating() {
-            app.tick = app.tick.wrapping_add(1);
-            app.needs_redraw = true;
-        }
-
         if app.force_full_redraw {
             terminal.force_full_redraw()?;
             app.force_full_redraw = false;
@@ -451,7 +436,7 @@ pub fn run(
             app.needs_redraw = false;
         }
 
-        if event::poll(poll_tick)? {
+        if event::poll(app.poll_timeout(Instant::now()))? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
                     let was_selecting = app.native_selection;
@@ -485,6 +470,79 @@ pub fn run(
     }
     Ok(())
 }
+impl TuiApp {
+    /// The terminal-independent part of one run-loop iteration: apply worker
+    /// replies, fire the search debounce once it has elapsed, and advance
+    /// the spinner. Sets `needs_redraw` only when visible state changed, so
+    /// an idle app draws nothing.
+    fn advance(&mut self, now: Instant) -> Result<()> {
+        if self.native_selection {
+            return Ok(());
+        }
+        self.apply_results()?;
+        self.drain_detail_channel();
+        self.drain_diff_channel();
+        self.drain_file_check_channel();
+        self.drain_folder_channel();
+        self.drain_stats_channel();
+        self.drain_inspection();
+        self.drain_workflow();
+        if self.pending_query.is_some()
+            && self.last_keystroke_at.is_some_and(|keystroke| {
+                now.saturating_duration_since(keystroke) >= Duration::from_millis(DEBOUNCE_MS)
+            })
+        {
+            self.last_keystroke_at = None;
+            self.dispatch_query()?;
+            self.needs_redraw = true;
+        }
+        // Advance the spinner only while something is loading; a frozen tick
+        // when idle keeps the buffer identical so no repaint is emitted.
+        if self.is_animating() {
+            self.tick = self.tick.wrapping_add(1);
+            self.needs_redraw = true;
+        }
+        Ok(())
+    }
+
+    /// Whether a worker reply is still expected. Replies arrive on channels
+    /// the loop drains rather than as terminal events, so it keeps polling
+    /// at `POLL_TICK_MS` until they land.
+    fn has_pending_work(&self) -> bool {
+        self.search_in_flight
+            || self.detail_loading
+            || self.inflight_detail_id.is_some()
+            || self.inflight_diff_id.is_some()
+            || self.inflight_filecheck_id.is_some()
+            || self.inflight_folder_id.is_some()
+            || self.inflight_stats_id.is_some()
+            || self.inspection.as_ref().is_some_and(|page| page.loading)
+            || self.workflow.as_ref().is_some_and(|dialog| dialog.busy)
+    }
+
+    /// How long the loop may block waiting for input before `advance` has
+    /// something to do: a short tick while animating or awaiting a worker,
+    /// the rest of the search debounce while a query is pending, otherwise
+    /// `IDLE_POLL_MS`. While the display is frozen for native selection,
+    /// nothing advances until a key ends it.
+    fn poll_timeout(&self, now: Instant) -> Duration {
+        let tick = Duration::from_millis(POLL_TICK_MS);
+        let idle = Duration::from_millis(IDLE_POLL_MS);
+        if self.native_selection {
+            return idle;
+        }
+        if self.is_animating() || self.has_pending_work() {
+            return tick;
+        }
+        match (&self.pending_query, self.last_keystroke_at) {
+            (Some(_), Some(keystroke)) => Duration::from_millis(DEBOUNCE_MS)
+                .saturating_sub(now.saturating_duration_since(keystroke))
+                .min(idle),
+            _ => idle,
+        }
+    }
+}
+
 struct TerminalGuard {
     terminal: Terminal<CrosstermBackend<io::Stdout>>,
     mouse_capture: bool,

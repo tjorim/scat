@@ -42,6 +42,24 @@ pub(super) struct Page {
     pub depth: usize,
 }
 impl Page {
+    #[cfg(test)]
+    pub(super) fn for_test(rows: Vec<(String, Option<String>)>, selected: usize) -> Self {
+        Self {
+            kind: Kind::Tree,
+            path: "/catalog/root.py".into(),
+            rows: rows
+                .into_iter()
+                .map(|(label, target)| Row { label, target })
+                .collect(),
+            selected,
+            message: String::new(),
+            loading: false,
+            id: 0,
+            limit: 100,
+            depth: 20,
+        }
+    }
+
     pub(super) fn export_command(&self) -> String {
         let path = shell_words::quote(&self.path);
         match self.kind {
@@ -344,35 +362,42 @@ pub(super) fn draw(frame: &mut ratatui::Frame<'_>, page: &Page) {
         page.limit,
         page.depth
     );
+    let area = frame.area();
+    let inner_height = usize::from(area.height.saturating_sub(2));
+    let label = |i: usize| match page.rows.get(i) {
+        Some(row) => row.label.as_str(),
+        None => page.message.as_str(),
+    };
+    // Only the visible window becomes `ListItem`s: a deep or wide tree can
+    // flatten to thousands of rows. The offset is what `List` would pick
+    // from a fresh state (the selection scrolled just into view).
+    let (len, offset, selected) = if page.loading {
+        (1, 0, 0)
+    } else {
+        let len = page.rows.len() + usize::from(!page.message.is_empty());
+        let selected = page.selected.min(len.saturating_sub(1));
+        (
+            len,
+            super::render::scroll_window(0, selected, len, inner_height),
+            selected,
+        )
+    };
     let items: Vec<ListItem<'_>> = if page.loading {
         vec![ListItem::new("Loading…")]
     } else {
-        let mut items = page
-            .rows
-            .iter()
-            .map(|r| ListItem::new(r.label.as_str()))
-            .collect::<Vec<_>>();
-        if !page.message.is_empty() {
-            items.push(ListItem::new(page.message.as_str()));
-        }
-        items
+        (offset..len.min(offset + inner_height.max(1)))
+            .map(|i| ListItem::new(label(i)))
+            .collect()
     };
-    let item_count = items.len();
-    let mut state = ListState::default().with_selected(Some(page.selected));
+    let mut state = ListState::default().with_selected((len > 0).then(|| selected - offset));
     frame.render_stateful_widget(
         List::new(items)
             .block(Block::default().borders(Borders::ALL).title(title).title_bottom("↑/↓ move · Enter details · +/- limit/depth · r reload · Esc back · F2 select"))
             .highlight_style(Style::default().fg(Color::Black).bg(Color::Cyan)),
-        frame.area(),
+        area,
         &mut state,
     );
-    super::render::draw_scrollbar(
-        frame,
-        frame.area(),
-        item_count,
-        state.offset(),
-        usize::from(frame.area().height.saturating_sub(2)),
-    );
+    super::render::draw_scrollbar(frame, area, len, offset, inner_height);
 }
 
 #[cfg(test)]
@@ -589,6 +614,87 @@ mod tests {
             let mut terminal = Terminal::new(TestBackend::new(60, 12)).unwrap();
             terminal.draw(|f| draw(f, &page)).unwrap();
             assert_eq!(thumb_cells(&terminal) > 0, expect, "{count} rows");
+        }
+    }
+
+    /// The pre-#139 rendering, which built a `ListItem` for every row.
+    fn draw_unwindowed(frame: &mut ratatui::Frame<'_>, page: &Page) {
+        use ratatui::{
+            style::{Color, Style},
+            widgets::{Block, Borders, List, ListItem, ListState},
+        };
+        let title = format!(
+            "{} | {} | limit {} depth {}",
+            page.kind.title(),
+            page.path,
+            page.limit,
+            page.depth
+        );
+        let items: Vec<ListItem<'_>> = if page.loading {
+            vec![ListItem::new("Loading…")]
+        } else {
+            let mut items = page
+                .rows
+                .iter()
+                .map(|r| ListItem::new(r.label.as_str()))
+                .collect::<Vec<_>>();
+            if !page.message.is_empty() {
+                items.push(ListItem::new(page.message.as_str()));
+            }
+            items
+        };
+        let item_count = items.len();
+        let mut state = ListState::default().with_selected(Some(page.selected));
+        frame.render_stateful_widget(
+            List::new(items)
+                .block(Block::default().borders(Borders::ALL).title(title).title_bottom("↑/↓ move · Enter details · +/- limit/depth · r reload · Esc back · F2 select"))
+                .highlight_style(Style::default().fg(Color::Black).bg(Color::Cyan)),
+            frame.area(),
+            &mut state,
+        );
+        super::super::render::draw_scrollbar(
+            frame,
+            frame.area(),
+            item_count,
+            state.offset(),
+            usize::from(frame.area().height.saturating_sub(2)),
+        );
+    }
+
+    #[test]
+    fn windowed_draw_matches_full_list_rendering() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let render = |page: &Page, windowed: bool| {
+            let mut terminal = Terminal::new(TestBackend::new(50, 12)).unwrap();
+            terminal
+                .draw(|f| {
+                    if windowed {
+                        draw(f, page);
+                    } else {
+                        draw_unwindowed(f, page);
+                    }
+                })
+                .unwrap();
+            terminal.backend().buffer().clone()
+        };
+        for count in [0, 1, 5, 10, 11, 200] {
+            for message in ["", "No results found."] {
+                for loading in [false, true] {
+                    for selected in [0, 1, 9, 10, 11, 150, 199, 200, 500] {
+                        let rows = (0..count)
+                            .map(|i| (format!("{}row {i}", "  ".repeat(i % 7)), None))
+                            .collect();
+                        let mut page = Page::for_test(rows, selected);
+                        page.message = message.into();
+                        page.loading = loading;
+                        assert_eq!(
+                            render(&page, true),
+                            render(&page, false),
+                            "count {count} message {message:?} loading {loading} selected {selected}"
+                        );
+                    }
+                }
+            }
         }
     }
 }
