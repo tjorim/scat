@@ -24,6 +24,7 @@ name = "indexing"
 harness = false
 
 [dependencies]
+libc = "0.2"
 rusqlite = { version = "0.40", features = ["bundled-full"] }
 clap = { version = "4", features = ["derive", "env"] }
 serde = { version = "1", features = ["derive"] }

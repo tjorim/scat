@@ -12,6 +12,7 @@ use std::{
 pub(super) struct Worker {
     tx: mpsc::Sender<Job>,
     rx: mpsc::Receiver<Result<Completed, String>>,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 struct Completed {
     output: Option<String>,
@@ -53,13 +54,14 @@ fn parse(command: &str) -> Result<(Vec<String>, Cli)> {
         cli.db.is_none()
             && cli.embeddings.is_none()
             && cli.config.is_none()
-            && cli.cache_dir.is_none()
-            && !cli.no_cache
+            && (matches!(cli.command, Commands::Doctor { .. })
+                || (cli.cache_dir.is_none() && !cli.no_cache))
             && !cli.no_color
             && cli.verbose == 0,
         "Global options are fixed to the active TUI catalog and configuration"
     );
     match &cli.command {
+        Commands::Doctor { probe: None, .. } => {}
         Commands::Search { output, limit, .. } => {
             ensure!(
                 *output != SearchOutput::Table,
@@ -209,6 +211,7 @@ fn run(
     command: &str,
     displayed: Option<&[JsonRow]>,
     config: Option<&Path>,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<Completed> {
     let (args, cli) = parse(command)?;
     if let Some(rows) = displayed {
@@ -223,6 +226,19 @@ fn run(
     let mut child = std::process::Command::new(executable);
     if let Some(config) = config {
         child.arg("--config").arg(config);
+    }
+    if matches!(cli.command, Commands::Doctor { .. }) {
+        child.arg("--db").arg(db).args(args);
+        let result =
+            crate::doctor::capture_cancel(&mut child, std::time::Duration::from_secs(50), cancel);
+        return Ok(Completed {
+            output: result["stdout"].as_str().map(str::to_owned),
+            message: if result["exit_code"] == 0 {
+                "Host diagnostics complete; Esc closes".into()
+            } else {
+                "Diagnostics canceled, unavailable or timed out".into()
+            },
+        });
     }
     let output = child
         .arg("--db")
@@ -283,6 +299,8 @@ fn save(path: &Path, text: &str) -> Result<()> {
 impl Worker {
     fn new(db: PathBuf, embeddings: PathBuf, config: Option<PathBuf>) -> Result<Self> {
         let executable = std::env::current_exe()?;
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_cancel = cancel.clone();
         let (tx, jobs) = mpsc::channel();
         let (results, rx) = mpsc::channel();
         std::thread::Builder::new()
@@ -297,6 +315,7 @@ impl Worker {
                             &command,
                             displayed.as_deref(),
                             config.as_deref(),
+                            Some(&worker_cancel),
                         ),
                         Job::Save { path, text } => save(&path, &text).map(|()| Completed {
                             output: None,
@@ -309,7 +328,13 @@ impl Worker {
                     }
                 }
             })?;
-        Ok(Self { tx, rx })
+        Ok(Self { tx, rx, cancel })
+    }
+}
+impl Drop for Worker {
+    fn drop(&mut self) {
+        self.cancel
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 }
 impl TuiApp {
@@ -364,16 +389,31 @@ impl TuiApp {
     }
     pub(super) fn open_catalog_workflow(&mut self, kind: u8) {
         self.open_workflow(false);
+        let selected = self
+            .selected_logical_path()
+            .map(|p| self.resolver.to_native(&p));
         if let Some(d) = &mut self.workflow {
             d.fields[0] = match kind {
                 0 => "catalog info --json",
                 1 => "catalog audit --json",
                 2 => "catalog build --dry-run",
+                4 => "doctor",
                 _ => "vc --",
             }
             .into();
+            if kind == 4
+                && let Some(path) = selected
+            {
+                d.fields[0] = format!("doctor {} --rpm", shell_words::quote(&path));
+            }
+            if kind == 4 {
+                for flag in &self.doctor_flags {
+                    d.fields[0].push(' ');
+                    d.fields[0].push_str(&shell_words::quote(flag));
+                }
+            }
             d.fields[1] = "requested".into();
-            d.administrative = kind >= 2;
+            d.administrative = matches!(kind, 2 | 3);
             d.message = "Enter: inspect/run read-only request. Administration: Enter previews; F5 executes that exact preview. F1: options.".into();
         }
     }
@@ -619,7 +659,9 @@ pub(super) fn draw(frame: &mut ratatui::Frame<'_>, d: &Dialog) {
                         .borders(Borders::ALL)
                         .title(*label)
                         .border_style(if i == d.selected {
-                            Style::default().fg(Color::Cyan)
+                            Style::default()
+                                .fg(Color::Cyan)
+                                .add_modifier(ratatui::style::Modifier::BOLD)
                         } else {
                             Style::default()
                         }),
@@ -699,6 +741,7 @@ mod tests {
             Path::new("/db"),
             Path::new("/missing"),
             "catalog audit --strict",
+            None,
             None,
             None,
         )
@@ -895,6 +938,7 @@ mod tests {
             "diff --old '/old;literal' --new '/new file'",
             None,
             Some(Path::new("/config")),
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -912,6 +956,7 @@ mod tests {
             Path::new("/db"),
             Path::new("/emb"),
             "diff /a",
+            None,
             None,
             None,
         )
