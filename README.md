@@ -84,6 +84,7 @@ This tool provides a **single searchable index** without:
   `scat search --declares report.csv [--role outputfile]`, and
   `scat deps <declared-path>` lists the scripts that declare it
 - Shell completions: `scat completions bash|zsh|fish|powershell|elvish`
+- Man pages: `scat man --dir /usr/share/man/man1` (one page per command; the RPM installs them)
 - Find related scripts by embedding similarity: `scat similar <path> [--limit N]`
   — requires an `embeddings.sqlite` sidecar built separately by `scat-embed`
   (see [crates/scat-embed](crates/scat-embed)) and published next to the

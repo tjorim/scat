@@ -357,6 +357,7 @@ pub(super) fn draw(frame: &mut ratatui::Frame<'_>, page: &Page) {
         }
         items
     };
+    let item_count = items.len();
     let mut state = ListState::default().with_selected(Some(page.selected));
     frame.render_stateful_widget(
         List::new(items)
@@ -364,6 +365,13 @@ pub(super) fn draw(frame: &mut ratatui::Frame<'_>, page: &Page) {
             .highlight_style(Style::default().fg(Color::Black).bg(Color::Cyan)),
         frame.area(),
         &mut state,
+    );
+    super::render::draw_scrollbar(
+        frame,
+        frame.area(),
+        item_count,
+        state.offset(),
+        usize::from(frame.area().height.saturating_sub(2)),
     );
 }
 
@@ -544,6 +552,43 @@ mod tests {
             let (rows, message) = load(&api, Path::new("/missing"), &request(kind)).unwrap();
             assert!(rows.is_empty());
             assert_eq!(message, "No results found.");
+        }
+    }
+
+    fn thumb_cells(terminal: &ratatui::Terminal<ratatui::backend::TestBackend>) -> usize {
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .filter(|cell| cell.symbol() == "█")
+            .count()
+    }
+
+    #[test]
+    fn long_pages_draw_a_scrollbar_and_short_ones_do_not() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let page = |count: usize| Page {
+            kind: Kind::Status,
+            path: String::new(),
+            rows: (0..count)
+                .map(|i| Row {
+                    label: format!("row {i}"),
+                    target: None,
+                })
+                .collect(),
+            selected: count.saturating_sub(1),
+            message: String::new(),
+            loading: false,
+            id: 1,
+            limit: 100,
+            depth: 5,
+        };
+        for (count, expect) in [(100, true), (3, false)] {
+            let page = page(count);
+            let mut terminal = Terminal::new(TestBackend::new(60, 12)).unwrap();
+            terminal.draw(|f| draw(f, &page)).unwrap();
+            assert_eq!(thumb_cells(&terminal) > 0, expect, "{count} rows");
         }
     }
 }

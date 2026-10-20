@@ -36,6 +36,7 @@ pub(super) struct Dialog {
     pub busy: bool,
     pub scroll: u16,
     help: bool,
+    help_scroll: u16,
     administrative: bool,
     prepared: Option<(String, Vec<String>)>,
     displayed: Vec<JsonRow>,
@@ -378,6 +379,7 @@ impl TuiApp {
                     busy: false,
                     scroll: 0,
                     help: false,
+                    help_scroll: 0,
                     administrative: false,
                     prepared: None,
                     displayed: self.results.clone(),
@@ -470,7 +472,17 @@ impl TuiApp {
             d.help = !d.help;
             return;
         }
-        if d.busy || d.help {
+        if d.help {
+            match key.code {
+                KeyCode::PageDown | KeyCode::Down => {
+                    d.help_scroll = d.help_scroll.saturating_add(10);
+                }
+                KeyCode::PageUp | KeyCode::Up => d.help_scroll = d.help_scroll.saturating_sub(10),
+                _ => {}
+            }
+            return;
+        }
+        if d.busy {
             return;
         }
         if d.administrative && key.code == KeyCode::F(5) {
@@ -485,7 +497,11 @@ impl TuiApp {
         match key.code {
             KeyCode::Tab | KeyCode::Down => d.selected = (d.selected + 1) % 3,
             KeyCode::BackTab | KeyCode::Up => d.selected = (d.selected + 2) % 3,
-            KeyCode::PageDown => d.scroll = d.scroll.saturating_add(10),
+            KeyCode::PageDown => {
+                let last =
+                    u16::try_from(d.output.lines().count().saturating_sub(1)).unwrap_or(u16::MAX);
+                d.scroll = d.scroll.saturating_add(10).min(last);
+            }
             KeyCode::PageUp => d.scroll = d.scroll.saturating_sub(10),
             KeyCode::F(3) if !d.output.is_empty() => {
                 d.message = match super::clipboard::copy_to_clipboard(&d.output) {
@@ -620,9 +636,19 @@ pub(super) fn draw(frame: &mut ratatui::Frame<'_>, d: &Dialog) {
     let area = frame.area();
     frame.render_widget(Clear, area);
     if d.help {
-        frame.render_widget(Paragraph::new(
+        let paragraph = Paragraph::new(
             "F1: return to editor · Esc: close dialog\n\nCatalog: catalog info --json; catalog audit --json --check unowned --stale-days 90\nAudit: --check repeatable; --strict; --near-duplicate-threshold 0.97; --outlier-threshold 0.3. Missing embeddings skips embedding checks.\nAdministration (separate palette entries): Enter previews, F5 executes.\nBuild: catalog build --scan-root '/scripts' --head-lines 10 --ignore-file /path/.catignore --keep-copies 3 --dry-run\nBuild controls: --no-resume --force --no-incremental --threads 4 --quiet --json\nvc: vc -- 'argument with spaces' '--literal-option' (no shell expansion).\nEnter read-only CLI arguments without the scat prefix; quote paths with spaces.\nCatalog script vs live file:\n  diff /catalog/a.py --against '/local/live file.py'\nTwo live files (no catalog content):\n  diff --old /local/old.py --new /local/new.py --json\nCatalog vs indexed revision read from its live path:\n  diff /catalog/a.py --revision-type archive --revision-timestamp 2024\n  diff /catalog/a.py --revision-type develop --revision-user bob\nWhole catalog snapshots (default previous snapshot is CATALOG.1):\n  catalog diff --json\n  catalog diff --against /local/previous.db --json\n  catalog diff --old /local/old.db --new /local/new.db --json\nFresh search: set scope to requested and choose an explicit limit:\n  search --lang python --limit 10000 --fields path,owner,tags --output csv\n  search --regex '.*tool.*' --limit 10000 --output json\nOther JSON commands: show, status, deps, symlinks, similar.\nOnly search supports CSV; --fields follows CLI support (search and show).\nDisplayed scope exports captured search rows; command filters/limits do not apply.\nRequested scope runs the CLI anew, using its matching semantics and limits.\nEnter generates output. F3 requests terminal clipboard access.\nCtrl+S writes generated output to the chosen absolute local file; never overwrites."
-        ).wrap(Wrap { trim: false }).block(Block::default().borders(Borders::ALL).title("Workflow examples")), area);
+        )
+        .wrap(Wrap { trim: false })
+        .block(Block::default().borders(Borders::ALL).title("Workflow examples | PageUp/PageDown scroll"));
+        let rows = paragraph.line_count(area.width.saturating_sub(2));
+        let viewport = usize::from(area.height.saturating_sub(2));
+        let scroll = usize::from(d.help_scroll).min(rows.saturating_sub(viewport));
+        frame.render_widget(
+            paragraph.scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0)),
+            area,
+        );
+        super::render::draw_scrollbar(frame, area, rows, scroll, viewport);
         return;
     }
     let chunks = Layout::vertical([
@@ -678,6 +704,13 @@ pub(super) fn draw(frame: &mut ratatui::Frame<'_>, d: &Dialog) {
                     .title("Generated output (catalog content vs live comparison files)"),
             ),
         chunks[4],
+    );
+    super::render::draw_scrollbar(
+        frame,
+        chunks[4],
+        d.output.lines().count(),
+        usize::from(d.scroll),
+        usize::from(chunks[4].height.saturating_sub(2)),
     );
     frame.render_widget(
         Paragraph::new(d.message.as_str())
@@ -963,5 +996,49 @@ mod tests {
         .err()
         .unwrap();
         assert!(error.to_string().contains("sampled content unavailable"));
+    }
+
+    fn thumb_cells(terminal: &ratatui::Terminal<ratatui::backend::TestBackend>) -> usize {
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .filter(|cell| cell.symbol() == "█")
+            .count()
+    }
+
+    #[test]
+    fn output_and_help_scroll_with_scrollbars_and_clamp() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let db = super::super::make_test_db();
+        let mut app = super::super::tests::make_app(db.path());
+        app.workflow_sources = Some((db.path().to_owned(), PathBuf::from("/missing")));
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        app.handle_key(key(KeyCode::F(11))).unwrap();
+        let d = app.workflow.as_mut().unwrap();
+        d.output = (0..100).map(|i| format!("line {i}\n")).collect();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|f| draw(f, app.workflow.as_ref().unwrap()))
+            .unwrap();
+        assert!(thumb_cells(&terminal) > 0, "output needs a scrollbar");
+
+        for _ in 0..30 {
+            app.workflow_key(key(KeyCode::PageDown));
+        }
+        assert_eq!(app.workflow.as_ref().unwrap().scroll, 99);
+
+        app.workflow_key(key(KeyCode::F(1)));
+        terminal
+            .draw(|f| draw(f, app.workflow.as_ref().unwrap()))
+            .unwrap();
+        assert!(thumb_cells(&terminal) > 0, "help page needs a scrollbar");
+        let before = format!("{:?}", terminal.backend().buffer());
+        app.workflow_key(key(KeyCode::PageDown));
+        terminal
+            .draw(|f| draw(f, app.workflow.as_ref().unwrap()))
+            .unwrap();
+        assert_ne!(before, format!("{:?}", terminal.backend().buffer()));
     }
 }

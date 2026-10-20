@@ -8,6 +8,32 @@ use tracing_subscriber::EnvFilter;
 
 use crate::output::print_json;
 
+/// Render man pages for the whole command tree, a stable shape for packaging:
+/// `scat.1`, `scat-<command>.1`, `scat-<command>-<subcommand>.1`.
+pub fn cmd_man(dir: Option<&Path>) -> Result<()> {
+    use clap::CommandFactory;
+
+    fn render(command: &clap::Command, name: &str, dir: &Path) -> Result<()> {
+        let command = command.clone().name(name.to_string());
+        let mut page = Vec::new();
+        clap_mangen::Man::new(command.clone()).render(&mut page)?;
+        std::fs::write(dir.join(format!("{name}.1")), page)?;
+        for sub in command.get_subcommands().filter(|sub| !sub.is_hide_set()) {
+            render(sub, &format!("{name}-{}", sub.get_name()), dir)?;
+        }
+        Ok(())
+    }
+
+    let command = crate::cli::Cli::command().name("scat");
+    if let Some(dir) = dir {
+        std::fs::create_dir_all(dir)?;
+        render(&command, "scat", dir)
+    } else {
+        clap_mangen::Man::new(command).render(&mut std::io::stdout())?;
+        Ok(())
+    }
+}
+
 pub fn cmd_vc(args: &[String], json: bool, vc_executable: Option<PathBuf>) -> Result<()> {
     let vc_exe = vc_executable.or_else(which_vc);
 

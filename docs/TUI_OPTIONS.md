@@ -58,6 +58,7 @@ Global overrides inside editors are rejected to retain the active source paths.
 | `--no-color`, `NO_COLOR` | CLI output color setting; read-only captured output disables color for display; TUI has its own styles |
 | `-v/--verbose/--debug`, `-vv`, `RUST_LOG` | Startup logging; child operations retain default CLI logging and environment; not editable globals |
 | `completions SHELL` | CLI-only stdout utility for generating shell scripts |
+| `man [--dir DIR]` | CLI-only utility that renders man pages from the command definitions (the RPM installs them) |
 | `--help/-h`, `--version/-V` | CLI-only launch information; F1 and the matrix document TUI controls |
 
 Table-form CLI output maps to native TUI views. Structured output is generated
@@ -73,8 +74,18 @@ clipboard and forwarding capabilities remain unverified. Detection never uses
 the operating system release.
 
 Use `--glyphs auto|unicode|ascii` (`SCAT_TUI_GLYPHS`) and
-`--colors auto|full|reduced|mono` (`SCAT_TUI_COLORS`) to override defaults.
-Flags override the corresponding environment setting. `--no-color` or nonempty
+`--colors auto|full|reduced|mono` (`SCAT_TUI_COLORS`) to override defaults, or
+set site-wide defaults in the config file:
+
+```yaml
+tui:
+  glyphs: ascii    # auto | unicode | ascii
+  colors: reduced  # auto | full | reduced | mono
+```
+
+Priority is flag, then environment, then config file, then detection. An
+unknown config value is reported as an error rather than ignored. Flags
+override the corresponding environment setting. `--no-color` or nonempty
 `NO_COLOR` always selects monochrome, including when `--colors full` is set.
 The completed frame is converted consistently across syntax highlighting,
 charts, help, palettes, dialogs and status messages. Selection uses reverse

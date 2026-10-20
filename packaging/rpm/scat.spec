@@ -31,4 +31,5 @@ cp -a . %{buildroot}/
 %{_datadir}/bash-completion/completions/scat
 %{_datadir}/zsh/site-functions/_scat
 %{_datadir}/fish/vendor_completions.d/scat.fish
+%{_mandir}/man1/scat*.1.gz
 %doc %{_docdir}/scat

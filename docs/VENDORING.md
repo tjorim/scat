@@ -112,7 +112,8 @@ license before distributing packages outside your organization.
 
 The payload installs `/usr/bin/scat`, generated Bash/Zsh/Fish completions under
 `/usr/share/{bash-completion/completions,zsh/site-functions,fish/vendor_completions.d}`,
-and generated CLI/TUI help plus deployment documentation in `/usr/share/doc/scat`.
+gzip-compressed man pages (`scat(1)` plus one `scat-<command>(1)` per command, generated
+by `scat man --dir`) under `/usr/share/man/man1`, and generated CLI/TUI help plus deployment documentation in `/usr/share/doc/scat`.
 Shells and their completion frameworks are optional. The example configuration
 is `/etc/scat/scat.yaml`, marked `%config(noreplace)`. It is explicitly opt-in:
 

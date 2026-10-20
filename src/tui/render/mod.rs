@@ -23,6 +23,8 @@ mod revisions;
 mod search;
 mod stats_view;
 
+pub(super) use common::draw_scrollbar;
+
 use dep_graph::draw_dep_graph_view;
 use deps::draw_deps;
 use detail_view::{draw_detail_diff_view, draw_detail_view};

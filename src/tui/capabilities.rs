@@ -49,6 +49,23 @@ impl Default for Capabilities {
     }
 }
 
+/// Resolve a mode from its flag/env value, then the config file's name for it.
+/// Config names are validated here so a typo is reported, not ignored.
+pub fn resolve_mode<T: ValueEnum + Default>(
+    explicit: Option<T>,
+    configured: Option<&str>,
+    key: &str,
+) -> anyhow::Result<T> {
+    if let Some(mode) = explicit {
+        return Ok(mode);
+    }
+    match configured {
+        Some(name) => T::from_str(name, true)
+            .map_err(|err| anyhow::anyhow!("invalid tui.{key} {name:?} in config file: {err}")),
+        None => Ok(T::default()),
+    }
+}
+
 impl Capabilities {
     pub fn detect(glyphs: GlyphMode, colors: ColorMode, no_color: bool) -> Self {
         Self::resolve(
