@@ -72,7 +72,7 @@ impl TuiApp {
     /// Handle a mouse event, returning whether it changed anything (and thus
     /// needs a repaint). Drags select search text; bare movement is ignored.
     pub(super) fn handle_mouse(&mut self, event: MouseEvent) -> Result<bool> {
-        if self.popup.is_some() {
+        if self.popup.is_some() || self.inspection.is_some() {
             return Ok(false);
         }
         if self.native_selection {

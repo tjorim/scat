@@ -18,6 +18,7 @@ pub use info::cmd_info;
 pub use search::{SearchOpts, cmd_search, query_uses_fts, sort_by_name_relevance};
 pub use show::cmd_show;
 pub use similar::cmd_similar;
+pub use similar::load_similar;
 pub use stats::cmd_stats;
 pub use status::cmd_status;
 pub use symlinks::cmd_symlinks;

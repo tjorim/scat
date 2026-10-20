@@ -79,6 +79,9 @@ impl TuiApp {
     }
 
     pub(super) fn handle_paste(&mut self, text: &str) -> bool {
+        if self.inspection.is_some() {
+            return false;
+        }
         if let Some(editor) = &mut self.search_settings {
             editor.fields[editor.selected].extend(text.chars().filter(|c| !c.is_control()));
             return true;

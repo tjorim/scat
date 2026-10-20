@@ -36,6 +36,7 @@ mod folder_worker;
 mod handlers;
 mod helpers;
 mod highlight;
+mod inspection;
 mod mouse;
 mod render;
 mod search_input;
@@ -168,6 +169,10 @@ enum ScrollCommand {
     Bottom,
 }
 struct TuiApp {
+    inspection_worker: Option<inspection::Worker>,
+    inspection: Option<inspection::Page>,
+    inspection_return: Option<inspection::Page>,
+    inspection_return_mode: ViewMode,
     search_options: search_worker::SearchOptions,
     result_limit: usize,
     bookmarks: std::collections::HashMap<String, String>,
@@ -314,6 +319,7 @@ fn inner_rect(outer: Rect) -> Rect {
 }
 pub fn run(
     db_path: &Path,
+    embeddings_path: &Path,
     resolver: PathResolver,
     bookmarks: std::collections::HashMap<String, String>,
 ) -> Result<()> {
@@ -330,6 +336,7 @@ pub fn run(
         stats_worker,
         resolver,
     )?;
+    app.inspection_worker = Some(inspection::Worker::new(db_path, embeddings_path)?);
     app.bookmarks = bookmarks;
     let mut terminal = TerminalGuard::enter()?;
     let debounce = Duration::from_millis(DEBOUNCE_MS);
@@ -343,6 +350,7 @@ pub fn run(
             app.drain_file_check_channel();
             app.drain_folder_channel();
             app.drain_stats_channel();
+            app.drain_inspection();
             if app
                 .last_keystroke_at
                 .is_some_and(|keystroke| keystroke.elapsed() >= debounce)

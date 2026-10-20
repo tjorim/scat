@@ -35,6 +35,29 @@ impl TuiApp {
             }
             return Ok(false);
         }
+        let kind = match key.code {
+            KeyCode::F(7) => Some(super::inspection::Kind::Similar),
+            KeyCode::F(8) => Some(super::inspection::Kind::Status),
+            KeyCode::F(9) => Some(super::inspection::Kind::Tree),
+            KeyCode::F(10) => Some(super::inspection::Kind::Symlinks),
+            _ => None,
+        };
+        if let Some(kind) = kind {
+            self.open_inspection(kind)?;
+            return Ok(false);
+        }
+        if self.inspection.is_some() {
+            self.inspection_key(key)?;
+            return Ok(false);
+        }
+        if key.code == KeyCode::Esc
+            && self.mode == ViewMode::Detail
+            && self.inspection_return.is_some()
+        {
+            self.inspection = self.inspection_return.take();
+            self.mode = self.inspection_return_mode;
+            return Ok(false);
+        }
         if key.code == KeyCode::F(3) {
             self.copy_focused_text();
             return Ok(false);

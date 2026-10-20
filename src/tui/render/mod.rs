@@ -37,6 +37,13 @@ use search::draw_search;
 use stats_view::draw_stats_view;
 
 pub(super) fn draw(frame: &mut Frame<'_>, app: &mut TuiApp) {
+    if let Some(page) = &app.inspection {
+        app.click_regions.clear();
+        app.pane_tabs.clear();
+        super::inspection::draw(frame, page);
+        popup::draw_popup(frame, app);
+        return;
+    }
     draw_inner(frame, app);
     if let Some(flash) = &app.flash {
         let area = frame.area();

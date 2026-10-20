@@ -94,6 +94,16 @@ This tool provides a **single searchable index** without:
 
 ### TUI
 
+Use **F7** for similar scripts, **F8** for catalog-wide checkout/warning status,
+**F9** for transitive uses/used-by trees, and **F10** for incoming/outgoing symlinks.
+These actions are also in F1 help and the F4 palette. Move with Up/Down, press
+Enter for script details, then Esc to return to the inspection results. Esc
+closes the results. Use `+`/`-` to adjust the similarity limit or tree depth
+(minimum 1), and `r` to reload. Trees show edge kinds, unresolved paths, cycles,
+repeated subtrees and depth cutoffs. Similarity uses the same configured
+`--embeddings` sidecar and local cache as the CLI; clients never load a model.
+
+
 Press **F6** (also listed in F1 help and the F4 palette) to edit search mode,
 role, language, owner, tag and the positive result limit. Tab selects a field,
 Ctrl+U clears it, Enter applies settings and Esc cancels. The search box supplies
