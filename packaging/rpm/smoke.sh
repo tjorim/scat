@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run as root in a disposable UBI container with python3 installed for PTY tests.
+# Run as root in a disposable UBI container with python3 and diffutils installed.
 set -euo pipefail
 rpm -ivh /input/first/*.rpm
 rpm -ql scat

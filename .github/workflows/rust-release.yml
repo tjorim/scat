@@ -265,7 +265,7 @@ jobs:
               -v "$PWD/target/rpm:/input:ro" \
               -v "$PWD/packaging/rpm/smoke.sh:/smoke.sh:ro" \
               "registry.access.redhat.com/ubi${major}/ubi:latest" \
-              bash -c 'cat /etc/redhat-release; uname -m; rpm --version; dnf install -y "$PYTHON_PACKAGE" && bash /smoke.sh' | tee "target/rpm/ubi${major}-smoke.txt"
+              bash -c 'cat /etc/redhat-release; uname -m; rpm --version; dnf install -y "$PYTHON_PACKAGE" diffutils && bash /smoke.sh' | tee "target/rpm/ubi${major}-smoke.txt"
           done
       - uses: actions/upload-artifact@v7
         with:
