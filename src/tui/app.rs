@@ -15,6 +15,9 @@ impl TuiApp {
         resolver: PathResolver,
     ) -> Result<Self> {
         let mut app = Self {
+            workflow: None,
+            workflow_config: None,
+            workflow_sources: None,
             inspection_worker: None,
             inspection: None,
             inspection_return: None,

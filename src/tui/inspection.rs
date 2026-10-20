@@ -41,6 +41,17 @@ pub(super) struct Page {
     pub limit: usize,
     pub depth: usize,
 }
+impl Page {
+    pub(super) fn export_command(&self) -> String {
+        let path = shell_words::quote(&self.path);
+        match self.kind {
+            Kind::Similar => format!("similar {path} --limit {} --output json", self.limit),
+            Kind::Status => "status --all --output json".into(),
+            Kind::Tree => format!("deps {path} --tree --depth {} --output json", self.depth),
+            Kind::Symlinks => format!("symlinks {path} --output json"),
+        }
+    }
+}
 pub(super) struct Worker {
     tx: Sender<Request>,
     rx: Receiver<Response>,

@@ -79,6 +79,15 @@ impl TuiApp {
     }
 
     pub(super) fn handle_paste(&mut self, text: &str) -> bool {
+        if let Some(d) = &mut self.workflow {
+            if !d.busy {
+                d.fields[d.selected].extend(text.chars().filter(|c| !c.is_control()));
+                if d.selected != 2 {
+                    d.output.clear();
+                }
+            }
+            return true;
+        }
         if self.inspection.is_some() {
             return false;
         }

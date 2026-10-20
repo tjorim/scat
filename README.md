@@ -104,6 +104,22 @@ repeated subtrees and depth cutoffs. Similarity uses the same configured
 `--embeddings` sidecar and local cache as the CLI; clients never load a model.
 
 
+Press **F11** for script/file/revision or whole-catalog comparisons, and **F12**
+for JSON or search CSV export. The dialog accepts the same read-only command
+arguments as the CLI (without `scat`), including `--against`, `--old`/`--new`,
+revision selectors, `--fields`, and output formats. Tab selects a field; Ctrl+U
+clears it; Enter generates output. F1 shows examples for every comparison mode.
+PageUp/PageDown scroll the output.
+
+Search export defaults to **displayed**: the captured search rows, with their
+count and TUI limit shown. Only format and selected fields apply in this scope.
+Select **requested** to run a fresh query; an explicit search `--limit` makes
+larger exports deliberate. Inspection exports run fresh requests using the
+shown limit/depth. F3 sends a terminal clipboard request; Ctrl+S saves generated
+output to the absolute local path you enter, refusing existing files (including
+symlinks). Comparison, export and save work runs in the background; errors stay
+in the dialog. Esc closes it and preserves the underlying view and selection.
+
 Press **F6** (also listed in F1 help and the F4 palette) to edit search mode,
 role, language, owner, tag and the positive result limit. Tab selects a field,
 Ctrl+U clears it, Enter applies settings and Esc cancels. The search box supplies

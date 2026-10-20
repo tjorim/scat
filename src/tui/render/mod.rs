@@ -37,6 +37,12 @@ use search::draw_search;
 use stats_view::draw_stats_view;
 
 pub(super) fn draw(frame: &mut Frame<'_>, app: &mut TuiApp) {
+    if let Some(dialog) = &app.workflow {
+        app.click_regions.clear();
+        app.pane_tabs.clear();
+        super::workflows::draw(frame, dialog);
+        return;
+    }
     if let Some(page) = &app.inspection {
         app.click_regions.clear();
         app.pane_tabs.clear();
