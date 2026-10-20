@@ -208,7 +208,7 @@ pub(super) fn clamp_scroll_offset(scroll: &mut u16, line_count: usize, area: Rec
 }
 
 /// Scrollbars are indicators; pane wheel/keyboard navigation owns scrolling.
-pub(super) fn draw_scrollbar(
+pub(in crate::tui) fn draw_scrollbar(
     frame: &mut Frame<'_>,
     area: Rect,
     content: usize,

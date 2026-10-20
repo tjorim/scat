@@ -71,6 +71,13 @@ vc:
   # entirely.
   # manifest_path: /home/scripts/.vc/managed_files.lst
 
+# Terminal modes for `scat tui`. Priority: --glyphs/--colors flag, then
+# SCAT_TUI_GLYPHS/SCAT_TUI_COLORS, then these values, then detection from the
+# locale and TERM. --no-color and NO_COLOR always select monochrome.
+# tui:
+#   glyphs: ascii    # auto | unicode | ascii
+#   colors: reduced  # auto | full | reduced | mono
+
 # Named search aliases. `scat search @name` expands to the mapped free-text
 # query. Note: this only expands the free-text search argument, not CLI
 # flags — `lang:`/`owner:`/`tag:` filter tokens are a TUI search-box-only

@@ -28,6 +28,9 @@ for shell in bash zsh fish; do
     mkdir -p "$work/payload/$(dirname "$path")"
     "$binary" --config "$work/no-config.yaml" completions "$shell" > "$work/payload/$path"
 done
+# Man pages come from the same binary; gzip -n keeps the bytes reproducible.
+"$binary" --config "$work/no-config.yaml" man --dir "$work/payload/usr/share/man/man1"
+gzip -9n "$work"/payload/usr/share/man/man1/*.1
 tar --sort=name --mtime="@$SOURCE_DATE_EPOCH" --owner=0 --group=0 --numeric-owner -cf "$work/SOURCES/payload.tar" -C "$work/payload" .
 rpmbuild -bb "$root/packaging/rpm/scat.spec" --define "_topdir $work" \
     --define "scat_version $version" --define "scat_release $release" \

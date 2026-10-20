@@ -50,7 +50,22 @@ fn run(cli: Cli) -> Result<()> {
         ..
     } = &cli.command
     {
-        let terminal = tui::capabilities::Capabilities::detect(*glyphs, *colors, no_color);
+        // Flags and environment (resolved by clap) override the config file,
+        // which overrides detection. A broken config must not block the
+        // diagnostic report, so it only warns there.
+        let configured = match load_vc_config(cli.config.as_deref()) {
+            Ok(config) => config,
+            Err(err) if *terminal_info => {
+                eprintln!("warning: ignoring unreadable config: {err:#}");
+                scat_core::core::vc::VcConfig::default()
+            }
+            Err(err) => return Err(err).with_context(|| "Failed to load config"),
+        };
+        let terminal = tui::capabilities::Capabilities::detect(
+            tui::capabilities::resolve_mode(*glyphs, configured.tui_glyphs.as_deref(), "glyphs")?,
+            tui::capabilities::resolve_mode(*colors, configured.tui_colors.as_deref(), "colors")?,
+            no_color,
+        );
         if *terminal_info {
             println!("{}", terminal.report());
             return Ok(());
@@ -109,6 +124,10 @@ fn run(cli: Cli) -> Result<()> {
         return Ok(());
     }
 
+    if let Commands::Man { dir } = &cli.command {
+        return runtime::cmd_man(dir.as_deref());
+    }
+
     // Resolve database path: CLI flag / env var takes precedence over config file.
     let db_path_buf: PathBuf;
     let no_db_hint =
@@ -151,7 +170,19 @@ fn run(cli: Cli) -> Result<()> {
             colors,
             terminal_info: _,
         } => {
-            let terminal = tui::capabilities::Capabilities::detect(glyphs, colors, no_color);
+            let terminal = tui::capabilities::Capabilities::detect(
+                tui::capabilities::resolve_mode(
+                    glyphs,
+                    scat_config.tui_glyphs.as_deref(),
+                    "glyphs",
+                )?,
+                tui::capabilities::resolve_mode(
+                    colors,
+                    scat_config.tui_colors.as_deref(),
+                    "colors",
+                )?,
+                no_color,
+            );
             let resolver = match mapping.as_deref() {
                 Some(path) => PathResolver::from_file(path)
                     .with_context(|| format!("Failed to load mapping file: {}", path.display()))?,
@@ -307,6 +338,7 @@ fn run(cli: Cli) -> Result<()> {
         | Commands::Tui { .. }
         | Commands::Catalog { .. }
         | Commands::Completions { .. }
+        | Commands::Man { .. }
         | Commands::Diff { .. } => unreachable!(),
     }
 }

@@ -281,12 +281,14 @@ pub enum Commands {
 
     /// Launch the interactive TUI browser.
     Tui {
-        /// Glyph mode (auto uses the effective locale).
-        #[arg(long, env = "SCAT_TUI_GLYPHS", value_enum, default_value = "auto")]
-        glyphs: crate::tui::capabilities::GlyphMode,
-        /// Palette; --no-color and NO_COLOR always disable colors.
-        #[arg(long, env = "SCAT_TUI_COLORS", value_enum, default_value = "auto")]
-        colors: crate::tui::capabilities::ColorMode,
+        /// Glyph mode (default: `tui.glyphs` from the config file, else auto,
+        /// which uses the effective locale).
+        #[arg(long, env = "SCAT_TUI_GLYPHS", value_enum)]
+        glyphs: Option<crate::tui::capabilities::GlyphMode>,
+        /// Palette (default: `tui.colors` from the config file, else auto);
+        /// --no-color and NO_COLOR always disable colors.
+        #[arg(long, env = "SCAT_TUI_COLORS", value_enum)]
+        colors: Option<crate::tui::capabilities::ColorMode>,
         /// Report detected session and resolved modes without opening the TUI.
         #[arg(long)]
         terminal_info: bool,
@@ -307,6 +309,17 @@ pub enum Commands {
         /// Shell to generate completions for.
         #[arg(value_enum)]
         shell: clap_complete::Shell,
+    },
+
+    /// Generate man pages from the command definitions.
+    ///
+    /// Without --dir the top-level page is written to stdout. With --dir,
+    /// scat.1 and one scat-<command>.1 per (nested) command are written
+    /// there. Example: scat man --dir /usr/share/man/man1
+    Man {
+        /// Directory to write every page into (created if missing).
+        #[arg(long)]
+        dir: Option<PathBuf>,
     },
 }
 
@@ -996,6 +1009,14 @@ mod tests {
                 shell: clap_complete::Shell::Bash
             }
         ));
+    }
+
+    #[test]
+    fn clap_man_parses_with_and_without_dir() {
+        let cli = Cli::try_parse_from(["scat", "man"]).unwrap();
+        assert!(matches!(cli.command, Commands::Man { dir: None }));
+        let cli = Cli::try_parse_from(["scat", "man", "--dir", "/tmp/m"]).unwrap();
+        assert!(matches!(cli.command, Commands::Man { dir: Some(_) }));
     }
 
     #[test]

@@ -22,7 +22,13 @@ pub struct SearchOpts<'a> {
     pub(crate) no_color: bool,
 }
 
-pub fn cmd_search(api: &scat_core::core::search::SearchApi, opts: SearchOpts<'_>) -> Result<()> {
+/// Run the query described by `opts` and return the ranked rows, exactly as
+/// `scat search` would print them. Shared with the parity tests that compare
+/// the TUI's search worker against the CLI on one fixture.
+pub fn collect_results(
+    api: &scat_core::core::search::SearchApi,
+    opts: &SearchOpts<'_>,
+) -> Result<Vec<scat_core::core::db::JsonRow>> {
     let SearchOpts {
         text,
         regex,
@@ -33,12 +39,11 @@ pub fn cmd_search(api: &scat_core::core::search::SearchApi, opts: SearchOpts<'_>
         owner,
         tag,
         limit,
-        fields,
-        output,
-        no_color,
+        ..
     } = opts;
+    let limit = *limit;
 
-    let (results, is_fts) = if let Some(ref file) = declares {
+    let (results, is_fts) = if let Some(file) = declares {
         let rows = api
             .search_scripts_by_declared_file_with_filters(
                 file,
@@ -50,7 +55,7 @@ pub fn cmd_search(api: &scat_core::core::search::SearchApi, opts: SearchOpts<'_>
             )
             .with_context(|| format!("Declared-file search failed for {file:?}"))?;
         (rows, false)
-    } else if let Some(ref name) = function {
+    } else if let Some(name) = function {
         let rows = api
             .search_scripts_by_function_with_filters(
                 name,
@@ -61,7 +66,7 @@ pub fn cmd_search(api: &scat_core::core::search::SearchApi, opts: SearchOpts<'_>
             )
             .with_context(|| format!("Function search failed for {name:?}"))?;
         (rows, false)
-    } else if let Some(ref pattern) = regex {
+    } else if let Some(pattern) = regex {
         let rows = api
             .search_by_regex_with_filters(
                 pattern,
@@ -72,7 +77,7 @@ pub fn cmd_search(api: &scat_core::core::search::SearchApi, opts: SearchOpts<'_>
             )
             .with_context(|| format!("Regex search failed for pattern {pattern:?}"))?;
         (rows, false)
-    } else if let Some(ref q) = text {
+    } else if let Some(q) = text {
         let use_fts = query_uses_fts(q);
         let rows = if use_fts {
             api.search_with_filters(q, limit, lang.as_deref(), owner.as_deref(), tag.as_deref())?
@@ -96,11 +101,21 @@ pub fn cmd_search(api: &scat_core::core::search::SearchApi, opts: SearchOpts<'_>
         )
     };
 
-    let ranked = if is_fts {
+    Ok(if is_fts {
         sort_by_name_relevance(results, text.as_deref().unwrap_or(""))
     } else {
         results
-    };
+    })
+}
+
+pub fn cmd_search(api: &scat_core::core::search::SearchApi, opts: SearchOpts<'_>) -> Result<()> {
+    let ranked = collect_results(api, &opts)?;
+    let SearchOpts {
+        fields,
+        output,
+        no_color,
+        ..
+    } = opts;
 
     if output == SearchOutput::Json {
         print_json(&script_rows_to_json(&ranked, fields));

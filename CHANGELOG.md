@@ -6,6 +6,12 @@ All notable changes to this project will be documented in this file.
 
 ### TUI
 
+- Add `tui.glyphs` / `tui.colors` to the config file as site-wide terminal-mode defaults (flag, then environment, then config, then detection; unknown values are an error). Add scrollbars to the help/command-palette popup, the similar/status/dependency/symlink pages and the workflow output pane, make the workflow help page scrollable, and stop workflow output paging past its last line. Add a TUI-versus-CLI row-parity test over every search mode, filter, role and limit, backed by a shared `collect_results` that `scat search` now prints from.
+
+### CLI and packaging
+
+- Add `scat man [--dir DIR]`, which renders man pages from the command definitions; the RPM now installs them under `/usr/share/man/man1`.
+
 - Add locale/session-based TUI glyph and color modes with explicit overrides, complete NO_COLOR/--no-color support, ASCII rendering, terminal diagnostics, and SSH/multiplexer copy guidance. Reject noninteractive/dumb terminals before fullscreen setup; preserve paste, native selection and viewer restoration with PTY regression checks.
 
 - Add F11 file/revision/catalog comparisons and F12 JSON/search CSV exports using CLI validation and serializers, with explicit scope/limits, field selection, terminal clipboard requests, and background saves that refuse existing files.

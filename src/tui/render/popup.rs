@@ -42,6 +42,7 @@ pub(super) fn draw_popup(frame: &mut Frame<'_>, app: &TuiApp) {
             }))
         })
         .collect();
+    let item_count = items.len();
     let mut state = ListState::default().with_selected(Some(popup.selected));
     frame.render_widget(Clear, area);
     frame.render_stateful_widget(
@@ -50,5 +51,12 @@ pub(super) fn draw_popup(frame: &mut Frame<'_>, app: &TuiApp) {
             .highlight_style(Style::default().bg(Color::Blue)),
         area,
         &mut state,
+    );
+    super::common::draw_scrollbar(
+        frame,
+        area,
+        item_count,
+        state.offset(),
+        usize::from(area.height.saturating_sub(2)),
     );
 }

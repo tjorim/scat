@@ -5,7 +5,7 @@ rpm -ivh /input/first/*.rpm
 rpm -ql scat
 rpm -q --requires scat
 rpm -q --scripts scat
-for path in /usr/bin/scat /usr/share/doc/scat/help.txt /usr/share/bash-completion/completions/scat /usr/share/zsh/site-functions/_scat /usr/share/fish/vendor_completions.d/scat.fish; do
+for path in /usr/bin/scat /usr/share/doc/scat/help.txt /usr/share/man/man1/scat.1.gz /usr/share/man/man1/scat-catalog-audit.1.gz /usr/share/bash-completion/completions/scat /usr/share/zsh/site-functions/_scat /usr/share/fish/vendor_completions.d/scat.fish; do
     test -s "$path"
 done
 printf '\n# administrator change\n' >> /etc/scat/scat.yaml
@@ -31,6 +31,7 @@ cmp /etc/scat/scat.yaml.rpmsave /tmp/config.expected
 sha256sum -c /tmp/catalog.sha256
 test -n "$(ls -A /tmp/scat-cache)"
 test ! -e /usr/bin/scat
+test ! -e /usr/share/man/man1/scat.1.gz
 for path in /usr/share/bash-completion/completions/scat /usr/share/zsh/site-functions/_scat /usr/share/fish/vendor_completions.d/scat.fish; do
     test ! -e "$path"
 done

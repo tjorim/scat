@@ -2578,3 +2578,22 @@ fn constrained_terminal_modes_cover_views_and_overlays() {
         }
     }
 }
+
+#[test]
+fn help_popup_draws_a_scrollbar_when_actions_overflow() {
+    use ratatui::{Terminal, backend::TestBackend};
+    let db = super::make_test_db();
+    let mut app = make_app(db.path());
+    app.handle_key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE))
+        .unwrap();
+    let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
+    terminal.draw(|f| super::render::draw(f, &mut app)).unwrap();
+    let thumbs = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .filter(|cell| cell.symbol() == "█")
+        .count();
+    assert!(thumbs > 0);
+}

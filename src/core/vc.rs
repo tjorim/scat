@@ -77,6 +77,14 @@ impl Default for VcConfigSection {
     }
 }
 
+/// Optional `tui:` section: defaults for the terminal modes, below
+/// `--glyphs`/`--colors` and `SCAT_TUI_GLYPHS`/`SCAT_TUI_COLORS` in priority.
+#[derive(Debug, Deserialize, Default)]
+struct TuiConfigSection {
+    glyphs: Option<String>,
+    colors: Option<String>,
+}
+
 #[derive(Debug, Deserialize, Default)]
 struct VcConfigFile {
     db_path: Option<String>,
@@ -89,6 +97,7 @@ struct VcConfigFile {
     ignore_patterns: Option<Vec<String>>,
     vc: Option<VcConfigSection>,
     bookmarks: Option<std::collections::HashMap<String, String>>,
+    tui: Option<TuiConfigSection>,
 }
 
 // ---------------------------------------------------------------------------
@@ -128,6 +137,11 @@ pub struct VcConfig {
     pub manifest_path: Option<PathBuf>,
     /// Named search aliases; `scat search @name` resolves the alias before dispatch.
     pub bookmarks: std::collections::HashMap<String, String>,
+    /// Configured TUI glyph mode name (validated by the TUI launcher); `None`
+    /// leaves the choice to detection.
+    pub tui_glyphs: Option<String>,
+    /// Configured TUI palette name (validated by the TUI launcher).
+    pub tui_colors: Option<String>,
 }
 
 impl Default for VcConfig {
@@ -149,6 +163,8 @@ impl Default for VcConfig {
                 .collect(),
             manifest_path: None,
             bookmarks: std::collections::HashMap::new(),
+            tui_glyphs: None,
+            tui_colors: None,
         }
     }
 }
@@ -340,6 +356,7 @@ pub fn load_vc_config(config_file: Option<&Path>) -> Result<VcConfig> {
     };
     let ignore_patterns = file_data.ignore_patterns.unwrap_or_default();
     let vc = file_data.vc.unwrap_or_default();
+    let tui = file_data.tui.unwrap_or_default();
 
     Ok(VcConfig {
         db_path,
@@ -352,6 +369,8 @@ pub fn load_vc_config(config_file: Option<&Path>) -> Result<VcConfig> {
         archive_dirs: vc.archive_dirs,
         manifest_path: vc.manifest_path.map(PathBuf::from),
         bookmarks: file_data.bookmarks.unwrap_or_default(),
+        tui_glyphs: tui.glyphs,
+        tui_colors: tui.colors,
     })
 }
 

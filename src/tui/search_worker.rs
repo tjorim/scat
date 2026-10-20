@@ -433,6 +433,124 @@ mod tests {
         );
     }
 
+    /// The TUI worker and `scat search` must return identical rows for every
+    /// mode, filter and role on one fixture. The CLI side is the real
+    /// `collect_results` that `cmd_search` prints from, not a reimplementation.
+    #[test]
+    fn worker_rows_equal_cli_rows_across_modes_filters_and_roles() {
+        use super::{SearchMode, SearchOptions, run_search_with_options};
+        use crate::cli::SearchOutput;
+        use crate::commands::{SearchOpts, collect_results};
+        let db = make_db();
+        let conn = rusqlite::Connection::open(db.path()).unwrap();
+        conn.execute("INSERT INTO function_definitions(script_id,name,kind,line) VALUES(1,'build_report','function',1)", []).unwrap();
+        conn.execute("INSERT INTO function_definitions(script_id,name,kind,line) VALUES(2,'report_b','function',1)", []).unwrap();
+        for (script, role) in [
+            (1, "parentfile"),
+            (1, "inputfile"),
+            (2, "outputfile"),
+            (2, "paramfile"),
+            (2, "childfile"),
+        ] {
+            conn.execute("INSERT INTO dependencies(script_id,depends_on_path,kind) VALUES(?,'/data/report.csv',?)", rusqlite::params![script, role]).unwrap();
+        }
+        drop(conn);
+        let api = scat_core::core::search::open_search_api(db.path()).unwrap();
+
+        let roles = [
+            None,
+            Some("parentfile"),
+            Some("childfile"),
+            Some("inputfile"),
+            Some("outputfile"),
+            Some("paramfile"),
+        ];
+        let filters = [
+            (None, None),
+            (Some("python"), None),
+            (Some("python"), Some("alice")),
+            (None, Some("bob")),
+            (Some("shell"), None),
+        ];
+        let mut compared = 0;
+        let mut non_empty = 0;
+        for (lang, owner) in filters {
+            for limit in [1, 10] {
+                let mut cases: Vec<(SearchMode, &str, Option<&str>)> = vec![
+                    (SearchMode::Text, "", None),
+                    (SearchMode::Text, "alpha", None),
+                    (SearchMode::Text, "/catalog/scripts/a", None),
+                    (SearchMode::Text, r"catalog\scripts\b.py", None),
+                    (SearchMode::Regex, "needle.*alpha", None),
+                    (SearchMode::Regex, "beta", None),
+                    (SearchMode::Function, "report", None),
+                    (SearchMode::Function, "nothing_matches", None),
+                ];
+                cases.extend(
+                    roles
+                        .iter()
+                        .map(|r| (SearchMode::Declares, "report.csv", *r)),
+                );
+                for (mode, text, role) in cases {
+                    let options = SearchOptions {
+                        mode,
+                        role: role.map(str::to_owned),
+                        lang: lang.map(str::to_owned),
+                        owner: owner.map(str::to_owned),
+                        ..Default::default()
+                    };
+                    let tui_rows = run_search_with_options(&api, text, limit, &options).unwrap();
+                    let own = |value: &str| (!value.is_empty()).then(|| value.to_owned());
+                    let cli_rows = collect_results(
+                        &api,
+                        &SearchOpts {
+                            text: if mode == SearchMode::Text {
+                                own(text)
+                            } else {
+                                None
+                            },
+                            regex: if mode == SearchMode::Regex {
+                                own(text)
+                            } else {
+                                None
+                            },
+                            function: if mode == SearchMode::Function {
+                                own(text)
+                            } else {
+                                None
+                            },
+                            declares: if mode == SearchMode::Declares {
+                                own(text)
+                            } else {
+                                None
+                            },
+                            role: role.map(str::to_owned),
+                            lang: lang.map(str::to_owned),
+                            owner: owner.map(str::to_owned),
+                            tag: None,
+                            limit,
+                            fields: &[],
+                            output: SearchOutput::Json,
+                            no_color: true,
+                        },
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        tui_rows, cli_rows,
+                        "{mode:?} {text:?} role={role:?} lang={lang:?} owner={owner:?} limit={limit}"
+                    );
+                    compared += 1;
+                    non_empty += usize::from(!tui_rows.is_empty());
+                }
+            }
+        }
+        assert_eq!(compared, 5 * 2 * 14);
+        assert!(
+            non_empty > 40,
+            "fixture must make the comparison meaningful"
+        );
+    }
+
     #[test]
     fn empty_query_returns_all_scripts() {
         let db = make_db();
