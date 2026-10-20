@@ -115,6 +115,51 @@ pub fn catalog_read_path(source: &Path, options: &CacheOptions) -> PathBuf {
     }
 }
 
+/// Inspect the existing cache without creating directories, locks or refreshing it.
+/// Filesystem access must be isolated by callers when network mounts may stall.
+pub fn inspect_cache(source: &Path, options: &CacheOptions) -> serde_json::Value {
+    let root = options
+        .root
+        .as_deref()
+        .unwrap_or(Path::new(DEFAULT_CACHE_ROOT));
+    let Some(uid) = current_uid() else {
+        return serde_json::json!({"state": "unknown", "reason": "uid unavailable"});
+    };
+    let dir = root.join(format!("scat-cache-{uid}"));
+    let entry = CacheEntry::new(&dir, &cache_key(source));
+    let dir_meta = fs::symlink_metadata(&dir);
+    let missing = dir_meta
+        .as_ref()
+        .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound);
+    // Same rule as `cache_dir`: owned by us with no group/other access.
+    let trusted = dir_meta
+        .as_ref()
+        .is_ok_and(|m| m.is_dir() && m.uid() == uid && m.mode() & 0o077 == 0);
+    let stamp = SourceStamp::of(source);
+    let current = stamp.as_ref().is_some_and(|stamp| entry.is_current(stamp));
+    let state = if !options.enabled {
+        "disabled"
+    } else if missing {
+        "absent"
+    } else if !trusted {
+        "unavailable"
+    } else if !entry.db.is_file() {
+        "absent"
+    } else if stamp.is_none() {
+        "unknown"
+    } else if current {
+        "current"
+    } else {
+        "stale"
+    };
+    serde_json::json!({
+        "state": state, "root": root, "directory": dir, "path": entry.db,
+        "active_read_path": if options.enabled && trusted && current { &entry.db } else { source },
+        "fallback": !(options.enabled && trusted && current),
+        "note": "Read path predicted without refreshing; normal reads may refresh a stale cache. Unavailable source never activates a stale copy."
+    })
+}
+
 /// Cache a fresh copy of `source` if needed and return its path, or `None`
 /// when this host cannot cache at all (no usable cache root, or `source`
 /// isn't a readable regular file).
@@ -445,6 +490,50 @@ mod tests {
     use super::*;
     use crate::core::db::create_db;
     use tempfile::TempDir;
+
+    #[test]
+    fn inspection_is_read_only_and_distinguishes_cache_states() {
+        let dir = TempDir::new().unwrap();
+        let source = dir.path().join("source.sqlite");
+        publish(&source, "2026-01-01T00:00:00Z");
+        let root = dir.path().join("cache");
+        fs::create_dir(&root).unwrap();
+        let options = CacheOptions {
+            enabled: true,
+            root: Some(root.clone()),
+        };
+        assert_eq!(inspect_cache(&source, &options)["state"], "absent");
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+        let cached = catalog_read_path(&source, &options);
+        assert_ne!(cached, source);
+        assert_eq!(inspect_cache(&source, &options)["state"], "current");
+        // Group/other-accessible cache directories are untrusted.
+        let cache_dir = cached.parent().unwrap();
+        fs::set_permissions(cache_dir, fs::Permissions::from_mode(0o750)).unwrap();
+        assert_eq!(inspect_cache(&source, &options)["state"], "unavailable");
+        fs::set_permissions(cache_dir, fs::Permissions::from_mode(0o700)).unwrap();
+        let conn = open_readonly(&source).unwrap();
+        drop(conn);
+        // Change identity without depending on timestamp resolution.
+        let old = dir.path().join("old.sqlite");
+        fs::rename(&source, old).unwrap();
+        publish(&source, "2026-01-02T00:00:00Z");
+        let stale = inspect_cache(&source, &options);
+        assert_eq!(stale["state"], "stale");
+        assert_eq!(stale["active_read_path"], source.to_str().unwrap());
+        fs::remove_file(&cached).unwrap();
+        assert_eq!(inspect_cache(&source, &options)["state"], "absent");
+        assert_eq!(
+            inspect_cache(
+                &source,
+                &CacheOptions {
+                    enabled: false,
+                    ..options
+                }
+            )["state"],
+            "disabled"
+        );
+    }
 
     /// Build a published catalog with the given `build_timestamp`.
     fn publish(path: &Path, build_timestamp: &str) {

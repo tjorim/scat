@@ -24,6 +24,7 @@ use scat_core::core::script_view::{ScriptView, logical_parent_dir};
 
 mod actions;
 mod app;
+pub mod capabilities;
 mod clipboard;
 mod detail;
 mod detail_worker;
@@ -45,7 +46,7 @@ mod search_worker;
 mod stats_worker;
 #[cfg(test)]
 mod tests;
-mod viewer;
+pub mod viewer;
 mod workflows;
 mod xref;
 
@@ -170,8 +171,11 @@ enum ScrollCommand {
     Bottom,
 }
 struct TuiApp {
+    terminal_modes: capabilities::Capabilities,
     workflow: Option<workflows::Dialog>,
+    pending_administration: Option<Vec<String>>,
     workflow_config: Option<PathBuf>,
+    doctor_flags: Vec<String>,
     workflow_sources: Option<(PathBuf, PathBuf)>,
     inspection_worker: Option<inspection::Worker>,
     inspection: Option<inspection::Page>,
@@ -321,6 +325,15 @@ fn inner_rect(outer: Rect) -> Rect {
         height: outer.height.saturating_sub(2),
     }
 }
+pub struct RunOptions {
+    pub doctor_flags: Vec<String>,
+    pub bookmarks: std::collections::HashMap<String, String>,
+    pub terminal_modes: capabilities::Capabilities,
+}
+
+/// No-op SIGINT handler: async-signal-safe, and reset to default by `exec`.
+extern "C" fn ignore_sigint(_: libc::c_int) {}
+
 pub fn run(
     db_path: &Path,
     embeddings_path: &Path,
@@ -328,8 +341,9 @@ pub fn run(
     source_embeddings: &Path,
     source_config: Option<&Path>,
     resolver: PathResolver,
-    bookmarks: std::collections::HashMap<String, String>,
+    options: RunOptions,
 ) -> Result<()> {
+    options.terminal_modes.validate()?;
     let search_worker = SearchWorker::new(db_path)?;
     let detail_worker = DetailWorker::new(db_path)?;
     let diff_worker = DiffWorker::new(db_path)?;
@@ -346,7 +360,20 @@ pub fn run(
     app.inspection_worker = Some(inspection::Worker::new(db_path, embeddings_path)?);
     app.workflow_sources = Some((source_db.to_owned(), source_embeddings.to_owned()));
     app.workflow_config = source_config.map(Path::to_owned);
-    app.bookmarks = bookmarks;
+    app.doctor_flags = options.doctor_flags;
+    app.bookmarks = options.bookmarks;
+    app.terminal_modes = options.terminal_modes;
+    // Keep the parent alive when the foreground child handles Ctrl+C. In raw
+    // mode the TUI still receives Ctrl+C as a key and exits normally.
+    // SIGINT only: SIGTERM and SIGHUP keep their default termination.
+    let handler: extern "C" fn(libc::c_int) = ignore_sigint;
+    // SAFETY: the handler is empty, hence async-signal-safe.
+    if unsafe { libc::signal(libc::SIGINT, handler as libc::sighandler_t) } == libc::SIG_ERR {
+        anyhow::bail!(
+            "Could not install TUI interrupt handler: {}",
+            io::Error::last_os_error()
+        );
+    }
     let mut terminal = TerminalGuard::enter()?;
     let debounce = Duration::from_millis(DEBOUNCE_MS);
     let poll_tick = Duration::from_millis(POLL_TICK_MS);
@@ -383,6 +410,27 @@ pub fn run(
             app.needs_redraw = true;
         }
 
+        if let Some(args) = app.take_administrative_command() {
+            let result = terminal.suspend_for(|| {
+                let status = std::process::Command::new(std::env::current_exe()?)
+                    .args(args)
+                    .status()?;
+                println!("\nOperation finished: {status}. Press Enter to return to browsing.");
+                let mut line = String::new();
+                io::stdin().read_line(&mut line)?;
+                anyhow::ensure!(status.success(), "{status}");
+                Ok(())
+            });
+            if let Some(d) = &mut app.workflow {
+                d.message = match result {
+                    Ok(()) => {
+                        "Operation completed. Restart TUI to read a newly published catalog.".into()
+                    }
+                    Err(e) => format!("Operation failed or interrupted: {e:#}"),
+                };
+            }
+            app.needs_redraw = true;
+        }
         // Advance the spinner only while something is loading; a frozen tick
         // when idle keeps the buffer identical so no repaint is emitted.
         if !app.native_selection && app.is_animating() {

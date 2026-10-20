@@ -11,6 +11,7 @@ use tracing::{error, warn};
 
 mod cli;
 mod commands;
+mod doctor;
 mod output;
 mod runtime;
 mod tui;
@@ -40,6 +41,41 @@ fn main() {
 fn run(cli: Cli) -> Result<()> {
     let no_color_env = std::env::var_os("NO_COLOR");
     let no_color = cli::resolve_no_color(cli.no_color, no_color_env.as_deref());
+
+    // Diagnose terminal suitability before catalog/config access or fullscreen setup.
+    if let Commands::Tui {
+        glyphs,
+        colors,
+        terminal_info,
+        ..
+    } = &cli.command
+    {
+        let terminal = tui::capabilities::Capabilities::detect(*glyphs, *colors, no_color);
+        if *terminal_info {
+            println!("{}", terminal.report());
+            return Ok(());
+        }
+        terminal.validate()?;
+    }
+
+    if let Commands::Doctor {
+        json,
+        path,
+        mapping,
+        rpm,
+        probe,
+    } = &cli.command
+    {
+        return doctor::run(
+            &cli,
+            *json,
+            path.as_deref(),
+            mapping.as_deref(),
+            *rpm,
+            probe.as_deref(),
+            no_color,
+        );
+    }
 
     // Load config early; provides db_path fallback and index settings.
     let scat_config =
@@ -109,7 +145,13 @@ fn run(cli: Cli) -> Result<()> {
         .unwrap_or_else(|| scat_core::core::embeddings::sidecar_path(db_path));
 
     match cli.command {
-        Commands::Tui { mapping } => {
+        Commands::Tui {
+            mapping,
+            glyphs,
+            colors,
+            terminal_info: _,
+        } => {
+            let terminal = tui::capabilities::Capabilities::detect(glyphs, colors, no_color);
             let resolver = match mapping.as_deref() {
                 Some(path) => PathResolver::from_file(path)
                     .with_context(|| format!("Failed to load mapping file: {}", path.display()))?,
@@ -122,7 +164,23 @@ fn run(cli: Cli) -> Result<()> {
                 &embeddings_path,
                 cli.config.as_deref(),
                 resolver,
-                scat_config.bookmarks,
+                tui::RunOptions {
+                    doctor_flags: {
+                        let mut flags = Vec::new();
+                        if !cache_options.enabled {
+                            flags.push("--no-cache".into());
+                        }
+                        if let Some(root) = &cache_options.root {
+                            flags.extend([
+                                "--cache-dir".into(),
+                                root.to_string_lossy().into_owned(),
+                            ]);
+                        }
+                        flags
+                    },
+                    bookmarks: scat_config.bookmarks,
+                    terminal_modes: terminal,
+                },
             );
         }
         Commands::Catalog { command } => {
@@ -244,7 +302,8 @@ fn run(cli: Cli) -> Result<()> {
             revision_timestamp.as_deref(),
             json,
         ),
-        Commands::Vc { .. }
+        Commands::Doctor { .. }
+        | Commands::Vc { .. }
         | Commands::Tui { .. }
         | Commands::Catalog { .. }
         | Commands::Completions { .. }

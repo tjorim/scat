@@ -6,6 +6,8 @@ All notable changes to this project will be documented in this file.
 
 ### TUI
 
+- Add locale/session-based TUI glyph and color modes with explicit overrides, complete NO_COLOR/--no-color support, ASCII rendering, terminal diagnostics, and SSH/multiplexer copy guidance. Reject noninteractive/dumb terminals before fullscreen setup; preserve paste, native selection and viewer restoration with PTY regression checks.
+
 - Add F11 file/revision/catalog comparisons and F12 JSON/search CSV exports using CLI validation and serializers, with explicit scope/limits, field selection, terminal clipboard requests, and background saves that refuse existing files.
 
 - Add worker-backed similar scripts (F7), catalog checkout/warning status (F8), transitive dependency trees (F9), and bidirectional symlink inspection (F10), with navigation back from script details and adjustable similarity limits/tree depth.

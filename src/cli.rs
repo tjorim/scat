@@ -73,6 +73,22 @@ pub fn resolve_no_cache(flag: bool, no_cache_env: Option<&OsStr>) -> bool {
 
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Read-only host, catalog, cache and permission diagnostics (no refresh).
+    Doctor {
+        /// Stable structured support output.
+        #[arg(long)]
+        json: bool,
+        /// Optional logical or local script path for host-local RPM provenance.
+        path: Option<String>,
+        /// Path mapping file for the script.
+        #[arg(long)]
+        mapping: Option<PathBuf>,
+        /// Query the local RPM database for the selected file only.
+        #[arg(long, requires = "path")]
+        rpm: bool,
+        #[arg(long, hide = true)]
+        probe: Option<String>,
+    },
     /// Full-text search across indexed scripts.
     Search {
         /// Full-text search query (omit to list all). Prefix with `@` to expand a config bookmark.
@@ -265,6 +281,15 @@ pub enum Commands {
 
     /// Launch the interactive TUI browser.
     Tui {
+        /// Glyph mode (auto uses the effective locale).
+        #[arg(long, env = "SCAT_TUI_GLYPHS", value_enum, default_value = "auto")]
+        glyphs: crate::tui::capabilities::GlyphMode,
+        /// Palette; --no-color and NO_COLOR always disable colors.
+        #[arg(long, env = "SCAT_TUI_COLORS", value_enum, default_value = "auto")]
+        colors: crate::tui::capabilities::ColorMode,
+        /// Report detected session and resolved modes without opening the TUI.
+        #[arg(long)]
+        terminal_info: bool,
         #[arg(long, env = "SCAT_MAPPING")]
         mapping: Option<PathBuf>,
     },

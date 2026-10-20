@@ -51,8 +51,8 @@ pub(super) fn open_target(target: &ViewTarget) -> Result<()> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ViewerCommand {
-    program: String,
+pub struct ViewerCommand {
+    pub program: String,
     args: Vec<String>,
     fallback: bool,
 }
@@ -90,7 +90,7 @@ pub(super) fn open_readonly(path: &Path, language: &str) -> Result<()> {
     }
 }
 
-fn viewer_commands() -> Result<Vec<ViewerCommand>> {
+pub fn viewer_commands() -> Result<Vec<ViewerCommand>> {
     for key in ["SCAT_EDITOR", "VISUAL", "EDITOR"] {
         if let Ok(value) = env::var(key)
             && !value.trim().is_empty()
