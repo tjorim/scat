@@ -127,12 +127,20 @@ pub fn inspect_cache(source: &Path, options: &CacheOptions) -> serde_json::Value
     };
     let dir = root.join(format!("scat-cache-{uid}"));
     let entry = CacheEntry::new(&dir, &cache_key(source));
-    let trusted = fs::symlink_metadata(&dir)
-        .is_ok_and(|m| m.is_dir() && m.uid() == uid && m.mode() & 0o777 == CACHE_DIR_MODE);
+    let dir_meta = fs::symlink_metadata(&dir);
+    let missing = dir_meta
+        .as_ref()
+        .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound);
+    // Same rule as `cache_dir`: owned by us with no group/other access.
+    let trusted = dir_meta
+        .as_ref()
+        .is_ok_and(|m| m.is_dir() && m.uid() == uid && m.mode() & 0o077 == 0);
     let stamp = SourceStamp::of(source);
     let current = stamp.as_ref().is_some_and(|stamp| entry.is_current(stamp));
     let state = if !options.enabled {
         "disabled"
+    } else if missing {
+        "absent"
     } else if !trusted {
         "unavailable"
     } else if !entry.db.is_file() {
@@ -494,11 +502,16 @@ mod tests {
             enabled: true,
             root: Some(root.clone()),
         };
-        assert_eq!(inspect_cache(&source, &options)["state"], "unavailable");
+        assert_eq!(inspect_cache(&source, &options)["state"], "absent");
         assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
         let cached = catalog_read_path(&source, &options);
         assert_ne!(cached, source);
         assert_eq!(inspect_cache(&source, &options)["state"], "current");
+        // Group/other-accessible cache directories are untrusted.
+        let cache_dir = cached.parent().unwrap();
+        fs::set_permissions(cache_dir, fs::Permissions::from_mode(0o750)).unwrap();
+        assert_eq!(inspect_cache(&source, &options)["state"], "unavailable");
+        fs::set_permissions(cache_dir, fs::Permissions::from_mode(0o700)).unwrap();
         let conn = open_readonly(&source).unwrap();
         drop(conn);
         // Change identity without depending on timestamp resolution.

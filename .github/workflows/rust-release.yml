@@ -218,6 +218,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@v8
         with:
           name: scat-linux-x86_64-musl
@@ -230,18 +232,23 @@ jobs:
           if readelf -l target/static/scat | grep -q INTERP; then exit 1; fi
           packaging/rpm/build.sh target/static/scat target/rpm/first 1
           packaging/rpm/build.sh target/static/scat target/rpm/repeated 1
-          cmp target/rpm/first/*.rpm target/rpm/repeated/*.rpm
+          first_rpm=$(ls target/rpm/first/*.rpm)
+          repeated_rpm=$(ls target/rpm/repeated/*.rpm)
+          test "$(printf '%s\n' "$first_rpm" | wc -l)" -eq 1
+          test "$(printf '%s\n' "$repeated_rpm" | wc -l)" -eq 1
+          cmp "$first_rpm" "$repeated_rpm"
           packaging/rpm/build.sh target/static/scat target/rpm/second 2
-          rpm -qpl target/rpm/first/*.rpm
-          rpm -qpR target/rpm/first/*.rpm | tee target/rpm/requires.txt
+          rpm -qpl "$first_rpm"
+          rpm -qpR "$first_rpm" | tee target/rpm/requires.txt
           if grep -v '^rpmlib(' target/rpm/requires.txt; then exit 1; fi
-          test -z "$(rpm -qp --scripts target/rpm/first/*.rpm)"
-          rpm -qp --configfiles target/rpm/first/*.rpm | grep -Fx /etc/scat/scat.yaml
+          test -z "$(rpm -qp --scripts "$first_rpm")"
+          rpm -qp --configfiles "$first_rpm" | grep -Fx /etc/scat/scat.yaml
           cp tests/support/tui_pty.py target/rpm/
           (cd target/static && sha256sum scat) > target/rpm/SHA256SUMS
-          (cd target/rpm/first && sha256sum *.rpm) >> target/rpm/SHA256SUMS
+          (cd target/rpm/first && sha256sum ./*.rpm) >> target/rpm/SHA256SUMS
       - name: Validate UBI 8, 9 and 10 userspaces
         run: |
+          set -euo pipefail
           for major in 8 9 10; do
             image="registry.access.redhat.com/ubi${major}/ubi:latest"
             docker pull "$image"

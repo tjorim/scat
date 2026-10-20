@@ -7,7 +7,10 @@ binary=$(realpath "$1")
 output=$(realpath -m "$2")
 release=${3:-1}
 version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$root/Cargo.toml" | head -1)
-export SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-$(git -C "$root" log -1 --format=%ct)}
+[ -n "$version" ] || { echo "cannot read version from Cargo.toml" >&2; exit 1; }
+SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-$(git -C "$root" log -1 --format=%ct 2>/dev/null)} \
+    || { echo "no git history available: set SOURCE_DATE_EPOCH" >&2; exit 1; }
+export SOURCE_DATE_EPOCH
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 mkdir -p "$work"/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS} "$work/payload/usr/bin" "$work/payload/etc/scat" "$work/payload/usr/share/doc/scat"

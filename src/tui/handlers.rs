@@ -16,7 +16,9 @@ impl TuiApp {
             self.open_workflow(key.code == KeyCode::F(11));
             return Ok(false);
         }
-        if key.modifiers == KeyModifiers::ALT
+        if !self.native_selection
+            && self.search_settings.is_none()
+            && key.modifiers == KeyModifiers::ALT
             && let KeyCode::Char(c @ ('i' | 'a' | 'b' | 'v' | 'd')) = key.code
         {
             self.open_catalog_workflow(match c {

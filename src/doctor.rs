@@ -20,6 +20,8 @@ use std::{
 };
 
 const LIMIT: u64 = 64 * 1024;
+/// Per-file RPM metadata for packages with thousands of files outgrows `LIMIT`.
+const RPM_RECORDS_LIMIT: u64 = 16 * 1024 * 1024;
 
 /// Capture bounded output without a shell. Callers isolate tool spawning in
 /// a probe subprocess too, since exec itself can stall on a network PATH.
@@ -31,6 +33,14 @@ pub fn capture_cancel(
     command: &mut Command,
     timeout: Duration,
     cancel: Option<&std::sync::atomic::AtomicBool>,
+) -> Value {
+    capture_limited(command, timeout, cancel, LIMIT)
+}
+fn capture_limited(
+    command: &mut Command,
+    timeout: Duration,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+    limit: u64,
 ) -> Value {
     use std::os::unix::process::CommandExt;
     if cancel.is_some() {
@@ -62,8 +72,8 @@ pub fn capture_cancel(
     };
     let start = Instant::now();
     loop {
-        if out.metadata().is_ok_and(|m| m.len() > LIMIT)
-            || err.metadata().is_ok_and(|m| m.len() > LIMIT)
+        if out.metadata().is_ok_and(|m| m.len() > limit)
+            || err.metadata().is_ok_and(|m| m.len() > limit)
         {
             let _ = child.kill();
             std::thread::spawn(move || {
@@ -75,7 +85,7 @@ pub fn capture_cancel(
             Ok(Some(status)) => {
                 let _ = out.seek(SeekFrom::Start(0));
                 let mut text = String::new();
-                let _ = out.take(LIMIT).read_to_string(&mut text);
+                let _ = out.take(limit).read_to_string(&mut text);
                 // Raw stderr may contain environment/config secrets: never emit it.
                 return json!({"state":"completed", "exit_code":status.code(), "stdout":text});
             }
@@ -103,9 +113,14 @@ pub fn capture_cancel(
     }
 }
 fn tool(program: &str, args: &[&str]) -> Value {
-    capture(
+    tool_limited(program, args, LIMIT)
+}
+fn tool_limited(program: &str, args: &[&str], limit: u64) -> Value {
+    capture_limited(
         Command::new(program).env("LC_ALL", "C").args(args),
         Duration::from_secs(2),
+        None,
+        limit,
     )
 }
 
@@ -359,7 +374,7 @@ fn rpm_file(path: &Path) -> Value {
     }
     // Query metadata only; never use rpm -Vf (which verifies the whole package)
     // and never execute RPM verification scriptlets.
-    let records = tool(
+    let records = tool_limited(
         "rpm",
         &[
             "-qf",
@@ -368,6 +383,7 @@ fn rpm_file(path: &Path) -> Value {
             "--",
             path,
         ],
+        RPM_RECORDS_LIMIT,
     );
     let algorithm = tool("rpm", &["-qf", "--qf", "%{FILEDIGESTALGO}", "--", path]);
     let status = records["stdout"]

@@ -331,6 +331,9 @@ pub struct RunOptions {
     pub terminal_modes: capabilities::Capabilities,
 }
 
+/// No-op SIGINT handler: async-signal-safe, and reset to default by `exec`.
+extern "C" fn ignore_sigint(_: libc::c_int) {}
+
 pub fn run(
     db_path: &Path,
     embeddings_path: &Path,
@@ -362,8 +365,15 @@ pub fn run(
     app.terminal_modes = options.terminal_modes;
     // Keep the parent alive when the foreground child handles Ctrl+C. In raw
     // mode the TUI still receives Ctrl+C as a key and exits normally.
-    ctrlc::set_handler(|| {})
-        .map_err(|e| anyhow::anyhow!("Could not install TUI interrupt handler: {e}"))?;
+    // SIGINT only: SIGTERM and SIGHUP keep their default termination.
+    let handler: extern "C" fn(libc::c_int) = ignore_sigint;
+    // SAFETY: the handler is empty, hence async-signal-safe.
+    if unsafe { libc::signal(libc::SIGINT, handler as libc::sighandler_t) } == libc::SIG_ERR {
+        anyhow::bail!(
+            "Could not install TUI interrupt handler: {}",
+            io::Error::last_os_error()
+        );
+    }
     let mut terminal = TerminalGuard::enter()?;
     let debounce = Duration::from_millis(DEBOUNCE_MS);
     let poll_tick = Duration::from_millis(POLL_TICK_MS);
@@ -408,10 +418,7 @@ pub fn run(
                 println!("\nOperation finished: {status}. Press Enter to return to browsing.");
                 let mut line = String::new();
                 io::stdin().read_line(&mut line)?;
-                anyhow::ensure!(
-                    status.success(),
-                    "Operation failed or interrupted: {status}"
-                );
+                anyhow::ensure!(status.success(), "{status}");
                 Ok(())
             });
             if let Some(d) = &mut app.workflow {

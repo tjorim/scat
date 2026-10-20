@@ -63,7 +63,12 @@ read-only and return expected results for a known search term.
 - The release binary builds successfully.
 - The binary passes `--help`.
 - The binary opens a compatibility `scripts.sqlite` fixture and runs
-  `info` and `search`.
+  `catalog info` and `search`.
+- The RPM job builds the package twice and checks the two builds are
+  byte-identical, that its dependencies are only `rpmlib(...)`, that it has no
+  scriptlets and that `/etc/scat/scat.yaml` is a config file.
+- The RPM is installed, upgraded and removed in UBI 8, 9 and 10 containers
+  using `packaging/rpm/smoke.sh`.
 - Binary sizes are reported in the workflow logs for release review.
 
 ---
