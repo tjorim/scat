@@ -212,6 +212,63 @@ jobs:
           path: target/x86_64-unknown-linux-musl/release/scat
           if-no-files-found: error
 
+  rpm:
+    name: RPM build and UBI userspace validation
+    needs: linux
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: scat-linux-x86_64-musl
+          path: target/static
+      - name: Install RPM build tools
+        run: sudo apt-get update && sudo apt-get install --yes rpm
+      - name: Build reproducible RPM and upgrade fixture
+        run: |
+          chmod +x target/static/scat
+          if readelf -l target/static/scat | grep -q INTERP; then exit 1; fi
+          packaging/rpm/build.sh target/static/scat target/rpm/first 1
+          packaging/rpm/build.sh target/static/scat target/rpm/repeated 1
+          cmp target/rpm/first/*.rpm target/rpm/repeated/*.rpm
+          packaging/rpm/build.sh target/static/scat target/rpm/second 2
+          rpm -qpl target/rpm/first/*.rpm
+          rpm -qpR target/rpm/first/*.rpm | tee target/rpm/requires.txt
+          if grep -v '^rpmlib(' target/rpm/requires.txt; then exit 1; fi
+          test -z "$(rpm -qp --scripts target/rpm/first/*.rpm)"
+          rpm -qp --configfiles target/rpm/first/*.rpm | grep -Fx /etc/scat/scat.yaml
+          cp tests/support/tui_pty.py target/rpm/
+          (cd target/static && sha256sum scat) > target/rpm/SHA256SUMS
+          (cd target/rpm/first && sha256sum *.rpm) >> target/rpm/SHA256SUMS
+      - name: Validate UBI 8, 9 and 10 userspaces
+        run: |
+          for major in 8 9 10; do
+            image="registry.access.redhat.com/ubi${major}/ubi:latest"
+            docker pull "$image"
+            docker image inspect "$image" --format '{{json .RepoDigests}}' | tee "target/rpm/ubi${major}-image.txt"
+            if [ "$major" = 8 ]; then
+              python_package=python39
+              python_binary=python3.9
+            else
+              python_package=python3
+              python_binary=python3
+            fi
+            docker run --rm --platform linux/amd64 \
+              -e PYTHON="$python_binary" -e PYTHON_PACKAGE="$python_package" \
+              -v "$PWD/target/rpm:/input:ro" \
+              -v "$PWD/packaging/rpm/smoke.sh:/smoke.sh:ro" \
+              "registry.access.redhat.com/ubi${major}/ubi:latest" \
+              bash -c 'cat /etc/redhat-release; uname -m; rpm --version; dnf install -y "$PYTHON_PACKAGE" && bash /smoke.sh' | tee "target/rpm/ubi${major}-smoke.txt"
+          done
+      - uses: actions/upload-artifact@v7
+        with:
+          name: scat-rpm-x86_64
+          path: |
+            target/rpm/first/*.rpm
+            target/rpm/SHA256SUMS
+            target/rpm/requires.txt
+            target/rpm/ubi*.txt
+
   windows:
     name: Windows scat-embed build
     runs-on: windows-latest
