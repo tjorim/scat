@@ -3626,6 +3626,7 @@ dependencies = [
  "tree-sitter-json",
  "tree-sitter-python",
  "tree-sitter-yaml",
+ "unicode-segmentation",
  "unicode-width",
  "walkdir",
  "yaml_serde",

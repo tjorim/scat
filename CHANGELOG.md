@@ -52,6 +52,9 @@ All notable changes to this project will be documented in this file.
 
 ### TUI
 
+- **Clipboard and mouse editing** — bracketed paste inserts search text atomically, replaces selections, and strips control input. Search supports mouse/keyboard selection, word editing, and Unicode grapheme movement. F2 freezes updates and releases mouse capture for native text selection; F3 copies query text, preview, details, diffs or paths via OSC 52, with explicit request feedback. Terminal modes are restored around external viewers and on exit.
+- **Consistent navigation and editing** — revision diffs return to the Revisions pane with Esc/Backspace. Search supports cursor movement, insertion, Backspace and Delete, with a visible cursor that stays in view for long queries. `G`/End jumps to the bottom of preview, detail and diff views, including wrapped content.
+- **Use Esc to go back or quit** — `q` is no longer a quit shortcut, so it can be typed in search queries. Esc returns from nested views, exits fullscreen, or quits from browse mode; Ctrl+C quits from any view.
 - **Search filters** — the TUI search box now understands `lang:` (or `language:`), `owner:`, and `tag:` tokens, matching the CLI's `--lang`/`--owner`/`--tag` flags (e.g. `backup lang:python owner:alice`). Active filters are shown in the search pane title, a filter-only query lists all matching scripts, and a filter key with an empty value (mid-typing) is ignored.
 - **Path-aware search routing** — TUI queries containing `/` or `.` now route to the same INSTR-based path search the CLI uses instead of erroring as invalid FTS5 syntax, so `jobs/nightly` or `foo.py` find scripts by path fragment.
 - **Read-only full-script viewer** ([#15](https://github.com/tjorim/scat/issues/15)) — added a TUI action to open the full selected script in an external read-only viewer/editor, bypassing the `PREVIEW_LINES` preview cap.

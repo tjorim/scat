@@ -1,8 +1,9 @@
 //! Clipboard support via the OSC 52 terminal escape sequence.
 //!
 //! OSC 52 asks the terminal emulator itself to set the system clipboard, so
-//! it works locally and over SSH without any external clipboard tool (xclip,
-//! pbcopy, …) or extra dependency. The text is base64-encoded per the OSC 52
+//! it can work locally and over SSH when permitted by the terminal, without
+//! an external clipboard tool (xclip, pbcopy, …) or extra dependency. A successful
+//! write only confirms the request was sent, not clipboard access. Text is base64-encoded per the OSC 52
 //! spec; a tiny local encoder keeps this dependency-free.
 
 use std::io::{self, Write};

@@ -1183,6 +1183,83 @@ fn v_key_queues_full_catalog_content_for_viewer() {
 }
 
 #[test]
+fn q_key_in_search_updates_query_without_quitting() {
+    let db = super::make_test_db();
+    let mut app = make_app(db.path());
+    app.focus = Focus::Search;
+
+    for ch in "query.sql".chars() {
+        let should_quit = app
+            .handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
+            .unwrap();
+        assert!(!should_quit, "typing {ch} should not quit search");
+    }
+
+    assert_eq!(app.query, "query.sql");
+    assert!(app.pending_query.is_some());
+}
+
+#[test]
+fn q_key_does_not_quit_from_non_search_panes() {
+    let db = super::make_test_db();
+    let mut app = make_app(db.path());
+
+    for focus in [
+        Focus::Results,
+        Focus::Preview,
+        Focus::Deps,
+        Focus::Functions,
+        Focus::Revisions,
+    ] {
+        app.focus = focus;
+        assert!(
+            !app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE))
+                .unwrap()
+        );
+    }
+}
+
+#[test]
+fn detail_views_ignore_q_and_ctrl_c_quits() {
+    let db = super::make_test_db();
+    let mut app = make_app(db.path());
+
+    for (mode, folder_focused) in [
+        (ViewMode::Detail, false),
+        (ViewMode::Detail, true),
+        (ViewMode::DetailDiff, false),
+    ] {
+        app.mode = mode;
+        app.folder_focused = folder_focused;
+        assert!(
+            !app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE))
+                .unwrap()
+        );
+        assert_eq!(app.mode, mode);
+        assert_eq!(app.folder_focused, folder_focused);
+        assert!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
+                .unwrap()
+        );
+    }
+}
+
+#[test]
+fn esc_and_ctrl_c_still_quit_from_search() {
+    let db = super::make_test_db();
+    let mut app = make_app(db.path());
+    app.focus = Focus::Search;
+
+    for key in [
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+    ] {
+        assert!(app.handle_key(key).unwrap());
+    }
+    assert!(app.query.is_empty());
+}
+
+#[test]
 fn v_key_in_search_updates_query_instead_of_opening_viewer() {
     let db = super::make_test_db();
     let mut app = make_app(db.path());
@@ -1271,7 +1348,7 @@ fn stats_view_esc_and_backspace_return_to_browse() {
 }
 
 #[test]
-fn stats_view_q_and_ctrl_c_quit() {
+fn stats_view_ignores_q_and_ctrl_c_quits() {
     let db = super::make_test_db();
     let mut app = make_app(db.path());
     app.mode = ViewMode::Stats;
@@ -1279,7 +1356,7 @@ fn stats_view_q_and_ctrl_c_quit() {
     let should_quit = app
         .handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE))
         .unwrap();
-    assert!(should_quit);
+    assert!(!should_quit);
 
     let should_quit = app
         .handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
@@ -1366,7 +1443,7 @@ fn dep_graph_view_esc_and_backspace_return_to_browse() {
 }
 
 #[test]
-fn dep_graph_view_q_and_ctrl_c_quit() {
+fn dep_graph_view_ignores_q_and_ctrl_c_quits() {
     let db = super::make_test_db();
     let mut app = make_app(db.path());
     app.mode = ViewMode::DepGraph;
@@ -1374,7 +1451,7 @@ fn dep_graph_view_q_and_ctrl_c_quit() {
     let should_quit = app
         .handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE))
         .unwrap();
-    assert!(should_quit);
+    assert!(!should_quit);
 
     let should_quit = app
         .handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
@@ -1800,4 +1877,402 @@ fn copying_the_selected_path_requests_a_full_redraw() {
         app.force_full_redraw,
         "copying a path must request a full redraw"
     );
+}
+
+#[test]
+fn search_edits_at_the_cursor_and_preserves_utf8() {
+    let db = super::make_test_db();
+    let mut app = make_app(db.path());
+    let press = |app: &mut TuiApp, code| {
+        assert!(
+            !app.handle_key(KeyEvent::new(code, KeyModifiers::NONE))
+                .unwrap()
+        );
+    };
+    for ch in "aé界z".chars() {
+        press(&mut app, KeyCode::Char(ch));
+    }
+    press(&mut app, KeyCode::Left);
+    press(&mut app, KeyCode::Backspace);
+    assert_eq!(app.query, "aéz");
+    press(&mut app, KeyCode::Left);
+    press(&mut app, KeyCode::Delete);
+    assert_eq!(app.query, "az");
+    press(&mut app, KeyCode::Char('q'));
+    assert_eq!(app.query, "aqz");
+    assert_eq!(app.pending_query.as_deref(), Some("aqz"));
+
+    // Moving the cursor and deleting beyond the bounds must not rerun search.
+    app.pending_query = None;
+    press(&mut app, KeyCode::Home);
+    press(&mut app, KeyCode::Left);
+    press(&mut app, KeyCode::Backspace);
+    assert_eq!(app.query_cursor, 0);
+    assert!(app.pending_query.is_none());
+    press(&mut app, KeyCode::Char('界'));
+    assert_eq!(app.query, "界aqz");
+    press(&mut app, KeyCode::Home);
+    press(&mut app, KeyCode::Right);
+    assert_eq!(app.query_cursor, "界".len());
+    press(&mut app, KeyCode::End);
+    app.pending_query = None;
+    press(&mut app, KeyCode::Right);
+    press(&mut app, KeyCode::Delete);
+    assert_eq!(app.query_cursor, app.query.len());
+    assert!(app.pending_query.is_none());
+}
+
+#[test]
+fn search_cursor_stays_visible_for_long_and_wide_queries() {
+    use ratatui::{Terminal, backend::TestBackend, layout::Position};
+
+    let db = super::make_test_db();
+    let mut app = make_app(db.path());
+    for ch in "界".repeat(50).chars() {
+        app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
+            .unwrap();
+    }
+    let mut terminal = Terminal::new(TestBackend::new(40, 24)).unwrap();
+    terminal
+        .draw(|frame| super::render::draw(frame, &mut app))
+        .unwrap();
+    // Search has 38 inner columns; 18 wide characters leave a cursor cell.
+    assert_eq!(
+        terminal.get_cursor_position().unwrap(),
+        Position::new(37, 2)
+    );
+    let search_text: String = (1..39)
+        .map(|x| terminal.backend().buffer()[(x, 2)].symbol())
+        .collect();
+    assert!(search_text.contains('界'));
+    app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE))
+        .unwrap();
+    terminal
+        .draw(|frame| super::render::draw(frame, &mut app))
+        .unwrap();
+    assert_eq!(terminal.get_cursor_position().unwrap(), Position::new(1, 2));
+}
+
+#[test]
+fn revision_diff_returns_to_revisions_and_detail_diff_returns_to_detail() {
+    let db = super::make_test_db();
+    let mut app = make_app(db.path());
+    for back in [KeyCode::Esc, KeyCode::Backspace] {
+        app.mode = ViewMode::Browse;
+        app.focus = Focus::Revisions;
+        app.revisions_selected = 2;
+        app.revisions_scroll = 3;
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.mode, ViewMode::DetailDiff);
+        assert!(
+            !app.handle_key(KeyEvent::new(back, KeyModifiers::NONE))
+                .unwrap()
+        );
+        assert_eq!(app.mode, ViewMode::Browse);
+        assert_eq!(app.focus, Focus::Revisions);
+        assert_eq!(app.revisions_selected, 2);
+        assert_eq!(app.revisions_scroll, 3);
+
+        app.mode = ViewMode::Detail;
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.mode, ViewMode::DetailDiff);
+        app.handle_key(KeyEvent::new(back, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.mode, ViewMode::Detail);
+    }
+}
+
+#[test]
+fn bottom_shortcuts_show_the_last_wrapped_line_in_preview_detail_and_diff() {
+    use ratatui::{Terminal, backend::TestBackend, text::Line};
+
+    let db = super::make_test_db();
+    let mut app = make_app(db.path());
+    let content = format!("{} LAST", "word ".repeat(300));
+    app.cached_preview = content.clone();
+    app.cached_preview_lines = vec![Line::raw(content.clone())];
+    app.preview_total_lines = 1;
+    app.detail_diff_output = content;
+    app.detail = Some(detail_row("/catalog/scripts/a.py"));
+    app.detail
+        .as_mut()
+        .unwrap()
+        .insert("content".into(), Value::String(app.cached_preview.clone()));
+    let mut terminal = Terminal::new(TestBackend::new(40, 16)).unwrap();
+    for mode in [ViewMode::Browse, ViewMode::Detail, ViewMode::DetailDiff] {
+        app.mode = mode;
+        app.focus = Focus::Preview;
+        app.fullscreen = true;
+        for bottom in [KeyCode::Char('G'), KeyCode::End] {
+            app.handle_key(KeyEvent::new(bottom, KeyModifiers::NONE))
+                .unwrap();
+            terminal
+                .draw(|frame| super::render::draw(frame, &mut app))
+                .unwrap();
+            let screen: String = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(ratatui::buffer::Cell::symbol)
+                .collect();
+            assert!(
+                screen.contains("LAST"),
+                "last wrapped line missing in {mode:?}"
+            );
+            for top in [KeyCode::Char('g'), KeyCode::Home] {
+                app.handle_key(KeyEvent::new(top, KeyModifiers::NONE))
+                    .unwrap();
+                let scroll = match mode {
+                    ViewMode::Browse => app.preview_scroll,
+                    ViewMode::Detail => app.detail_scroll,
+                    ViewMode::DetailDiff => app.detail_diff_scroll,
+                    _ => unreachable!(),
+                };
+                assert_eq!(scroll, 0);
+            }
+        }
+    }
+}
+
+#[test]
+fn bracketed_paste_is_atomic_normalized_and_replaces_selection() {
+    let db = super::make_test_db();
+    let mut app = make_app(db.path());
+    assert!(app.handle_paste("old query"));
+    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert!(app.handle_paste("query\r\nsecond\tline\x1b\x03\x7f"));
+    assert_eq!(app.query, "query second line");
+    assert_eq!(app.query_cursor, app.query.len());
+    assert!(app.query_selection().is_none());
+    assert_eq!(app.pending_query.as_deref(), Some("query second line"));
+    assert_eq!(app.mode, ViewMode::Browse);
+    assert_eq!(app.focus, Focus::Search);
+    app.pending_query = None;
+    assert!(!app.handle_paste("\x1b\x03\x00"));
+    assert!(app.pending_query.is_none());
+}
+
+#[test]
+fn paste_in_other_views_never_executes_shortcuts() {
+    let db = super::make_test_db();
+    let mut app = make_app(db.path());
+    for mode in [
+        ViewMode::Browse,
+        ViewMode::Detail,
+        ViewMode::DetailDiff,
+        ViewMode::Stats,
+        ViewMode::DepGraph,
+    ] {
+        app.mode = mode;
+        app.focus = Focus::Results;
+        app.pending_query = None;
+        assert!(app.handle_paste("q\n\x1b\x03dvfs"));
+        assert_eq!(app.mode, mode);
+        assert_eq!(app.focus, Focus::Results);
+        assert!(app.query.is_empty());
+        assert!(app.pending_query.is_none());
+        assert!(app.flash.as_deref().unwrap().contains("Focus search"));
+    }
+}
+
+#[test]
+fn search_selection_replaces_text_and_moves_by_grapheme() {
+    let db = super::make_test_db();
+    let mut app = make_app(db.path());
+    app.handle_paste("aé👩‍💻e\u{301}");
+    // A combining sequence and a joined emoji each behave as one character.
+    for expected in ["aé👩‍💻", "aé", "a", ""] {
+        app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.query, expected);
+    }
+    app.handle_paste("alpha beta");
+    app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE))
+        .unwrap();
+    app.handle_key(KeyEvent::new(
+        KeyCode::Right,
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    ))
+    .unwrap();
+    assert_eq!(app.query_selection(), Some(0..5));
+    assert_eq!(app.copy_target(), Some(("alpha".into(), "search")));
+    app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.query, "q beta");
+    app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::SHIFT))
+        .unwrap();
+    assert_eq!(app.query_selection(), Some(1..6));
+    app.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.query, "q");
+    app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::SHIFT))
+        .unwrap();
+    assert!(
+        !app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap()
+    );
+    assert!(app.query_selection().is_none());
+    assert!(
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap()
+    );
+}
+
+#[test]
+fn search_word_deletion_and_line_shortcuts_schedule_only_edits() {
+    let db = super::make_test_db();
+    let mut app = make_app(db.path());
+    app.handle_paste("alpha beta gamma");
+    app.pending_query = None;
+    app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL))
+        .unwrap();
+    assert_eq!(app.query_cursor, 11);
+    assert!(app.pending_query.is_none());
+    app.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::CONTROL))
+        .unwrap();
+    assert_eq!(app.query, "alpha beta ");
+    app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert_eq!(app.query, "alpha ");
+    app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert_eq!(app.query, "");
+    app.handle_paste("abc def");
+    app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE))
+        .unwrap();
+    app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL))
+        .unwrap();
+    app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert_eq!(app.query, "abc");
+}
+
+#[test]
+fn mouse_click_and_drag_edit_search_without_shifting_the_viewport() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::{Terminal, backend::TestBackend};
+    let db = super::make_test_db();
+    let mut app = make_app(db.path());
+    app.handle_paste(&"界abc".repeat(30));
+    let mut terminal = Terminal::new(TestBackend::new(40, 24)).unwrap();
+    terminal
+        .draw(|frame| super::render::draw(frame, &mut app))
+        .unwrap();
+    let view_start = app.query_view_start;
+    let area = app.query_area;
+    let mouse = |kind, column| MouseEvent {
+        kind,
+        column,
+        row: area.y,
+        modifiers: KeyModifiers::NONE,
+    };
+    app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), area.x))
+        .unwrap();
+    assert_eq!(app.query_cursor, view_start);
+    terminal
+        .draw(|frame| super::render::draw(frame, &mut app))
+        .unwrap();
+    assert_eq!(app.query_view_start, view_start);
+    app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), area.x + 5))
+        .unwrap();
+    let selection = app.query_selection().unwrap();
+    assert_eq!(selection.start, view_start);
+    assert!(selection.end > selection.start);
+    assert!(app.query.is_char_boundary(selection.end));
+    app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), area.x + 5))
+        .unwrap();
+    assert!(!app.query_dragging);
+    let selected = app.query[selection.clone()].to_string();
+    assert_eq!(app.copy_target(), Some((selected, "search")));
+    let previous_len = app.query.len();
+    app.handle_paste("Q");
+    assert_eq!(app.query.len(), previous_len - selection.len() + 1);
+}
+
+#[test]
+fn native_selection_mode_ignores_edits_and_resumes_without_quitting() {
+    let db = super::make_test_db();
+    let mut app = make_app(db.path());
+    for mode in [
+        ViewMode::Browse,
+        ViewMode::Detail,
+        ViewMode::DetailDiff,
+        ViewMode::Stats,
+        ViewMode::DepGraph,
+    ] {
+        app.mode = mode;
+        assert!(
+            !app.handle_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE))
+                .unwrap()
+        );
+        assert!(app.native_selection);
+        assert!(!app.handle_paste("ignored"));
+        assert!(
+            !app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
+                .unwrap()
+        );
+        assert_eq!(app.mode, mode);
+        assert!(app.query.is_empty());
+        assert!(
+            !app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+                .unwrap()
+        );
+        assert!(!app.native_selection);
+    }
+    app.handle_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE))
+        .unwrap();
+    assert!(
+        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
+            .unwrap()
+    );
+}
+
+#[test]
+fn copy_uses_focused_content_and_leaves_selection_intact() {
+    let db = super::make_test_db();
+    let mut app = make_app(db.path());
+    app.handle_paste("query");
+    assert_eq!(app.copy_target(), Some(("query".into(), "search")));
+    app.focus = Focus::Preview;
+    app.cached_preview = "full\ncatalog\ncontent".into();
+    assert_eq!(
+        app.copy_target(),
+        Some((app.cached_preview.clone(), "catalog content"))
+    );
+    app.detail_loading = true;
+    assert!(app.copy_target().is_none());
+    app.detail_loading = false;
+    app.detail = Some(detail_row("/catalog/scripts/a.py"));
+    app.mode = ViewMode::Detail;
+    let (text, label) = app.copy_target().unwrap();
+    assert_eq!(label, "script details");
+    assert!(text.contains("/catalog/scripts/a.py"));
+    assert!(!text.contains('\x1b'));
+    app.mode = ViewMode::DetailDiff;
+    app.detail_diff_output = "-old\n+new".into();
+    assert_eq!(app.copy_target(), Some(("-old\n+new".into(), "diff")));
+    app.detail_diff_loading = true;
+    assert!(app.copy_target().is_none());
+    app.mode = ViewMode::Stats;
+    assert!(app.copy_target().is_none());
+}
+
+#[test]
+fn every_printable_ascii_character_can_be_entered_into_search() {
+    let db = super::make_test_db();
+    let mut app = make_app(db.path());
+    let text: String = (' '..='~').collect();
+    for ch in text.chars() {
+        assert!(
+            !app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
+                .unwrap()
+        );
+    }
+    assert_eq!(app.query, text);
+    assert_eq!(app.focus, Focus::Search);
+    assert_eq!(app.mode, ViewMode::Browse);
 }

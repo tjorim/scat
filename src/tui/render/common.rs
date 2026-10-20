@@ -196,10 +196,6 @@ pub(super) fn render_list_pane(
     render_window(frame, area, block, items, selected - offset);
 }
 
-pub(super) fn line_count(text: &str) -> usize {
-    text.lines().count().max(1)
-}
-
 pub(super) fn clamp_scroll_offset(scroll: &mut u16, line_count: usize, area: Rect) {
     let viewport_lines = usize::from(area.height.saturating_sub(2)).max(1);
     let max_scroll = line_count.saturating_sub(viewport_lines);
@@ -278,12 +274,6 @@ pub(super) fn left_truncate_path(path: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn line_count_treats_empty_text_as_one_rendered_line() {
-        assert_eq!(line_count(""), 1);
-        assert_eq!(line_count("a\nb\nc"), 3);
-    }
 
     // -----------------------------------------------------------------------
     // scroll_window_variable

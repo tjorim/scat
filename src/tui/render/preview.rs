@@ -24,18 +24,7 @@ pub(super) fn draw_preview(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) 
     let spinner = spinner_char(app.tick);
     if app.detail_loading {
         app.preview_scroll = 0;
-    } else {
-        clamp_scroll_offset(
-            &mut app.preview_scroll,
-            app.cached_preview_lines.len().max(1),
-            area,
-        );
     }
-    let title = if app.detail_loading {
-        "Preview (loading…)".to_string()
-    } else {
-        preview_title(app.preview_scroll, app.preview_total_lines)
-    };
     let text: Text = if app.detail_loading {
         Text::from(format!("{spinner} Loading…"))
     } else if app.cached_preview_lines.is_empty() && app.detail.is_some() {
@@ -46,9 +35,19 @@ pub(super) fn draw_preview(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) 
     } else {
         Text::from(app.cached_preview_lines.clone())
     };
+    let paragraph = Paragraph::new(text).wrap(Wrap { trim: false });
+    clamp_scroll_offset(
+        &mut app.preview_scroll,
+        paragraph.line_count(area.width.saturating_sub(2)),
+        area,
+    );
+    let title = if app.detail_loading {
+        "Preview (loading…)".to_string()
+    } else {
+        preview_title(app.preview_scroll, app.preview_total_lines)
+    };
     frame.render_widget(
-        Paragraph::new(text)
-            .wrap(Wrap { trim: false })
+        paragraph
             .scroll((
                 if app.detail_loading {
                     0

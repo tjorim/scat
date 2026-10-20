@@ -6,7 +6,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use super::super::TuiApp;
+use super::super::{Focus, TuiApp};
 use super::common::hint_key;
 
 pub(super) fn draw_footer(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
@@ -24,8 +24,23 @@ pub(super) fn draw_footer(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
         );
         return;
     }
+    if app.focus == Focus::Search {
+        frame.render_widget(
+            Paragraph::new(
+                "F2 mouse select  F3 copy  ←/→ edit  Shift+←/→ select  Ctrl+A all  Enter results",
+            ),
+            area,
+        );
+        return;
+    }
     let sep = Span::raw("  ");
     let mut spans = vec![
+        hint_key("F2"),
+        Span::raw(" select"),
+        sep.clone(),
+        hint_key("F3"),
+        Span::raw(" copy"),
+        sep.clone(),
         hint_key("/"),
         Span::raw(" search"),
         sep.clone(),
@@ -65,7 +80,7 @@ pub(super) fn draw_footer(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
         spans.push(Span::raw(" fullscreen"));
     }
     spans.push(sep.clone());
-    spans.push(hint_key("q/Esc"));
+    spans.push(hint_key("Esc"));
     spans.push(Span::raw(" quit"));
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }

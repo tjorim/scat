@@ -90,19 +90,29 @@ scat tui
 | Key | Action |
 |---|---|
 | `/` | Focus the search box |
+| `←` / `→`, `Home` / `End` (in search) | Move the insertion cursor |
+| `Backspace` / `Delete` (in search) | Delete before/after the cursor, or delete the selection |
+| `Shift` + cursor keys (in search) | Select text; typing/pasting replaces the selection |
+| `Ctrl+A` (in search) | Select the whole query |
+| `Ctrl+←` / `Ctrl+→` (in search) | Move by word (add Shift to select) |
+| `Ctrl+W` / `Ctrl+Backspace` / `Ctrl+Delete` (in search) | Delete the previous/next word |
+| `Ctrl+U` / `Ctrl+K` (in search) | Delete from the cursor to the start/end |
+| `F2` | Toggle native terminal text selection; Esc also resumes the TUI |
+| `F3` | Copy the search selection/query, preview content, script details, diff, or selected script path |
 | `Enter` | Move from search to results, or open the selected script detail view |
 | `Tab` / `Shift+Tab` | Cycle between search, results, preview, and related panes |
 | `↑` / `↓` or `j` / `k` | Navigate results or scroll the focused detail pane |
 | `PageUp` / `PageDown` | Scroll the focused preview or related pane |
 | `Ctrl+u` / `Ctrl+d` | Scroll the focused detail pane by a half page |
 | `Ctrl+b` / `Ctrl+f` | Scroll the focused detail pane by a full page |
-| `g` / `G` | Jump to top/bottom of results; `g` resets detail-pane scroll |
-| `Home` / `End` | Jump within results; `Home` resets focused detail-pane scroll |
+| `g` / `G` | Jump to top/bottom of results, preview, detail, or diff |
+| `Home` / `End` | Jump to top/bottom of results, preview, detail, or diff |
 | `d` (in detail view) | Open a script diff against the most-recent checkout |
 | `Tab` (in detail view) | Browse the script's folder: `j`/`k` highlight an entry, `Enter` opens a sibling script or descends into a subfolder, `[` goes up a level, `Backspace` returns |
 | `Ctrl+L` | Focus the results list |
-| `Escape` / `Backspace` | Return from script detail view, or quit from browse mode |
-| `q` | Quit |
+| `Escape` | Return to the previous view, exit fullscreen, or quit from browse mode |
+| `Backspace` (in detail or diff) | Return to the previous view |
+| `Ctrl+C` | Quit from any view |
 
 ### Mouse
 
@@ -113,13 +123,30 @@ The TUI also responds to the mouse:
 | Click a result | Select it; double-click opens the full detail view |
 | Click a dependency / function | Select it; click again (or double-click) to jump to it |
 | Click the path (header or Metadata pane, or the `Path` line in the detail view) | Copy the full logical path to the clipboard |
-| Click the search box | Focus the search input |
+| Click / drag in the search box | Place the insertion cursor / select query text |
 | Scroll wheel | Scroll (or move the selection in) the pane under the cursor |
 
-Copy uses the OSC 52 escape sequence, so it reaches your local clipboard even
-over SSH. To select text by hand instead (bypassing the app's mouse handling),
-hold **Shift** while dragging — the terminal's own selection then works as
-usual.
+Press **F2** to select arbitrary screen text using your terminal's normal
+mouse drag and copy shortcut. The TUI releases the mouse and pauses background
+updates so the selection stays intact. Press **F2** or **Esc** to resume.
+**Shift+drag** also bypasses mouse capture in terminals that support it.
+
+**F3** copies the selected query text (or the whole query when nothing is
+selected). In other panes it copies the focused preview, details, diff, or
+selected script path. Clicking a script path still copies that path.
+These actions request clipboard access via OSC 52, including over SSH;
+your terminal or multiplexer must allow it. The TUI reports the request,
+but cannot confirm that the terminal accepted it. Native terminal selection
+and copy provide an alternative when OSC 52 is unavailable.
+
+Use your **terminal's paste shortcut** (commonly Ctrl+Shift+V or Cmd+V) in
+search. On terminals supporting bracketed paste, pasted text is inserted in
+one operation at the cursor, replacing any selection; newlines and tabs become
+spaces and other control characters are removed. Pasting in other panes is
+ignored with a hint to focus search. On terminals without bracketed paste,
+input arrives as ordinary keystrokes, so paste single-line text into search.
+**Ctrl+C quits the app**; use your terminal's copy shortcut to copy native
+selections. Esc clears a query selection before exiting search.
 
 The details pane shows metadata, checkout state, source preview, and related
 or dependent scripts for the highlighted result. Press `Enter` on a result to
