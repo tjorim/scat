@@ -9,7 +9,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use super::super::{RegionKind, TuiApp, detail};
-use super::common::{clamp_scroll_offset, hint_key, line_count, spinner_char};
+use super::common::{clamp_scroll_offset, hint_key, spinner_char};
 
 pub(super) fn draw_detail_view(frame: &mut Frame<'_>, app: &mut TuiApp) {
     let root = Layout::default()
@@ -30,24 +30,26 @@ pub(super) fn draw_detail_view(frame: &mut Frame<'_>, app: &mut TuiApp) {
             app.detail_scroll = selected_line.saturating_sub(viewport - 1);
         }
     }
-    clamp_scroll_offset(&mut app.detail_scroll, lines.len(), root[0]);
+    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+    clamp_scroll_offset(
+        &mut app.detail_scroll,
+        paragraph.line_count(root[0].width.saturating_sub(2)),
+        root[0],
+    );
     frame.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .scroll((app.detail_scroll, 0))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(format!(
-                        "Script Detail (line {})",
-                        app.detail_scroll.saturating_add(1)
-                    ))
-                    .border_style(
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-            ),
+        paragraph.scroll((app.detail_scroll, 0)).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!(
+                    "Script Detail (line {})",
+                    app.detail_scroll.saturating_add(1)
+                ))
+                .border_style(
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+        ),
         root[0],
     );
     app.record_region(
@@ -64,6 +66,10 @@ pub(super) fn draw_detail_view(frame: &mut Frame<'_>, app: &mut TuiApp) {
         ))
     } else {
         Line::from(vec![
+            hint_key("F2"),
+            Span::raw(" select  "),
+            hint_key("F3"),
+            Span::raw(" copy  "),
             hint_key("d"),
             Span::raw(" diff  "),
             hint_key("v"),
@@ -78,7 +84,9 @@ pub(super) fn draw_detail_view(frame: &mut Frame<'_>, app: &mut TuiApp) {
             Span::raw(" back  "),
             hint_key("j/k"),
             Span::raw(" scroll  "),
-            hint_key("q"),
+            hint_key("g/G"),
+            Span::raw(" top/bottom  "),
+            hint_key("Ctrl+c"),
             Span::raw(" quit"),
         ])
     };
@@ -94,13 +102,13 @@ pub(super) fn draw_detail_diff_view(frame: &mut Frame<'_>, app: &mut TuiApp) {
     let spinner = spinner_char(app.tick);
     if app.detail_diff_loading {
         app.detail_diff_scroll = 0;
-    } else {
-        clamp_scroll_offset(
-            &mut app.detail_diff_scroll,
-            line_count(app.detail_diff_output.as_str()),
-            root[0],
-        );
     }
+    let paragraph = Paragraph::new(app.detail_diff_output.as_str()).wrap(Wrap { trim: false });
+    clamp_scroll_offset(
+        &mut app.detail_diff_scroll,
+        paragraph.line_count(root[0].width.saturating_sub(2)),
+        root[0],
+    );
     let (content, title) = if app.detail_diff_loading {
         (
             Cow::Owned(format!("{spinner} Loading diff…")),
@@ -145,6 +153,10 @@ pub(super) fn draw_detail_diff_view(frame: &mut Frame<'_>, app: &mut TuiApp) {
     );
     frame.render_widget(
         Paragraph::new(Line::from(vec![
+            hint_key("F2"),
+            Span::raw(" select  "),
+            hint_key("F3"),
+            Span::raw(" copy  "),
             hint_key("Esc/Backspace"),
             Span::raw(" back  "),
             hint_key("j/k"),
@@ -153,9 +165,9 @@ pub(super) fn draw_detail_diff_view(frame: &mut Frame<'_>, app: &mut TuiApp) {
             Span::raw(" half-page  "),
             hint_key("Ctrl+b/f"),
             Span::raw(" page  "),
-            hint_key("g"),
-            Span::raw(" top  "),
-            hint_key("q"),
+            hint_key("g/G"),
+            Span::raw(" top/bottom  "),
+            hint_key("Ctrl+c"),
             Span::raw(" quit"),
         ])),
         root[1],

@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -37,6 +37,7 @@ mod helpers;
 mod highlight;
 mod mouse;
 mod render;
+mod search_input;
 mod search_worker;
 mod stats_worker;
 #[cfg(test)]
@@ -162,6 +163,7 @@ enum ViewMode {
 enum ScrollCommand {
     Delta(i16),
     Top,
+    Bottom,
 }
 struct TuiApp {
     search_worker: SearchWorker,
@@ -170,6 +172,14 @@ struct TuiApp {
     folder_worker: FolderWorker,
     resolver: PathResolver,
     query: String,
+    /// UTF-8 byte offset of the search insertion point.
+    query_cursor: usize,
+    query_anchor: Option<usize>,
+    query_view_start: usize,
+    query_area: Rect,
+    query_dragging: bool,
+    /// Freeze the display and release mouse capture for terminal selection.
+    native_selection: bool,
     results: Vec<JsonRow>,
     selected: usize,
     focus: Focus,
@@ -215,6 +225,7 @@ struct TuiApp {
     revisions_selected: usize,
     detail_scroll: u16,
     mode: ViewMode,
+    diff_return_mode: ViewMode,
     detail_diff_output: String,
     detail_diff_loading: bool,
     inflight_diff_id: Option<u64>,
@@ -311,20 +322,22 @@ pub fn run(db_path: &Path, resolver: PathResolver) -> Result<()> {
     let poll_tick = Duration::from_millis(POLL_TICK_MS);
 
     loop {
-        app.apply_results()?;
-        app.drain_detail_channel();
-        app.drain_diff_channel();
-        app.drain_file_check_channel();
-        app.drain_folder_channel();
-        app.drain_stats_channel();
-        if app
-            .last_keystroke_at
-            .is_some_and(|keystroke| keystroke.elapsed() >= debounce)
-            && app.pending_query.is_some()
-        {
-            app.last_keystroke_at = None;
-            app.dispatch_query()?;
-            app.needs_redraw = true;
+        if !app.native_selection {
+            app.apply_results()?;
+            app.drain_detail_channel();
+            app.drain_diff_channel();
+            app.drain_file_check_channel();
+            app.drain_folder_channel();
+            app.drain_stats_channel();
+            if app
+                .last_keystroke_at
+                .is_some_and(|keystroke| keystroke.elapsed() >= debounce)
+                && app.pending_query.is_some()
+            {
+                app.last_keystroke_at = None;
+                app.dispatch_query()?;
+                app.needs_redraw = true;
+            }
         }
         // A view target may be queued synchronously (catalog content) or
         // asynchronously once the file-check worker confirms the live source,
@@ -340,7 +353,7 @@ pub fn run(db_path: &Path, resolver: PathResolver) -> Result<()> {
 
         // Advance the spinner only while something is loading; a frozen tick
         // when idle keeps the buffer identical so no repaint is emitted.
-        if app.is_animating() {
+        if !app.native_selection && app.is_animating() {
             app.tick = app.tick.wrapping_add(1);
             app.needs_redraw = true;
         }
@@ -351,6 +364,8 @@ pub fn run(db_path: &Path, resolver: PathResolver) -> Result<()> {
             app.needs_redraw = true;
         }
 
+        terminal.set_native_selection(app.native_selection)?;
+
         if app.needs_redraw {
             terminal.draw(|frame| draw(frame, &mut app))?;
             app.needs_redraw = false;
@@ -359,13 +374,20 @@ pub fn run(db_path: &Path, resolver: PathResolver) -> Result<()> {
         if event::poll(poll_tick)? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    app.flash = None;
+                    let was_selecting = app.native_selection;
+                    if !was_selecting {
+                        app.flash = None;
+                    }
                     if app.handle_key(key)? {
                         break;
                     }
                     // A handled keypress may change scroll, selection, or
                     // mode; repaint once (user-paced, so never a flood).
-                    app.needs_redraw = true;
+                    app.needs_redraw |=
+                        !app.native_selection || was_selecting != app.native_selection;
+                }
+                Event::Paste(text) => {
+                    app.needs_redraw |= app.handle_paste(&text);
                 }
                 Event::Mouse(mouse) => {
                     // Only acted-on events repaint; bare moves/drags leave the
@@ -382,18 +404,39 @@ pub fn run(db_path: &Path, resolver: PathResolver) -> Result<()> {
 }
 struct TerminalGuard {
     terminal: Terminal<CrosstermBackend<io::Stdout>>,
+    mouse_capture: bool,
 }
 
 impl TerminalGuard {
     fn enter() -> Result<Self> {
+        let backend = CrosstermBackend::new(io::stdout());
+        let mut guard = Self {
+            terminal: Terminal::new(backend)?,
+            mouse_capture: false,
+        };
         enable_raw_mode()?;
-        let mut stdout = io::stdout();
-        // Mouse capture lets the app respond to clicks/scroll; native text
-        // selection is still available via Shift+drag in common terminals.
-        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-        let backend = CrosstermBackend::new(stdout);
-        let terminal = Terminal::new(backend)?;
-        Ok(Self { terminal })
+        // Construct the guard first so setup failures also restore the terminal.
+        execute!(
+            guard.terminal.backend_mut(),
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            EnableBracketedPaste
+        )?;
+        guard.mouse_capture = true;
+        Ok(guard)
+    }
+
+    fn set_native_selection(&mut self, selecting: bool) -> io::Result<()> {
+        let capture = !selecting;
+        if self.mouse_capture != capture {
+            if selecting {
+                execute!(self.terminal.backend_mut(), DisableMouseCapture)?;
+            } else {
+                execute!(self.terminal.backend_mut(), EnableMouseCapture)?;
+            }
+            self.mouse_capture = capture;
+        }
+        Ok(())
     }
 
     fn draw<F>(&mut self, f: F) -> io::Result<ratatui::CompletedFrame<'_>>
@@ -407,7 +450,9 @@ impl TerminalGuard {
     /// what's currently on it, so the next `draw` unconditionally rewrites
     /// every cell instead of trusting a possibly-stale diff.
     fn force_full_redraw(&mut self) -> io::Result<()> {
-        self.terminal.clear()
+        // Fullscreen resize clears the screen and resets both buffers without
+        // querying the terminal cursor (which can block unsupported terminals).
+        self.terminal.resize(self.terminal.size()?.into())
     }
 
     fn open_view(&mut self, target: &viewer::ViewTarget) -> Result<()> {
@@ -434,6 +479,7 @@ impl TerminalGuard {
         execute!(
             self.terminal.backend_mut(),
             DisableMouseCapture,
+            DisableBracketedPaste,
             LeaveAlternateScreen
         )?;
         self.terminal.show_cursor()?;
@@ -445,9 +491,12 @@ impl TerminalGuard {
         execute!(
             self.terminal.backend_mut(),
             EnterAlternateScreen,
-            EnableMouseCapture
+            EnableBracketedPaste
         )?;
-        self.terminal.clear()?;
+        if self.mouse_capture {
+            execute!(self.terminal.backend_mut(), EnableMouseCapture)?;
+        }
+        self.force_full_redraw()?;
         Ok(())
     }
 }
@@ -458,6 +507,7 @@ impl Drop for TerminalGuard {
         let _ = execute!(
             self.terminal.backend_mut(),
             DisableMouseCapture,
+            DisableBracketedPaste,
             LeaveAlternateScreen
         );
         let _ = self.terminal.show_cursor();

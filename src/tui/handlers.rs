@@ -5,6 +5,31 @@ use super::{
 
 impl TuiApp {
     pub(super) fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
+        self.query_dragging = false;
+        if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
+            return Ok(true);
+        }
+        if key.code == KeyCode::F(2) {
+            self.native_selection = !self.native_selection;
+            self.query_dragging = false;
+            return Ok(false);
+        }
+        if self.native_selection {
+            if key.code == KeyCode::Esc {
+                self.native_selection = false;
+            }
+            return Ok(false);
+        }
+        if key.code == KeyCode::F(3) {
+            self.copy_focused_text();
+            return Ok(false);
+        }
+        if self.mode == ViewMode::Browse
+            && self.focus == Focus::Search
+            && self.handle_search_key(key)
+        {
+            return Ok(false);
+        }
         if self.mode == ViewMode::Detail {
             return self.handle_detail_key(key);
         }
@@ -19,11 +44,6 @@ impl TuiApp {
         }
 
         match key {
-            KeyEvent {
-                code: KeyCode::Char('q'),
-                modifiers: KeyModifiers::NONE,
-                ..
-            } => return Ok(true),
             KeyEvent {
                 code: KeyCode::Esc, ..
             } => {
@@ -92,6 +112,7 @@ impl TuiApp {
                 ..
             } if self.focus == Focus::Revisions => {
                 self.dispatch_diff_against_selected_revision()?;
+                self.diff_return_mode = ViewMode::Browse;
                 self.mode = ViewMode::DetailDiff;
             }
             KeyEvent {
@@ -165,13 +186,6 @@ impl TuiApp {
                 if let Some(previous) = self.dep_backstack.pop() {
                     self.navigate_to_path(&previous)?;
                 }
-            }
-            KeyEvent {
-                code: KeyCode::Backspace,
-                ..
-            } if self.focus == Focus::Search => {
-                self.query.pop();
-                self.schedule_query();
             }
             KeyEvent {
                 code: KeyCode::Up, ..
@@ -271,16 +285,6 @@ impl TuiApp {
             } if self.focus != Focus::Search => {
                 self.mode = ViewMode::DepGraph;
             }
-            KeyEvent {
-                code: KeyCode::Char(ch),
-                modifiers,
-                ..
-            } if self.focus == Focus::Search
-                && (modifiers.is_empty() || modifiers == KeyModifiers::SHIFT) =>
-            {
-                self.query.push(ch);
-                self.schedule_query();
-            }
             _ => {
                 self.apply_focused_scroll(key);
             }
@@ -294,11 +298,6 @@ impl TuiApp {
         }
 
         match key {
-            KeyEvent {
-                code: KeyCode::Char('q'),
-                modifiers: KeyModifiers::NONE,
-                ..
-            } => return Ok(true),
             KeyEvent {
                 code: KeyCode::Char('c'),
                 modifiers: KeyModifiers::CONTROL,
@@ -320,6 +319,7 @@ impl TuiApp {
                 ..
             } => {
                 self.dispatch_diff()?;
+                self.diff_return_mode = ViewMode::Detail;
                 self.mode = ViewMode::DetailDiff;
             }
             KeyEvent {
@@ -356,11 +356,6 @@ impl TuiApp {
     /// Backspace pops the folder backstack (or exits browse mode if empty).
     pub(super) fn handle_folder_browse_key(&mut self, key: KeyEvent) -> Result<bool> {
         match key {
-            KeyEvent {
-                code: KeyCode::Char('q'),
-                modifiers: KeyModifiers::NONE,
-                ..
-            } => return Ok(true),
             KeyEvent {
                 code: KeyCode::Char('c'),
                 modifiers: KeyModifiers::CONTROL,
@@ -430,11 +425,6 @@ impl TuiApp {
     pub(super) fn handle_detail_diff_key(&mut self, key: KeyEvent) -> Result<bool> {
         match key {
             KeyEvent {
-                code: KeyCode::Char('q'),
-                modifiers: KeyModifiers::NONE,
-                ..
-            } => return Ok(true),
-            KeyEvent {
                 code: KeyCode::Char('c'),
                 modifiers: KeyModifiers::CONTROL,
                 ..
@@ -446,7 +436,7 @@ impl TuiApp {
                 code: KeyCode::Backspace,
                 ..
             } => {
-                self.mode = ViewMode::Detail;
+                self.mode = self.diff_return_mode;
             }
             _ => {
                 apply_scroll_key(&mut self.detail_diff_scroll, key);
@@ -466,11 +456,6 @@ impl TuiApp {
     #[allow(clippy::unnecessary_wraps)]
     pub(super) fn handle_stats_key(&mut self, key: KeyEvent) -> Result<bool> {
         match key {
-            KeyEvent {
-                code: KeyCode::Char('q'),
-                modifiers: KeyModifiers::NONE,
-                ..
-            } => return Ok(true),
             KeyEvent {
                 code: KeyCode::Char('c'),
                 modifiers: KeyModifiers::CONTROL,
@@ -516,11 +501,6 @@ impl TuiApp {
     /// selecting and opening a node here behaves exactly like the pane does.
     pub(super) fn handle_dep_graph_key(&mut self, key: KeyEvent) -> Result<bool> {
         match key {
-            KeyEvent {
-                code: KeyCode::Char('q'),
-                modifiers: KeyModifiers::NONE,
-                ..
-            } => return Ok(true),
             KeyEvent {
                 code: KeyCode::Char('c'),
                 modifiers: KeyModifiers::CONTROL,

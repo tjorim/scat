@@ -113,6 +113,10 @@ pub(super) fn draw_dep_graph_view(frame: &mut Frame<'_>, app: &mut TuiApp) {
 
     frame.render_widget(
         Paragraph::new(Line::from(vec![
+            hint_key("F2"),
+            Span::raw(" select  "),
+            hint_key("F3"),
+            Span::raw(" copy  "),
             hint_key("j/k"),
             Span::raw(" select  "),
             hint_key("Enter"),
@@ -121,7 +125,7 @@ pub(super) fn draw_dep_graph_view(frame: &mut Frame<'_>, app: &mut TuiApp) {
             Span::raw(" back  "),
             hint_key("Esc/Backspace"),
             Span::raw(" close  "),
-            hint_key("q"),
+            hint_key("Ctrl+c"),
             Span::raw(" quit"),
         ])),
         root[2],

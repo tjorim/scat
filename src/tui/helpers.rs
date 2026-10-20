@@ -107,6 +107,10 @@ fn scroll_command(key: KeyEvent) -> Option<ScrollCommand> {
             code: KeyCode::Home,
             ..
         } => Some(ScrollCommand::Top),
+        KeyEvent {
+            code: KeyCode::Char('G') | KeyCode::End,
+            ..
+        } => Some(ScrollCommand::Bottom),
         _ => None,
     }
 }
@@ -115,6 +119,8 @@ fn apply_scroll_command(scroll: &mut u16, command: ScrollCommand) {
     match command {
         ScrollCommand::Delta(delta) => *scroll = scroll_by(*scroll, delta),
         ScrollCommand::Top => *scroll = 0,
+        // Each pane clamps this to its final visible page during rendering.
+        ScrollCommand::Bottom => *scroll = u16::MAX,
     }
 }
 

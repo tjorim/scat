@@ -70,11 +70,35 @@ impl TuiApp {
     }
 
     /// Handle a mouse event, returning whether it changed anything (and thus
-    /// needs a repaint). Bare moves/drags are ignored.
+    /// needs a repaint). Drags select search text; bare movement is ignored.
     pub(super) fn handle_mouse(&mut self, event: MouseEvent) -> Result<bool> {
+        if self.native_selection {
+            return Ok(false);
+        }
         match event.kind {
+            MouseEventKind::Drag(MouseButton::Left) if self.query_dragging => {
+                let cursor = self.query_cursor_at_column(event.column);
+                self.move_query_cursor(cursor, true);
+                Ok(true)
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                self.query_dragging = false;
+                Ok(false)
+            }
             MouseEventKind::Down(MouseButton::Left) => {
                 self.flash = None;
+                self.query_dragging = false;
+                if self.query_area.contains((event.column, event.row).into())
+                    && event.modifiers.contains(super::KeyModifiers::SHIFT)
+                    && hit_test(&self.click_regions, event.column, event.row)
+                        .is_some_and(|(kind, _)| kind == RegionKind::Search)
+                {
+                    let cursor = self.query_cursor_at_column(event.column);
+                    self.move_query_cursor(cursor, true);
+                    self.query_dragging = true;
+                    self.focus = Focus::Search;
+                    return Ok(true);
+                }
                 self.handle_left_click(event.column, event.row)
             }
             MouseEventKind::ScrollDown => self.handle_scroll(event.column, event.row, 1),
@@ -114,6 +138,12 @@ impl TuiApp {
             }
             RegionKind::Search => {
                 self.focus = Focus::Search;
+                if self.query_area.contains((col, row).into()) {
+                    let cursor = self.query_cursor_at_column(col);
+                    self.move_query_cursor(cursor, false);
+                    self.query_anchor = Some(cursor);
+                    self.query_dragging = true;
+                }
                 Ok(true)
             }
             RegionKind::Results => {
@@ -261,15 +291,60 @@ impl TuiApp {
         let Some(path) = self.selected_logical_path() else {
             return;
         };
-        // The OSC 52 write below goes straight to stdout, outside ratatui's
-        // rendering — force a full repaint next frame so any terminal quirk
-        // it triggers (a permission prompt, a byte or two it doesn't
-        // swallow) gets corrected rather than leaving the screen visibly
-        // shifted.
-        self.force_full_redraw = true;
-        match clipboard::copy_to_clipboard(&path) {
-            Ok(()) => self.flash = Some(format!("Copied {path}")),
-            Err(err) => self.error = Some(format!("Copy failed: {err}")),
+        self.copy_text(&path, "path");
+    }
+
+    pub(super) fn copy_target(&self) -> Option<(String, &'static str)> {
+        Some(match (self.mode, self.focus) {
+            (ViewMode::Browse, Focus::Search) => {
+                let text = self
+                    .query_selection()
+                    .map_or(self.query.as_str(), |range| &self.query[range]);
+                (text.to_string(), "search")
+            }
+            (ViewMode::Browse, Focus::Preview) if !self.detail_loading => {
+                (self.cached_preview.clone(), "catalog content")
+            }
+            (ViewMode::Browse, Focus::Preview) => return None,
+            (ViewMode::DetailDiff, _) if !self.detail_diff_loading => {
+                (self.detail_diff_output.clone(), "diff")
+            }
+            (ViewMode::Detail, _) if !self.detail_loading => {
+                let text = detail::detail_lines(self)
+                    .iter()
+                    .map(|line| {
+                        line.spans
+                            .iter()
+                            .map(|span| span.content.as_ref())
+                            .collect::<String>()
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                (text, "script details")
+            }
+            (ViewMode::Browse, _) => (self.selected_logical_path()?, "path"),
+            _ => return None,
+        })
+    }
+
+    pub(super) fn copy_focused_text(&mut self) {
+        if let Some((text, label)) = self.copy_target() {
+            self.copy_text(&text, label);
+        } else {
+            self.flash = Some("Nothing available to copy in this view yet".into());
         }
+    }
+
+    fn copy_text(&mut self, text: &str, label: &str) {
+        if text.is_empty() {
+            self.flash = Some("Nothing to copy".into());
+            return;
+        }
+        // OSC 52 is a request; the terminal may reject it without replying.
+        self.force_full_redraw = true;
+        self.flash = Some(match clipboard::copy_to_clipboard(text) {
+            Ok(()) => format!("Copy requested: {label} (terminal clipboard permission required)"),
+            Err(err) => format!("Copy failed: {err}"),
+        });
     }
 }

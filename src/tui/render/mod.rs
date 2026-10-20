@@ -36,6 +36,42 @@ use search::draw_search;
 use stats_view::draw_stats_view;
 
 pub(super) fn draw(frame: &mut Frame<'_>, app: &mut TuiApp) {
+    draw_inner(frame, app);
+    if let Some(flash) = &app.flash {
+        let area = frame.area();
+        let footer =
+            ratatui::layout::Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1);
+        let color = if flash.starts_with("Copy failed:") {
+            ratatui::style::Color::Red
+        } else {
+            ratatui::style::Color::Green
+        };
+        frame.render_widget(
+            ratatui::widgets::Paragraph::new(flash.as_str())
+                .style(ratatui::style::Style::default().fg(color)),
+            footer,
+        );
+    }
+    if app.native_selection {
+        let area = frame.area();
+        let footer =
+            ratatui::layout::Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1);
+        frame.render_widget(
+            ratatui::widgets::Paragraph::new(
+                "Selection mode: drag to select, use terminal Copy; F2/Esc resumes",
+            )
+            .style(
+                ratatui::style::Style::default()
+                    .fg(ratatui::style::Color::Black)
+                    .bg(ratatui::style::Color::Cyan),
+            ),
+            footer,
+        );
+    }
+}
+
+fn draw_inner(frame: &mut Frame<'_>, app: &mut TuiApp) {
+    app.query_area = ratatui::layout::Rect::default();
     // Rebuilt every frame; the mouse handler hit-tests against the panes as
     // they were last drawn.
     app.click_regions.clear();
