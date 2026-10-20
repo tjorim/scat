@@ -105,14 +105,14 @@ pub(super) fn draw_revisions(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect
             .block(block),
         area,
     );
-    super::common::draw_scrollbar(frame, area, indices.len(), offset, viewport);
-    // Exclude the column header from mouse row mapping.
+    // Exclude the column header from the scrollbar track and mouse row mapping.
     let body = Rect::new(
         area.x,
         area.y.saturating_add(1),
         area.width,
         area.height.saturating_sub(1),
     );
+    super::common::draw_scrollbar(frame, body, indices.len(), offset, viewport);
     app.record_region_with_row_index(body, super::super::RegionKind::Revisions, visible.to_vec());
 }
 

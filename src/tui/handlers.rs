@@ -9,6 +9,9 @@ impl TuiApp {
             self.workflow_key(key);
             return Ok(false);
         }
+        if self.popup.is_some() && self.search_settings.is_none() {
+            return self.handle_popup_key(key);
+        }
         if !self.native_selection && matches!(key.code, KeyCode::F(11 | 12)) {
             self.open_workflow(key.code == KeyCode::F(11));
             return Ok(false);
@@ -21,9 +24,6 @@ impl TuiApp {
         if key.code == KeyCode::F(6) {
             self.open_search_settings();
             return Ok(false);
-        }
-        if self.popup.is_some() {
-            return self.handle_popup_key(key);
         }
         if matches!(key.code, KeyCode::F(1 | 4)) {
             self.popup = Some(super::actions::Popup::new(key.code == KeyCode::F(4)));

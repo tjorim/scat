@@ -216,10 +216,12 @@ impl TuiApp {
         self.inspection = Some(Page {
             kind,
             path: self
-                .results
-                .get(self.selected)
-                .map(|row| ScriptView::new(row).logical_path().to_owned())
-                .or_else(|| self.selected_logical_path())
+                .selected_logical_path()
+                .or_else(|| {
+                    self.results
+                        .get(self.selected)
+                        .map(|row| ScriptView::new(row).logical_path().to_owned())
+                })
                 .unwrap_or_default(),
             rows: vec![],
             selected: 0,

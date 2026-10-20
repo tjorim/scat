@@ -212,6 +212,15 @@ fn draw_body(frame: &mut Frame<'_>, app: &mut TuiApp, area: ratatui::layout::Rec
 /// across resize and fullscreen transitions.
 fn draw_compact_body(frame: &mut Frame<'_>, app: &mut TuiApp, area: ratatui::layout::Rect) {
     use ratatui::widgets::Tabs;
+    use unicode_width::UnicodeWidthStr;
+    const LABELS: [&str; 5] = [
+        "Results",
+        "Preview",
+        "Dependencies",
+        "Functions",
+        "Revisions",
+    ];
+    const DIVIDER: &str = " | ";
     let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(area);
     let focuses = [
         Focus::Results,
@@ -222,34 +231,22 @@ fn draw_compact_body(frame: &mut Frame<'_>, app: &mut TuiApp, area: ratatui::lay
     ];
     let active = focuses.iter().position(|f| *f == app.focus).unwrap_or(0);
     frame.render_widget(
-        Tabs::new([
-            "Results",
-            "Preview",
-            "Dependencies",
-            "Functions",
-            "Revisions",
-        ])
-        .select(active)
-        .padding("", ""),
+        Tabs::new(LABELS)
+            .select(active)
+            .padding("", "")
+            .divider(DIVIDER),
         rows[0],
     );
+    let divider_width = UnicodeWidthStr::width(DIVIDER) as u16;
     let mut x = rows[0].x;
-    for (label, focus) in [
-        "Results",
-        "Preview",
-        "Dependencies",
-        "Functions",
-        "Revisions",
-    ]
-    .into_iter()
-    .zip(focuses)
-    {
-        let width = (label.len() as u16).min(rows[0].right().saturating_sub(x));
+    for (label, focus) in LABELS.into_iter().zip(focuses) {
+        let label_width = UnicodeWidthStr::width(label) as u16;
+        let width = label_width.min(rows[0].right().saturating_sub(x));
         app.pane_tabs.push((
             ratatui::layout::Rect::new(x, rows[0].y, width, rows[0].height),
             focus,
         ));
-        x = x.saturating_add(label.len() as u16 + 3);
+        x = x.saturating_add(label_width + divider_width);
     }
     // Reuse fullscreen pane rendering and its mouse regions without changing
     // either focus or fullscreen state.

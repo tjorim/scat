@@ -2380,6 +2380,23 @@ fn adaptive_layout_retains_focus_and_selection_at_all_sizes() {
 }
 
 #[test]
+fn compact_tab_click_hits_label_midpoint() {
+    use ratatui::{Terminal, backend::TestBackend};
+    let db = super::make_test_db();
+    let mut app = make_app(db.path());
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    terminal.draw(|f| super::render::draw(f, &mut app)).unwrap();
+    let tab = app
+        .pane_tabs
+        .iter()
+        .find(|(_, f)| *f == Focus::Revisions)
+        .unwrap()
+        .0;
+    app.handle_left_click(tab.x + tab.width / 2, tab.y).unwrap();
+    assert_eq!(app.focus, Focus::Revisions);
+}
+
+#[test]
 fn revision_table_groups_rows_and_navigates_original_indices() {
     use ratatui::{Terminal, backend::TestBackend};
     let db = super::make_test_db();
