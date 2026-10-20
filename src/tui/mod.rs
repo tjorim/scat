@@ -39,6 +39,7 @@ mod highlight;
 mod mouse;
 mod render;
 mod search_input;
+mod search_settings;
 mod search_worker;
 mod stats_worker;
 #[cfg(test)]
@@ -167,6 +168,11 @@ enum ScrollCommand {
     Bottom,
 }
 struct TuiApp {
+    search_options: search_worker::SearchOptions,
+    result_limit: usize,
+    bookmarks: std::collections::HashMap<String, String>,
+    expanded_query: Option<String>,
+    search_settings: Option<search_settings::Editor>,
     search_worker: SearchWorker,
     detail_worker: DetailWorker,
     diff_worker: DiffWorker,
@@ -306,7 +312,11 @@ fn inner_rect(outer: Rect) -> Rect {
         height: outer.height.saturating_sub(2),
     }
 }
-pub fn run(db_path: &Path, resolver: PathResolver) -> Result<()> {
+pub fn run(
+    db_path: &Path,
+    resolver: PathResolver,
+    bookmarks: std::collections::HashMap<String, String>,
+) -> Result<()> {
     let search_worker = SearchWorker::new(db_path)?;
     let detail_worker = DetailWorker::new(db_path)?;
     let diff_worker = DiffWorker::new(db_path)?;
@@ -320,6 +330,7 @@ pub fn run(db_path: &Path, resolver: PathResolver) -> Result<()> {
         stats_worker,
         resolver,
     )?;
+    app.bookmarks = bookmarks;
     let mut terminal = TerminalGuard::enter()?;
     let debounce = Duration::from_millis(DEBOUNCE_MS);
     let poll_tick = Duration::from_millis(POLL_TICK_MS);

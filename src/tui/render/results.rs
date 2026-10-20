@@ -69,7 +69,19 @@ fn result_item(row: &scat_core::core::db::JsonRow, area: Rect) -> ListItem<'stat
 
 pub(super) fn draw_results(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
     let spinner = spinner_char(app.tick);
-    let title = format!("Results ({})", app.results.len());
+    let mut title = format!(
+        "Results ({} / limit {}{})",
+        app.results.len(),
+        app.result_limit,
+        if app.results.len() >= app.result_limit {
+            "; cap reached, more may match"
+        } else {
+            ""
+        }
+    );
+    if app.pending_query.is_some() || app.search_in_flight || app.error.is_some() {
+        title.push_str(" [previous results]");
+    }
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)

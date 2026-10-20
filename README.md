@@ -93,6 +93,23 @@ This tool provides a **single searchable index** without:
   [tjorim/scat#73](https://github.com/tjorim/scat/issues/73) for why.
 
 ### TUI
+
+Press **F6** (also listed in F1 help and the F4 palette) to edit search mode,
+role, language, owner, tag and the positive result limit. Tab selects a field,
+Ctrl+U clears it, Enter applies settings and Esc cancels. The search box supplies
+the pattern for text, regex, function-name substring or declared-file search.
+Role applies only to declared-file search; leave it blank to match all roles.
+Settings remain active across searches. Explicit editor filters override matching
+text filter tokens. Advanced patterns are literal patterns, so `lang:`/`owner:`/
+`tag:` tokens are interpreted only in text mode.
+
+Text mode expands an exact `@bookmark` from configuration, showing the expansion
+in the search title; unknown bookmarks use the alias without `@`, like the CLI.
+Unlike CLI text search, live TUI text search prefixes the final term as you type.
+Other modes use the CLI SearchApi directly. The results title shows the configured
+window and warns when the cap is reached (more matches may exist); ranking applies
+to that result window. F6 settings keep expensive searches on the worker thread.
+
 - Interactive search and filtering
   - `lang:`, `owner:`, and `tag:` tokens in the search box filter results the
     same way the CLI's `--lang`/`--owner`/`--tag` flags do

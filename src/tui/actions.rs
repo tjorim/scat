@@ -32,6 +32,12 @@ impl TuiApp {
                 available,
             });
         };
+        add(
+            "Search mode, filters and result limit",
+            "F6",
+            KeyCode::F(6),
+            true,
+        );
         add("Contextual help", "F1", KeyCode::F(1), true);
         add("Command palette", "F4", KeyCode::F(4), true);
         add("Native text selection", "F2", KeyCode::F(2), true);

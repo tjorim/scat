@@ -6,6 +6,14 @@ use super::{
 impl TuiApp {
     pub(super) fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
         self.query_dragging = false;
+        if self.search_settings.is_some() {
+            self.handle_settings_key(key);
+            return Ok(false);
+        }
+        if key.code == KeyCode::F(6) {
+            self.open_search_settings();
+            return Ok(false);
+        }
         if self.popup.is_some() {
             return self.handle_popup_key(key);
         }
