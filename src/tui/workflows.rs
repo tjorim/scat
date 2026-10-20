@@ -35,6 +35,8 @@ pub(super) struct Dialog {
     pub busy: bool,
     pub scroll: u16,
     help: bool,
+    administrative: bool,
+    prepared: Option<(String, Vec<String>)>,
     displayed: Vec<JsonRow>,
     worker: Worker,
 }
@@ -89,16 +91,98 @@ fn parse(command: &str) -> Result<(Vec<String>, Cli)> {
         | Commands::Symlinks { output, .. } => {
             ensure!(*output == OutputFormat::Json, "Choose --output json");
         }
+        Commands::Catalog {
+            command:
+                CatalogCommands::Info { .. }
+                | CatalogCommands::Audit { .. }
+                | CatalogCommands::Stats { .. },
+        } => {}
         Commands::Diff { .. }
         | Commands::Catalog {
             command: CatalogCommands::Diff { .. },
         } => {}
-        _ => bail!(
-            "Only search, show, status, deps, symlinks, similar, diff and catalog diff are available"
-        ),
+        _ => bail!("Choose a read-only command; administration uses its separate entry points"),
     }
     Ok((args, cli))
 }
+fn prepare_administration(
+    command: &str,
+    sources: &(PathBuf, PathBuf),
+    config: Option<&Path>,
+) -> Result<(Vec<String>, String)> {
+    let args = shell_words::split(command)?;
+    let matches = Cli::command()
+        .mut_args(|arg| arg.env(None::<&str>))
+        .try_get_matches_from(std::iter::once("scat".to_owned()).chain(args.clone()))?;
+    let cli = Cli::from_arg_matches(&matches)?;
+    ensure!(
+        cli.db.is_none()
+            && cli.config.is_none()
+            && cli.embeddings.is_none()
+            && cli.cache_dir.is_none()
+            && !cli.no_cache
+            && !cli.no_color
+            && cli.verbose == 0,
+        "Global settings are fixed to the active TUI sources"
+    );
+    ensure!(
+        matches!(
+            cli.command,
+            Commands::Catalog {
+                command: CatalogCommands::Build { .. }
+            } | Commands::Vc { .. }
+        ),
+        "Only catalog build or vc belongs in administration"
+    );
+    let mut full = vec![
+        "--db".into(),
+        sources.0.to_string_lossy().into_owned(),
+        "--embeddings".into(),
+        sources.1.to_string_lossy().into_owned(),
+    ];
+    if let Some(config) = config {
+        full.extend(["--config".into(), config.to_string_lossy().into_owned()]);
+    }
+    full.extend(args);
+    let mut preview = format!(
+        "Executable: {:?}\nArgument vector: {full:#?}\n",
+        std::env::current_exe()?
+    );
+    if let Commands::Catalog {
+        command:
+            CatalogCommands::Build {
+                ref scan_root,
+                head_lines,
+                ref ignore_file,
+                keep_copies,
+                dry_run,
+                quiet,
+                no_resume,
+                force,
+                no_incremental,
+                threads,
+                json,
+            },
+    } = cli.command
+    {
+        let cfg = scat_core::core::vc::load_vc_config(config)?;
+        let roots = if scan_root.is_empty() {
+            &cfg.scan_roots
+        } else {
+            scan_root
+        };
+        preview.push_str(&format!("Scan roots: {roots:#?}\nHeader lines: {head_lines}; ignore files: {ignore_file:?}\nConfig ignore patterns: {:?}\nCopies retained: {keep_copies}; dry run: {dry_run}; quiet: {quiet}\nNo resume: {no_resume}; force: {force}; no incremental: {no_incremental}\nThreads: {threads:?} (None = logical CPU count); JSON: {json}\n", cfg.ignore_patterns));
+    }
+    if let Commands::Vc { args, .. } = cli.command {
+        let cfg = scat_core::core::vc::load_vc_config(config)?;
+        preview.push_str(&format!(
+            "vc executable: {:?}\nvc argv: {args:#?}\n",
+            cfg.vc_executable.or_else(crate::runtime::which_vc)
+        ));
+    }
+    Ok((full, preview))
+}
+
 fn render_displayed(cli: &Cli, rows: &[JsonRow]) -> Result<String> {
     match &cli.command {
         Commands::Search {
@@ -150,14 +234,33 @@ fn run(
         .output()
         .context("Could not start comparison/export worker")?;
     ensure!(
-        output.status.success(),
+        output.status.success()
+            || matches!(
+                cli.command,
+                Commands::Catalog {
+                    command: CatalogCommands::Audit { .. }
+                }
+            ),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
     // Warnings must stay visible; successful structured stdout is preserved verbatim.
     Ok(Completed {
         output: Some(String::from_utf8(output.stdout).context("Output is not UTF-8")?),
-        message: String::from_utf8_lossy(&output.stderr).into_owned(),
+        message: if matches!(
+            cli.command,
+            Commands::Catalog {
+                command: CatalogCommands::Audit { .. }
+            }
+        ) {
+            format!(
+                "Audit exit {} (0: pass; 1: strict warnings; 2: errors). {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            )
+        } else {
+            String::from_utf8_lossy(&output.stderr).into_owned()
+        },
     })
 }
 fn save(path: &Path, text: &str) -> Result<()> {
@@ -250,12 +353,32 @@ impl TuiApp {
                     busy: false,
                     scroll: 0,
                     help: false,
+                    administrative: false,
+                    prepared: None,
                     displayed: self.results.clone(),
                     worker,
                 });
             }
             Err(e) => self.flash = Some(format!("Workflow failed: {e}")),
         }
+    }
+    pub(super) fn open_catalog_workflow(&mut self, kind: u8) {
+        self.open_workflow(false);
+        if let Some(d) = &mut self.workflow {
+            d.fields[0] = match kind {
+                0 => "catalog info --json",
+                1 => "catalog audit --json",
+                2 => "catalog build --dry-run",
+                _ => "vc --",
+            }
+            .into();
+            d.fields[1] = "requested".into();
+            d.administrative = kind >= 2;
+            d.message = "Enter: inspect/run read-only request. Administration: Enter previews; F5 executes that exact preview. F1: options.".into();
+        }
+    }
+    pub(super) fn take_administrative_command(&mut self) -> Option<Vec<String>> {
+        self.pending_administration.take()
     }
     fn search_export_command(&self) -> String {
         use super::search_worker::{SearchMode, parse_query_filters};
@@ -310,6 +433,15 @@ impl TuiApp {
         if d.busy || d.help {
             return;
         }
+        if d.administrative && key.code == KeyCode::F(5) {
+            if let Some((text, args)) = d.prepared.take().filter(|(text, _)| text == &d.fields[0]) {
+                self.pending_administration = Some(args);
+                d.message = format!("Running {text}");
+            } else {
+                d.message = "Press Enter to preview the current command first".into();
+            }
+            return;
+        }
         match key.code {
             KeyCode::Tab | KeyCode::Down => d.selected = (d.selected + 1) % 3,
             KeyCode::BackTab | KeyCode::Up => d.selected = (d.selected + 2) % 3,
@@ -338,6 +470,24 @@ impl TuiApp {
                     "Worker disconnected"
                 }
                 .into();
+            }
+            KeyCode::Enter if d.administrative => {
+                let result = prepare_administration(
+                    &d.fields[0],
+                    self.workflow_sources.as_ref().unwrap(),
+                    self.workflow_config.as_deref(),
+                );
+                match result {
+                    Ok((args, preview)) => {
+                        d.output = preview;
+                        d.prepared = Some((d.fields[0].clone(), args));
+                        d.message = "Review target paths and argv above. F5 explicitly executes; Ctrl+C interrupts while running. Esc cancels. Restart TUI after publishing to refresh catalog.".into();
+                    }
+                    Err(e) => {
+                        d.prepared = None;
+                        d.message = format!("{e:#}");
+                    }
+                }
             }
             KeyCode::Enter => {
                 let displayed = match d.fields[1].trim() {
@@ -431,7 +581,7 @@ pub(super) fn draw(frame: &mut ratatui::Frame<'_>, d: &Dialog) {
     frame.render_widget(Clear, area);
     if d.help {
         frame.render_widget(Paragraph::new(
-            "F1: return to editor · Esc: close dialog\n\nEnter read-only CLI arguments without the scat prefix; quote paths with spaces.\nCatalog script vs live file:\n  diff /catalog/a.py --against '/local/live file.py'\nTwo live files (no catalog content):\n  diff --old /local/old.py --new /local/new.py --json\nCatalog vs indexed revision read from its live path:\n  diff /catalog/a.py --revision-type archive --revision-timestamp 2024\n  diff /catalog/a.py --revision-type develop --revision-user bob\nWhole catalog snapshots (default previous snapshot is CATALOG.1):\n  catalog diff --json\n  catalog diff --against /local/previous.db --json\n  catalog diff --old /local/old.db --new /local/new.db --json\nFresh search: set scope to requested and choose an explicit limit:\n  search --lang python --limit 10000 --fields path,owner,tags --output csv\n  search --regex '.*tool.*' --limit 10000 --output json\nOther JSON commands: show, status, deps, symlinks, similar.\nOnly search supports CSV; --fields follows CLI support (search and show).\nDisplayed scope exports captured search rows; command filters/limits do not apply.\nRequested scope runs the CLI anew, using its matching semantics and limits.\nEnter generates output. F3 requests terminal clipboard access.\nCtrl+S writes generated output to the chosen absolute local file; never overwrites."
+            "F1: return to editor · Esc: close dialog\n\nCatalog: catalog info --json; catalog audit --json --check unowned --stale-days 90\nAudit: --check repeatable; --strict; --near-duplicate-threshold 0.97; --outlier-threshold 0.3. Missing embeddings skips embedding checks.\nAdministration (separate palette entries): Enter previews, F5 executes.\nBuild: catalog build --scan-root '/scripts' --head-lines 10 --ignore-file /path/.catignore --keep-copies 3 --dry-run\nBuild controls: --no-resume --force --no-incremental --threads 4 --quiet --json\nvc: vc -- 'argument with spaces' '--literal-option' (no shell expansion).\nEnter read-only CLI arguments without the scat prefix; quote paths with spaces.\nCatalog script vs live file:\n  diff /catalog/a.py --against '/local/live file.py'\nTwo live files (no catalog content):\n  diff --old /local/old.py --new /local/new.py --json\nCatalog vs indexed revision read from its live path:\n  diff /catalog/a.py --revision-type archive --revision-timestamp 2024\n  diff /catalog/a.py --revision-type develop --revision-user bob\nWhole catalog snapshots (default previous snapshot is CATALOG.1):\n  catalog diff --json\n  catalog diff --against /local/previous.db --json\n  catalog diff --old /local/old.db --new /local/new.db --json\nFresh search: set scope to requested and choose an explicit limit:\n  search --lang python --limit 10000 --fields path,owner,tags --output csv\n  search --regex '.*tool.*' --limit 10000 --output json\nOther JSON commands: show, status, deps, symlinks, similar.\nOnly search supports CSV; --fields follows CLI support (search and show).\nDisplayed scope exports captured search rows; command filters/limits do not apply.\nRequested scope runs the CLI anew, using its matching semantics and limits.\nEnter generates output. F3 requests terminal clipboard access.\nCtrl+S writes generated output to the chosen absolute local file; never overwrites."
         ).wrap(Wrap { trim: false }).block(Block::default().borders(Borders::ALL).title("Workflow examples")), area);
         return;
     }
@@ -445,7 +595,7 @@ pub(super) fn draw(frame: &mut ratatui::Frame<'_>, d: &Dialog) {
     ])
     .split(area);
     frame.render_widget(Paragraph::new(
-        "F1: examples · Tab: field · Ctrl+U: clear · Enter: generate · Esc: close\nF3: clipboard request · Ctrl+S: save · PageUp/PageDown: output\nCLI args: diff PATH --against FILE; diff --old FILE --new FILE\nJSON: --output json / --json; search CSV: --output csv; --fields path,owner"
+        "F1: examples · Tab: field · Ctrl+U: clear · Enter: preview/generate · F5: execute admin · Esc: close\nF3: clipboard request · Ctrl+S: save · PageUp/PageDown: output\nCLI args: diff PATH --against FILE; diff --old FILE --new FILE\nJSON: --output json / --json; search CSV: --output csv; --fields path,owner"
     ), chunks[0]);
     for (i, label) in [
         "Command / format / fields / requested limit (CLI args; no scat prefix)",
@@ -503,6 +653,59 @@ pub(super) fn draw(frame: &mut ratatui::Frame<'_>, d: &Dialog) {
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn administration_requires_preview_and_preserves_literal_arguments() {
+        let db = super::super::make_test_db();
+        let mut app = super::super::tests::make_app(db.path());
+        app.workflow_sources = Some((db.path().to_owned(), PathBuf::from("/missing")));
+        app.open_catalog_workflow(3);
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        app.workflow_key(key(KeyCode::F(5)));
+        assert!(app.take_administrative_command().is_none());
+        app.workflow.as_mut().unwrap().fields[0] = "vc -- 'a b' ';touch /tmp/no' '--json'".into();
+        app.workflow_key(key(KeyCode::Enter));
+        assert!(app.take_administrative_command().is_none());
+        app.workflow_key(key(KeyCode::F(5)));
+        let args = app.take_administrative_command().unwrap();
+        assert_eq!(&args[4..], &["vc", "--", "a b", ";touch /tmp/no", "--json"]);
+        app.workflow_key(key(KeyCode::Enter));
+        app.workflow.as_mut().unwrap().fields[0].push_str(" changed");
+        app.workflow_key(key(KeyCode::F(5)));
+        assert!(app.take_administrative_command().is_none());
+    }
+
+    #[test]
+    fn read_only_and_administrative_boundaries_are_disjoint() {
+        let sources = (PathBuf::from("/catalog"), PathBuf::from("/embeddings"));
+        assert!(parse("catalog info --json").is_ok());
+        assert!(parse("catalog audit --check unowned --strict --stale-days 30 --near-duplicate-threshold 0.98 --outlier-threshold 0.2 --json").is_ok());
+        assert!(parse("catalog build --dry-run").is_err());
+        assert!(parse("vc -- status").is_err());
+        assert!(prepare_administration("catalog info", &sources, None).is_err());
+        assert!(prepare_administration("catalog build --db /other", &sources, None).is_err());
+        assert!(prepare_administration("catalog build --scan-root '/a b' --head-lines 20 --ignore-file /ignore --keep-copies 2 --dry-run --no-resume --force --no-incremental --threads 2", &sources, None).is_ok());
+    }
+
+    #[test]
+    fn audit_findings_survive_nonzero_exit() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("audit");
+        std::fs::write(&exe, "#!/bin/sh\nprintf 'full audit findings'\nexit 2\n").unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let result = run(
+            &exe,
+            Path::new("/db"),
+            Path::new("/missing"),
+            "catalog audit --strict",
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(result.output.as_deref(), Some("full audit findings"));
+        assert!(result.message.contains("2"));
+    }
 
     #[test]
     fn accepts_all_comparisons_and_rejects_cli_conflicts_and_mutations() {

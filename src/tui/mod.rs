@@ -171,6 +171,7 @@ enum ScrollCommand {
 }
 struct TuiApp {
     workflow: Option<workflows::Dialog>,
+    pending_administration: Option<Vec<String>>,
     workflow_config: Option<PathBuf>,
     workflow_sources: Option<(PathBuf, PathBuf)>,
     inspection_worker: Option<inspection::Worker>,
@@ -347,6 +348,10 @@ pub fn run(
     app.workflow_sources = Some((source_db.to_owned(), source_embeddings.to_owned()));
     app.workflow_config = source_config.map(Path::to_owned);
     app.bookmarks = bookmarks;
+    // Keep the parent alive when the foreground child handles Ctrl+C. In raw
+    // mode the TUI still receives Ctrl+C as a key and exits normally.
+    ctrlc::set_handler(|| {})
+        .map_err(|e| anyhow::anyhow!("Could not install TUI interrupt handler: {e}"))?;
     let mut terminal = TerminalGuard::enter()?;
     let debounce = Duration::from_millis(DEBOUNCE_MS);
     let poll_tick = Duration::from_millis(POLL_TICK_MS);
@@ -383,6 +388,30 @@ pub fn run(
             app.needs_redraw = true;
         }
 
+        if let Some(args) = app.take_administrative_command() {
+            let result = terminal.suspend_for(|| {
+                let status = std::process::Command::new(std::env::current_exe()?)
+                    .args(args)
+                    .status()?;
+                println!("\nOperation finished: {status}. Press Enter to return to browsing.");
+                let mut line = String::new();
+                io::stdin().read_line(&mut line)?;
+                anyhow::ensure!(
+                    status.success(),
+                    "Operation failed or interrupted: {status}"
+                );
+                Ok(())
+            });
+            if let Some(d) = &mut app.workflow {
+                d.message = match result {
+                    Ok(()) => {
+                        "Operation completed. Restart TUI to read a newly published catalog.".into()
+                    }
+                    Err(e) => format!("Operation failed or interrupted: {e:#}"),
+                };
+            }
+            app.needs_redraw = true;
+        }
         // Advance the spinner only while something is loading; a frozen tick
         // when idle keeps the buffer identical so no repaint is emitted.
         if !app.native_selection && app.is_animating() {

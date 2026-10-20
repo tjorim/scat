@@ -16,6 +16,17 @@ impl TuiApp {
             self.open_workflow(key.code == KeyCode::F(11));
             return Ok(false);
         }
+        if key.modifiers == KeyModifiers::ALT
+            && let KeyCode::Char(c @ ('i' | 'a' | 'b' | 'v')) = key.code
+        {
+            self.open_catalog_workflow(match c {
+                'i' => 0,
+                'a' => 1,
+                'b' => 2,
+                _ => 3,
+            });
+            return Ok(false);
+        }
         self.query_dragging = false;
         if self.search_settings.is_some() {
             self.handle_settings_key(key);

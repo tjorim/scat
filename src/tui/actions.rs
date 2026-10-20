@@ -183,6 +183,19 @@ impl TuiApp {
             );
         }
         add("Back / exit", "Esc", KeyCode::Esc, true);
+        for (label, shortcut, c) in [
+            ("Catalog information", "Alt+i", 'i'),
+            ("Catalog audit findings and thresholds", "Alt+a", 'a'),
+            ("Administration: build / rebuild catalog", "Alt+b", 'b'),
+            ("Administration: vc passthrough", "Alt+v", 'v'),
+        ] {
+            actions.push(Action {
+                label,
+                shortcut,
+                key: KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT),
+                available: true,
+            });
+        }
         actions.push(Action {
             label: "Quit",
             shortcut: "Ctrl+C",

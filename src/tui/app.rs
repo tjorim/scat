@@ -16,6 +16,7 @@ impl TuiApp {
     ) -> Result<Self> {
         let mut app = Self {
             workflow: None,
+            pending_administration: None,
             workflow_config: None,
             workflow_sources: None,
             inspection_worker: None,

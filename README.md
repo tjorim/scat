@@ -461,3 +461,6 @@ This project was developed with significant assistance from AI coding assistants
 ## License
 
 See [LICENSE](LICENSE).
+
+See [TUI option coverage and administration](docs/TUI_OPTIONS.md) for catalog
+information, audit controls, explicit build/vc execution, and the CLI coverage matrix.

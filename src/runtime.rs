@@ -84,7 +84,7 @@ pub fn verbosity_directive(verbose: u8) -> &'static str {
     }
 }
 
-fn which_vc() -> Option<PathBuf> {
+pub fn which_vc() -> Option<PathBuf> {
     find_vc_on_path(env::var_os("PATH").as_deref())
 }
 
