@@ -2535,3 +2535,46 @@ fn inspection_navigation_keeps_results_and_terminal_selection_usable() {
     app.handle_key(key(KeyCode::Esc)).unwrap();
     assert!(app.inspection.is_none());
 }
+
+#[test]
+fn constrained_terminal_modes_cover_views_and_overlays() {
+    use super::capabilities::{Capabilities, ColorMode, GlyphMode};
+    use ratatui::{Terminal, backend::TestBackend, style::Color};
+
+    let db = super::make_test_db();
+    let mut app = make_app(db.path());
+    app.terminal_modes = Capabilities::detect(GlyphMode::Ascii, ColorMode::Mono, true);
+    app.detail = Some(detail_row("/catalog/scripts/a.py"));
+    app.cached_preview_lines = super::highlight::highlight_lines("print(1)", "python");
+    for (width, height) in [(120, 40), (45, 15)] {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        for mode in [
+            ViewMode::Browse,
+            ViewMode::Detail,
+            ViewMode::DetailDiff,
+            ViewMode::Stats,
+            ViewMode::DepGraph,
+        ] {
+            app.mode = mode;
+            for popup in [None, Some(false), Some(true)] {
+                app.popup = None;
+                if let Some(palette) = popup {
+                    app.handle_key(KeyEvent::new(
+                        KeyCode::F(if palette { 4 } else { 1 }),
+                        KeyModifiers::NONE,
+                    ))
+                    .unwrap();
+                }
+                terminal.draw(|f| super::render::draw(f, &mut app)).unwrap();
+                let buffer = terminal.backend().buffer();
+                assert!(
+                    buffer.content.iter().all(|cell| cell.symbol().is_ascii()
+                        && cell.fg == Color::Reset
+                        && cell.bg == Color::Reset
+                        && cell.underline_color == Color::Reset),
+                    "{mode:?} at {width}x{height}"
+                );
+            }
+        }
+    }
+}

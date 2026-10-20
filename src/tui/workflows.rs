@@ -619,7 +619,9 @@ pub(super) fn draw(frame: &mut ratatui::Frame<'_>, d: &Dialog) {
                         .borders(Borders::ALL)
                         .title(*label)
                         .border_style(if i == d.selected {
-                            Style::default().fg(Color::Cyan)
+                            Style::default()
+                                .fg(Color::Cyan)
+                                .add_modifier(ratatui::style::Modifier::BOLD)
                         } else {
                             Style::default()
                         }),

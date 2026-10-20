@@ -15,6 +15,7 @@ impl TuiApp {
         resolver: PathResolver,
     ) -> Result<Self> {
         let mut app = Self {
+            terminal_modes: super::capabilities::Capabilities::default(),
             workflow: None,
             pending_administration: None,
             workflow_config: None,

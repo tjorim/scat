@@ -265,6 +265,15 @@ pub enum Commands {
 
     /// Launch the interactive TUI browser.
     Tui {
+        /// Glyph mode (auto uses the effective locale).
+        #[arg(long, env = "SCAT_TUI_GLYPHS", value_enum, default_value = "auto")]
+        glyphs: crate::tui::capabilities::GlyphMode,
+        /// Palette; --no-color and NO_COLOR always disable colors.
+        #[arg(long, env = "SCAT_TUI_COLORS", value_enum, default_value = "auto")]
+        colors: crate::tui::capabilities::ColorMode,
+        /// Report detected session and resolved modes without opening the TUI.
+        #[arg(long)]
+        terminal_info: bool,
         #[arg(long, env = "SCAT_MAPPING")]
         mapping: Option<PathBuf>,
     },

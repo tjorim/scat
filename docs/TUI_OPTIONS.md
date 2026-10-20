@@ -62,3 +62,54 @@ Global overrides inside editors are rejected to retain the active source paths.
 
 Table-form CLI output maps to native TUI views. Structured output is generated
 in the workflow editor; build/vc output appears in the suspended terminal.
+
+## Terminal modes and remote sessions
+
+`scat tui --terminal-info` reports resolved modes, effective locale, TERM,
+interactive stdin/stdout, SSH and known multiplexer hints without opening a
+catalog or changing the terminal. These are environment hints, not capability
+probes; no cursor-position or clipboard query is sent. Unknown terminal,
+clipboard and forwarding capabilities remain unverified. Detection never uses
+the operating system release.
+
+Use `--glyphs auto|unicode|ascii` (`SCAT_TUI_GLYPHS`) and
+`--colors auto|full|reduced|mono` (`SCAT_TUI_COLORS`) to override defaults.
+Flags override the corresponding environment setting. `--no-color` or nonempty
+`NO_COLOR` always selects monochrome, including when `--colors full` is set.
+The completed frame is converted consistently across syntax highlighting,
+charts, help, palettes, dialogs and status messages. Selection uses reverse
+video and focus retains bold borders; warnings/errors also have text labels.
+Reduced mode uses the basic eight ANSI colors. Small screens retain the
+existing active-pane/tab layout.
+
+Auto glyphs uses the first nonempty value of `LC_ALL`, `LC_CTYPE`, `LANG`;
+a locale containing `UTF-8` or `UTF8` enables Unicode. Missing/other locales
+select ASCII conservatively. This cannot prove font support; use `--glyphs
+ascii` if borders or spinners look broken. ASCII converts borders, arrows,
+spinners and charts to single-cell printable characters. Other non-ASCII text
+is displayed as `?` (underlying query/catalog/copy text is preserved). Input
+continues to use UTF-8 internally; legacy locale input bytes are not transcoded.
+Auto color uses full color for `TERM=*256color*` or
+`COLORTERM=truecolor|24bit`, otherwise the reduced palette. Explicit Unicode
+or full color can override these conservative guesses.
+
+Both stdin and stdout must be terminals; unset `TERM` or `TERM=dumb` is rejected
+before fullscreen/raw-mode setup with guidance to use `scat search`. Redirected
+output never receives a broken fullscreen UI. `--terminal-info` works with
+redirection and dumb terminals.
+
+SSH is inferred from `SSH_CONNECTION`/`SSH_TTY`, tmux from `TMUX`, and
+screen-compatible sessions from `STY`/`TERM=screen*`. These do **not** prove
+clipboard access. F3 sends a base64 OSC 52 clipboard request; successful writing
+only confirms that the request was sent. Over SSH it must reach the **local**
+terminal, whose permissions decide whether to accept it. tmux/screen may filter
+requests; forwarding depends on their version/configuration. Scat sends the
+standard OSC request and does not assume or force multiplexer passthrough.
+
+For reliable native copying, press F2 to freeze redraws and release mouse
+capture, select text, then use your local terminal's Copy shortcut (often
+Ctrl+Shift+C or Cmd+C). F2/Esc resumes. Native shortcuts vary by terminal;
+Ctrl+C inside the application exits. Paste with the terminal's Paste shortcut
+(often Ctrl+Shift+V or Cmd+V); bracketed paste inserts normalized text into the
+search input rather than executing commands. External viewers suspend raw,
+mouse and bracketed-paste modes and restore them on return, including errors.

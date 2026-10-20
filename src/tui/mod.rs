@@ -24,6 +24,7 @@ use scat_core::core::script_view::{ScriptView, logical_parent_dir};
 
 mod actions;
 mod app;
+pub mod capabilities;
 mod clipboard;
 mod detail;
 mod detail_worker;
@@ -170,6 +171,7 @@ enum ScrollCommand {
     Bottom,
 }
 struct TuiApp {
+    terminal_modes: capabilities::Capabilities,
     workflow: Option<workflows::Dialog>,
     pending_administration: Option<Vec<String>>,
     workflow_config: Option<PathBuf>,
@@ -322,6 +324,11 @@ fn inner_rect(outer: Rect) -> Rect {
         height: outer.height.saturating_sub(2),
     }
 }
+pub struct RunOptions {
+    pub bookmarks: std::collections::HashMap<String, String>,
+    pub terminal_modes: capabilities::Capabilities,
+}
+
 pub fn run(
     db_path: &Path,
     embeddings_path: &Path,
@@ -329,8 +336,9 @@ pub fn run(
     source_embeddings: &Path,
     source_config: Option<&Path>,
     resolver: PathResolver,
-    bookmarks: std::collections::HashMap<String, String>,
+    options: RunOptions,
 ) -> Result<()> {
+    options.terminal_modes.validate()?;
     let search_worker = SearchWorker::new(db_path)?;
     let detail_worker = DetailWorker::new(db_path)?;
     let diff_worker = DiffWorker::new(db_path)?;
@@ -347,7 +355,8 @@ pub fn run(
     app.inspection_worker = Some(inspection::Worker::new(db_path, embeddings_path)?);
     app.workflow_sources = Some((source_db.to_owned(), source_embeddings.to_owned()));
     app.workflow_config = source_config.map(Path::to_owned);
-    app.bookmarks = bookmarks;
+    app.bookmarks = options.bookmarks;
+    app.terminal_modes = options.terminal_modes;
     // Keep the parent alive when the foreground child handles Ctrl+C. In raw
     // mode the TUI still receives Ctrl+C as a key and exits normally.
     ctrlc::set_handler(|| {})

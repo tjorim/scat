@@ -171,7 +171,10 @@ Press **F1** in any TUI view for contextual help, or **F4** to search the
 command palette. The palette shows shortcuts and marks unavailable actions;
 Enter runs the selected action and Esc closes either popup. Search input keeps
 ordinary characters, including `?`, as text. F2 toggles native terminal text
-selection and F3 copies the focused content.
+selection and F3 copies the focused content. Use `scat tui --terminal-info` to
+inspect terminal/session hints, `--glyphs ascii` for constrained fonts/locales,
+and `--colors reduced|mono` or global `--no-color` to limit colors. See
+[terminal modes and SSH guidance](docs/TUI_OPTIONS.md#terminal-modes-and-remote-sessions).
 
 Wide terminals show all panes. Below 110 columns or 30 body rows, the active
 pane is shown with tabs; use Tab/Shift+Tab or click a tab to switch panes.

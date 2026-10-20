@@ -41,6 +41,22 @@ fn run(cli: Cli) -> Result<()> {
     let no_color_env = std::env::var_os("NO_COLOR");
     let no_color = cli::resolve_no_color(cli.no_color, no_color_env.as_deref());
 
+    // Diagnose terminal suitability before catalog/config access or fullscreen setup.
+    if let Commands::Tui {
+        glyphs,
+        colors,
+        terminal_info,
+        ..
+    } = &cli.command
+    {
+        let terminal = tui::capabilities::Capabilities::detect(*glyphs, *colors, no_color);
+        if *terminal_info {
+            println!("{}", terminal.report());
+            return Ok(());
+        }
+        terminal.validate()?;
+    }
+
     // Load config early; provides db_path fallback and index settings.
     let scat_config =
         load_vc_config(cli.config.as_deref()).with_context(|| "Failed to load config")?;
@@ -109,7 +125,13 @@ fn run(cli: Cli) -> Result<()> {
         .unwrap_or_else(|| scat_core::core::embeddings::sidecar_path(db_path));
 
     match cli.command {
-        Commands::Tui { mapping } => {
+        Commands::Tui {
+            mapping,
+            glyphs,
+            colors,
+            terminal_info: _,
+        } => {
+            let terminal = tui::capabilities::Capabilities::detect(glyphs, colors, no_color);
             let resolver = match mapping.as_deref() {
                 Some(path) => PathResolver::from_file(path)
                     .with_context(|| format!("Failed to load mapping file: {}", path.display()))?,
@@ -122,7 +144,10 @@ fn run(cli: Cli) -> Result<()> {
                 &embeddings_path,
                 cli.config.as_deref(),
                 resolver,
-                scat_config.bookmarks,
+                tui::RunOptions {
+                    bookmarks: scat_config.bookmarks,
+                    terminal_modes: terminal,
+                },
             );
         }
         Commands::Catalog { command } => {
