@@ -70,7 +70,8 @@ pub(super) fn draw_deps(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
         frame,
         area,
         block,
-        &labels,
+        labels.len(),
+        |i| labels[i].clone(),
         app.deps_selected,
         &mut app.deps_state,
     );

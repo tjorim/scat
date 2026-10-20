@@ -56,7 +56,7 @@ impl TuiApp {
             "Copy focused content",
             "F3",
             KeyCode::F(3),
-            self.copy_target().is_some(),
+            self.copy_kind().is_some(),
         );
         if self.inspection.is_some() {
             add("Open inspected script", "Enter", KeyCode::Enter, true);

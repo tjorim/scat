@@ -7,6 +7,10 @@ use scat_core::core::script_view::{ListField, ScriptView};
 
 use super::TuiApp;
 
+/// The detail view's per-frame lines: every section up to and including the
+/// "Preview" heading. The preview itself is `app.preview_text`, which the
+/// view renders as a cached tail after these lines when
+/// [`shows_preview`] holds, rather than cloning it every frame.
 pub(super) fn detail_lines(app: &TuiApp) -> Vec<Line<'static>> {
     if app.detail_loading {
         return vec![Line::from("Loading…")];
@@ -107,16 +111,42 @@ pub(super) fn detail_lines(app: &TuiApp) -> Vec<Line<'static>> {
         }
     }
 
-    if !view.content().is_empty() {
+    if shows_preview(app) {
         lines.push(Line::from(""));
         lines.push(section("Preview"));
-        // Reuse the syntax-highlighted lines computed once by
-        // `detail_worker::load_detail`, rather than re-splitting (and
-        // re-highlighting) the raw content on every render.
-        lines.extend(app.cached_preview_lines.iter().cloned());
     }
 
     lines
+}
+
+/// Whether the detail view ends with the script's preview (its content is
+/// non-empty), i.e. whether `app.preview_text` follows [`detail_lines`].
+pub(super) fn shows_preview(app: &TuiApp) -> bool {
+    !app.detail_loading
+        && app
+            .detail
+            .as_ref()
+            .is_some_and(|row| !ScriptView::new(row).content().is_empty())
+}
+
+/// The whole detail view as plain text (for copying), preview included.
+pub(super) fn detail_text(app: &TuiApp) -> String {
+    let head = detail_lines(app);
+    let tail: &[Line<'static>] = if shows_preview(app) {
+        app.preview_text.lines()
+    } else {
+        &[]
+    };
+    head.iter()
+        .chain(tail)
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Format a `scripts` row field with the [`row_display`] semantics used by the

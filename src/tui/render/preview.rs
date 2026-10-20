@@ -3,11 +3,12 @@
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
-use ratatui::text::{Span, Text};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders};
 
+use super::super::wrapped_text::WrappedText;
 use super::super::{Focus, TuiApp};
-use super::common::{clamp_scroll_offset, focus_border, spinner_char};
+use super::common::{draw_wrapped, focus_border, spinner_char};
 
 /// Title for the catalog preview pane: current scroll position and the
 /// script's total line count, when known.
@@ -25,53 +26,37 @@ pub(super) fn draw_preview(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) 
     if app.detail_loading {
         app.preview_scroll = 0;
     }
-    let text: Text = if app.detail_loading {
-        Text::from(format!("{spinner} Loading…"))
-    } else if app.cached_preview_lines.is_empty() && app.detail.is_some() {
-        Text::from(Span::styled(
-            "(empty)",
-            Style::default().fg(Color::DarkGray),
-        ))
+    let mut placeholder = WrappedText::default();
+    let (head, tail) = if app.detail_loading {
+        (
+            vec![Line::from(format!("{spinner} Loading…"))],
+            &mut placeholder,
+        )
+    } else if app.preview_text.is_empty() && app.detail.is_some() {
+        (
+            vec![Line::from(Span::styled(
+                "(empty)",
+                Style::default().fg(Color::DarkGray),
+            ))],
+            &mut placeholder,
+        )
     } else {
-        Text::from(app.cached_preview_lines.clone())
+        (Vec::new(), &mut app.preview_text)
     };
-    let paragraph = Paragraph::new(text).wrap(Wrap { trim: false });
-    let rendered_rows = paragraph.line_count(area.width.saturating_sub(2));
-    clamp_scroll_offset(
-        &mut app.preview_scroll,
-        paragraph.line_count(area.width.saturating_sub(2)),
-        area,
-    );
-    let title = if app.detail_loading {
-        "Preview (loading…)".to_string()
-    } else {
-        preview_title(app.preview_scroll, app.preview_total_lines)
-    };
-    frame.render_widget(
-        paragraph
-            .scroll((
-                if app.detail_loading {
-                    0
-                } else {
-                    app.preview_scroll
-                },
-                0,
-            ))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(title)
-                    .border_style(focus_border(app.focus, Focus::Preview)),
-            ),
-        area,
-    );
-    super::common::draw_scrollbar(
-        frame,
-        area,
-        rendered_rows,
-        usize::from(app.preview_scroll),
-        usize::from(area.height.saturating_sub(2)),
-    );
+    let loading = app.detail_loading;
+    let total_lines = app.preview_total_lines;
+    let border_style = focus_border(app.focus, Focus::Preview);
+    draw_wrapped(frame, area, &mut app.preview_scroll, head, tail, |scroll| {
+        let title = if loading {
+            "Preview (loading…)".to_string()
+        } else {
+            preview_title(scroll, total_lines)
+        };
+        Block::default()
+            .borders(Borders::ALL)
+            .title(title)
+            .border_style(border_style)
+    });
 }
 
 #[cfg(test)]

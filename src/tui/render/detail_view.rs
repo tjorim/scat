@@ -1,15 +1,14 @@
 //! Full-screen views: the script's catalog detail, and its diff.
 
-use std::borrow::Cow;
-
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Paragraph};
 
+use super::super::wrapped_text::WrappedText;
 use super::super::{RegionKind, TuiApp, detail};
-use super::common::{clamp_scroll_offset, hint_key, spinner_char};
+use super::common::{draw_wrapped, hint_key, spinner_char};
 
 pub(super) fn draw_detail_view(frame: &mut Frame<'_>, app: &mut TuiApp) {
     let root = Layout::default()
@@ -30,35 +29,28 @@ pub(super) fn draw_detail_view(frame: &mut Frame<'_>, app: &mut TuiApp) {
             app.detail_scroll = selected_line.saturating_sub(viewport - 1);
         }
     }
-    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
-    let rendered_rows = paragraph.line_count(root[0].width.saturating_sub(2));
-    clamp_scroll_offset(
-        &mut app.detail_scroll,
-        paragraph.line_count(root[0].width.saturating_sub(2)),
+    let mut no_preview = WrappedText::default();
+    let tail = if detail::shows_preview(app) {
+        &mut app.preview_text
+    } else {
+        &mut no_preview
+    };
+    draw_wrapped(
+        frame,
         root[0],
-    );
-    frame.render_widget(
-        paragraph.scroll((app.detail_scroll, 0)).block(
+        &mut app.detail_scroll,
+        lines,
+        tail,
+        |scroll| {
             Block::default()
                 .borders(Borders::ALL)
-                .title(format!(
-                    "Script Detail (line {})",
-                    app.detail_scroll.saturating_add(1)
-                ))
+                .title(format!("Script Detail (line {})", scroll.saturating_add(1)))
                 .border_style(
                     Style::default()
                         .fg(Color::Yellow)
                         .add_modifier(Modifier::BOLD),
-                ),
-        ),
-        root[0],
-    );
-    super::common::draw_scrollbar(
-        frame,
-        root[0],
-        rendered_rows,
-        usize::from(app.detail_scroll),
-        usize::from(root[0].height.saturating_sub(2)),
+                )
+        },
     );
     app.record_region(
         root[0],
@@ -111,60 +103,37 @@ pub(super) fn draw_detail_diff_view(frame: &mut Frame<'_>, app: &mut TuiApp) {
     if app.detail_diff_loading {
         app.detail_diff_scroll = 0;
     }
-    let paragraph = Paragraph::new(app.detail_diff_output.as_str()).wrap(Wrap { trim: false });
-    let rendered_rows = paragraph.line_count(root[0].width.saturating_sub(2));
-    clamp_scroll_offset(
-        &mut app.detail_diff_scroll,
-        paragraph.line_count(root[0].width.saturating_sub(2)),
-        root[0],
-    );
-    let (content, title) = if app.detail_diff_loading {
+    let mut placeholder = WrappedText::default();
+    let (head, tail) = if app.detail_diff_loading {
         (
-            Cow::Owned(format!("{spinner} Loading diff…")),
-            "Script Diff (loading…)".to_string(),
+            vec![Line::from(format!("{spinner} Loading diff…"))],
+            &mut placeholder,
         )
     } else {
-        (
-            Cow::Borrowed(app.detail_diff_output.as_str()),
-            format!(
-                "Script Diff (line {})",
-                app.detail_diff_scroll.saturating_add(1)
-            ),
-        )
+        (Vec::new(), &mut app.detail_diff_text)
     };
-    frame.render_widget(
-        Paragraph::new(content)
-            .wrap(Wrap { trim: false })
-            .scroll((
-                if app.detail_diff_loading {
-                    0
-                } else {
-                    app.detail_diff_scroll
-                },
-                0,
-            ))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(title)
-                    .border_style(
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-            ),
-        root[0],
-    );
-    super::common::draw_scrollbar(
+    let loading = app.detail_diff_loading;
+    draw_wrapped(
         frame,
         root[0],
-        if app.detail_diff_loading {
-            0
-        } else {
-            rendered_rows
+        &mut app.detail_diff_scroll,
+        head,
+        tail,
+        |scroll| {
+            let title = if loading {
+                "Script Diff (loading…)".to_string()
+            } else {
+                format!("Script Diff (line {})", scroll.saturating_add(1))
+            };
+            Block::default()
+                .borders(Borders::ALL)
+                .title(title)
+                .border_style(
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )
         },
-        usize::from(app.detail_diff_scroll),
-        usize::from(root[0].height.saturating_sub(2)),
     );
     app.record_region(
         root[0],

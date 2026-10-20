@@ -313,36 +313,33 @@ impl TuiApp {
         self.copy_text(&path, "path");
     }
 
-    pub(super) fn copy_target(&self) -> Option<(String, &'static str)> {
+    /// What F3 would copy in the current view, decided without building the
+    /// text: the footer asks this every frame, and the detail view's full
+    /// text can run to the whole indexed content.
+    pub(super) fn copy_kind(&self) -> Option<CopyKind> {
         Some(match (self.mode, self.focus) {
-            (ViewMode::Browse, Focus::Search) => {
+            (ViewMode::Browse, Focus::Search) => CopyKind::Search,
+            (ViewMode::Browse, Focus::Preview) if !self.detail_loading => CopyKind::Preview,
+            (ViewMode::Browse, Focus::Preview) => return None,
+            (ViewMode::DetailDiff, _) if !self.detail_diff_loading => CopyKind::Diff,
+            (ViewMode::Detail, _) if !self.detail_loading => CopyKind::Detail,
+            (ViewMode::Browse, _) if self.selected_logical_path().is_some() => CopyKind::Path,
+            _ => return None,
+        })
+    }
+
+    pub(super) fn copy_target(&self) -> Option<(String, &'static str)> {
+        Some(match self.copy_kind()? {
+            CopyKind::Search => {
                 let text = self
                     .query_selection()
                     .map_or(self.query.as_str(), |range| &self.query[range]);
                 (text.to_string(), "search")
             }
-            (ViewMode::Browse, Focus::Preview) if !self.detail_loading => {
-                (self.cached_preview.clone(), "catalog content")
-            }
-            (ViewMode::Browse, Focus::Preview) => return None,
-            (ViewMode::DetailDiff, _) if !self.detail_diff_loading => {
-                (self.detail_diff_output.clone(), "diff")
-            }
-            (ViewMode::Detail, _) if !self.detail_loading => {
-                let text = detail::detail_lines(self)
-                    .iter()
-                    .map(|line| {
-                        line.spans
-                            .iter()
-                            .map(|span| span.content.as_ref())
-                            .collect::<String>()
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                (text, "script details")
-            }
-            (ViewMode::Browse, _) => (self.selected_logical_path()?, "path"),
-            _ => return None,
+            CopyKind::Preview => (self.cached_preview.clone(), "catalog content"),
+            CopyKind::Diff => (self.detail_diff_output.clone(), "diff"),
+            CopyKind::Detail => (detail::detail_text(self), "script details"),
+            CopyKind::Path => (self.selected_logical_path()?, "path"),
         })
     }
 
@@ -366,4 +363,14 @@ impl TuiApp {
             Err(err) => format!("Copy failed: {err}"),
         });
     }
+}
+
+/// Source of the text F3 copies; see [`TuiApp::copy_kind`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CopyKind {
+    Search,
+    Preview,
+    Diff,
+    Detail,
+    Path,
 }

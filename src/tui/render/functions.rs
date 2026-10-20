@@ -22,10 +22,28 @@ pub(super) fn draw_functions(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect
         return;
     }
 
-    let labels: Vec<String> = app
-        .functions
-        .iter()
-        .map(|function| {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("Functions")
+        .border_style(border_style);
+
+    if app.functions.is_empty() {
+        let items = vec![ListItem::new(ratatui::text::Span::styled(
+            "No functions indexed.",
+            Style::default().fg(Color::DarkGray),
+        ))];
+        frame.render_widget(List::new(items).block(block), area);
+        return;
+    }
+
+    let functions = &app.functions;
+    render_list_pane(
+        frame,
+        area,
+        block,
+        functions.len(),
+        |i| {
+            let function = &functions[i];
             let doc = if function.docstring.is_empty() {
                 "—"
             } else {
@@ -35,28 +53,7 @@ pub(super) fn draw_functions(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect
                 "{:<20} {:<8} {:>4}  {}",
                 function.name, function.kind, function.line, doc
             )
-        })
-        .collect();
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title("Functions")
-        .border_style(border_style);
-
-    if labels.is_empty() {
-        let items = vec![ListItem::new(ratatui::text::Span::styled(
-            "No functions indexed.",
-            Style::default().fg(Color::DarkGray),
-        ))];
-        frame.render_widget(List::new(items).block(block), area);
-        return;
-    }
-
-    render_list_pane(
-        frame,
-        area,
-        block,
-        &labels,
+        },
         app.functions_selected,
         &mut app.functions_state,
     );
