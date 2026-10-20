@@ -15,6 +15,13 @@ impl TuiApp {
         resolver: PathResolver,
     ) -> Result<Self> {
         let mut app = Self {
+            workflow: None,
+            workflow_config: None,
+            workflow_sources: None,
+            inspection_worker: None,
+            inspection: None,
+            inspection_return: None,
+            inspection_return_mode: ViewMode::Browse,
             search_options: search_worker::SearchOptions::default(),
             result_limit: RESULT_LIMIT,
             bookmarks: std::collections::HashMap::default(),

@@ -253,7 +253,7 @@ fn search_title_prioritizes_error_then_searching() {
     assert_eq!(search_title(true, true), "Search (invalid query)");
 }
 
-fn make_app(db_path: &std::path::Path) -> TuiApp {
+pub(super) fn make_app(db_path: &std::path::Path) -> TuiApp {
     let search_worker = SearchWorker::new(db_path).unwrap();
     let detail_worker = DetailWorker::new(db_path).unwrap();
     let diff_worker = DiffWorker::new(db_path).unwrap();
@@ -2482,4 +2482,39 @@ fn bookmarks_expand_exact_alias_with_cli_fallback() {
             .unwrap()
             .contains("missing → missing (bookmark missing; fallback)")
     );
+}
+
+#[test]
+fn inspection_navigation_keeps_results_and_terminal_selection_usable() {
+    let db = super::make_test_db();
+    let conn = rusqlite::Connection::open(db.path()).unwrap();
+    conn.execute(
+        "UPDATE scripts SET vc_warnings='[{\"kind\":\"stale\"}]'",
+        [],
+    )
+    .unwrap();
+    let mut app = make_app(db.path());
+    app.inspection_worker =
+        Some(super::inspection::Worker::new(db.path(), std::path::Path::new("/missing")).unwrap());
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    app.handle_key(key(KeyCode::F(8))).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while app.inspection.as_ref().unwrap().loading {
+        app.drain_inspection();
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert_eq!(app.inspection.as_ref().unwrap().rows.len(), 1);
+    app.handle_key(key(KeyCode::F(2))).unwrap();
+    app.handle_key(key(KeyCode::Enter)).unwrap();
+    assert!(app.inspection.is_some());
+    app.handle_key(key(KeyCode::Esc)).unwrap();
+    assert!(!app.native_selection);
+    app.handle_key(key(KeyCode::Enter)).unwrap();
+    assert!(app.inspection.is_none());
+    assert_eq!(app.mode, ViewMode::Detail);
+    app.handle_key(key(KeyCode::Esc)).unwrap();
+    assert_eq!(app.inspection.as_ref().unwrap().rows.len(), 1);
+    app.handle_key(key(KeyCode::Esc)).unwrap();
+    assert!(app.inspection.is_none());
 }

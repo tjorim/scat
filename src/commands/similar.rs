@@ -14,13 +14,43 @@ pub fn cmd_similar(
     limit: usize,
     output: OutputFormat,
 ) -> Result<()> {
+    let (results, warning) = load_similar(api, sidecar_path, path, limit)?;
+    if let Some(warning) = warning {
+        eprintln!("{warning}");
+    }
+
+    if output == OutputFormat::Json {
+        print_json(&results);
+        return Ok(());
+    }
+
+    if results.is_empty() {
+        println!("No similar scripts found.");
+        return Ok(());
+    }
+
+    let rows: Vec<Vec<String>> = results
+        .iter()
+        .map(|r| vec![r.logical_path.clone(), format!("{:.3}", r.score)])
+        .collect();
+    println!("{}", render_table(&["Path", "Score"], &rows, false));
+    Ok(())
+}
+
+/// Shared CLI/TUI sidecar consumption and ranking.
+pub fn load_similar(
+    api: &SearchApi,
+    sidecar_path: &Path,
+    path: &str,
+    limit: usize,
+) -> Result<(Vec<SimilarScript>, Option<String>)> {
     if api.get_script(path)?.is_none() {
         anyhow::bail!("script '{path}' not found in catalog");
     }
 
     let Some(sidecar) = EmbeddingsSidecar::open(sidecar_path) else {
         anyhow::bail!(
-            "no embeddings sidecar found at {} — generate one with scat-embed \
+            "no embeddings sidecar found at {} (missing or incompatible) — generate one with scat-embed \
              (see crates/scat-embed) and publish it there to use `scat similar`",
             sidecar_path.display()
         );
@@ -42,33 +72,19 @@ pub fn cmd_similar(
         );
     };
     let results = drop_stale_and_truncate(api, all_ranked, limit);
+    let mut warning = None;
 
     let total_scripts = api.stats()?.total_scripts;
     if (sidecar.len() as i64) < total_scripts {
-        eprintln!(
+        warning = Some(format!(
             "note: embeddings sidecar ({}) covers {}/{total_scripts} cataloged scripts; \
              results may miss scripts added since the last scat-embed run",
             sidecar.model(),
             sidecar.len(),
-        );
+        ));
     }
 
-    if output == OutputFormat::Json {
-        print_json(&results);
-        return Ok(());
-    }
-
-    if results.is_empty() {
-        println!("No similar scripts found.");
-        return Ok(());
-    }
-
-    let rows: Vec<Vec<String>> = results
-        .iter()
-        .map(|r| vec![r.logical_path.clone(), format!("{:.3}", r.score)])
-        .collect();
-    println!("{}", render_table(&["Path", "Score"], &rows, false));
-    Ok(())
+    Ok((results, warning))
 }
 
 /// Drop ranked results for scripts no longer in the catalog, then take the
