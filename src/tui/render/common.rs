@@ -182,6 +182,10 @@ pub(super) fn render_list_pane(
 ) {
     let inner_height = area.height.saturating_sub(2) as usize;
     let len = labels.len();
+    if len == 0 {
+        frame.render_widget(block, area);
+        return;
+    }
     let selected = selected.min(len - 1);
     let offset = scroll_window(state.offset(), selected, len, inner_height);
     *state.offset_mut() = offset;
@@ -194,12 +198,38 @@ pub(super) fn render_list_pane(
         .collect();
 
     render_window(frame, area, block, items, selected - offset);
+    draw_scrollbar(frame, area, len, offset, inner_height);
 }
 
 pub(super) fn clamp_scroll_offset(scroll: &mut u16, line_count: usize, area: Rect) {
     let viewport_lines = usize::from(area.height.saturating_sub(2)).max(1);
     let max_scroll = line_count.saturating_sub(viewport_lines);
     *scroll = (*scroll).min(u16::try_from(max_scroll).unwrap_or(u16::MAX));
+}
+
+/// Scrollbars are indicators; pane wheel/keyboard navigation owns scrolling.
+pub(super) fn draw_scrollbar(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    content: usize,
+    position: usize,
+    viewport: usize,
+) {
+    use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState};
+    if area.width < 2 || area.height < 3 || content <= viewport || viewport == 0 {
+        return;
+    }
+    let track = Rect::new(area.right() - 1, area.y + 1, 1, area.height - 2);
+    let mut state = ScrollbarState::new(content.saturating_sub(viewport).saturating_add(1))
+        .position(position.min(content.saturating_sub(viewport)))
+        .viewport_content_length(viewport);
+    frame.render_stateful_widget(
+        Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None),
+        track,
+        &mut state,
+    );
 }
 
 /// Returns a styled span for a key hint label.
@@ -436,5 +466,30 @@ mod tests {
     #[test]
     fn left_truncate_path_zero_width_returns_empty() {
         assert_eq!(left_truncate_path("/catalog/scripts/分析🚀.py", 0), "");
+    }
+}
+
+#[cfg(test)]
+mod scrollbar_tests {
+    use super::*;
+    use ratatui::{Terminal, backend::TestBackend};
+
+    #[test]
+    fn scrollbar_reaches_final_page_and_omits_empty_or_fitting_content() {
+        let render = |content, position| {
+            let mut terminal = Terminal::new(TestBackend::new(10, 12)).unwrap();
+            terminal
+                .draw(|f| draw_scrollbar(f, f.area(), content, position, 10))
+                .unwrap();
+            (1..11)
+                .map(|y| terminal.backend().buffer()[(9, y)].symbol().to_string())
+                .collect::<Vec<_>>()
+        };
+        let top = render(100, 0);
+        let bottom = render(100, 90);
+        assert_ne!(top, bottom);
+        assert_eq!(top[0], bottom[9]);
+        assert!(render(0, 0).iter().all(|s| s == " "));
+        assert!(render(10, 0).iter().all(|s| s == " "));
     }
 }

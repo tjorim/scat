@@ -27,6 +27,8 @@ impl TuiApp {
             query_area: super::Rect::default(),
             query_dragging: false,
             native_selection: false,
+            popup: None,
+            pane_tabs: Vec::new(),
             results: Vec::new(),
             selected: 0,
             focus: Focus::Search,
@@ -348,6 +350,32 @@ impl TuiApp {
         self.preview_total_lines = preview_total_lines;
         if error.is_some() {
             self.error = error;
+        }
+    }
+}
+
+impl TuiApp {
+    pub(super) fn revision_order(&self) -> Vec<usize> {
+        let mut indices: Vec<usize> = (0..self.checkouts.len()).collect();
+        indices.sort_by_key(|i| {
+            match scat_core::core::db::row_string(&self.checkouts[*i], "revision_type").as_str() {
+                "" | "DEVELOP" => 0,
+                "ROLLBACK" => 1,
+                "WORKING" => 2,
+                "ARCHIVE" => 3,
+                _ => 4,
+            }
+        });
+        indices
+    }
+    pub(super) fn move_revision(&mut self, delta: isize) {
+        let indices = self.revision_order();
+        let current = indices
+            .iter()
+            .position(|i| *i == self.revisions_selected)
+            .unwrap_or(0);
+        if let Some(index) = indices.get(super::move_selection(current, indices.len(), delta)) {
+            self.revisions_selected = *index;
         }
     }
 }

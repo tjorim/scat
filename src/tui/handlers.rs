@@ -6,6 +6,13 @@ use super::{
 impl TuiApp {
     pub(super) fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
         self.query_dragging = false;
+        if self.popup.is_some() {
+            return self.handle_popup_key(key);
+        }
+        if matches!(key.code, KeyCode::F(1 | 4)) {
+            self.popup = Some(super::actions::Popup::new(key.code == KeyCode::F(4)));
+            return Ok(false);
+        }
         if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
             return Ok(true);
         }
@@ -236,8 +243,7 @@ impl TuiApp {
                 code: KeyCode::Char('k'),
                 ..
             } if self.focus == Focus::Revisions => {
-                self.revisions_selected =
-                    move_selection(self.revisions_selected, self.checkouts.len(), -1);
+                self.move_revision(-1);
             }
             KeyEvent {
                 code: KeyCode::Down,
@@ -247,8 +253,7 @@ impl TuiApp {
                 code: KeyCode::Char('j'),
                 ..
             } if self.focus == Focus::Revisions => {
-                self.revisions_selected =
-                    move_selection(self.revisions_selected, self.checkouts.len(), 1);
+                self.move_revision(1);
             }
             KeyEvent {
                 code: KeyCode::Char('f'),

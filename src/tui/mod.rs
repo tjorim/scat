@@ -22,6 +22,7 @@ use scat_core::core::db::{JsonRow, row_string as str_field};
 use scat_core::core::resolve::PathResolver;
 use scat_core::core::script_view::{ScriptView, logical_parent_dir};
 
+mod actions;
 mod app;
 mod clipboard;
 mod detail;
@@ -180,6 +181,8 @@ struct TuiApp {
     query_dragging: bool,
     /// Freeze the display and release mouse capture for terminal selection.
     native_selection: bool,
+    popup: Option<actions::Popup>,
+    pane_tabs: Vec<(Rect, Focus)>,
     results: Vec<JsonRow>,
     selected: usize,
     focus: Focus,
@@ -375,6 +378,7 @@ pub fn run(db_path: &Path, resolver: PathResolver) -> Result<()> {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
                     let was_selecting = app.native_selection;
+                    let had_popup = app.popup.is_some();
                     if !was_selecting {
                         app.flash = None;
                     }
@@ -383,8 +387,10 @@ pub fn run(db_path: &Path, resolver: PathResolver) -> Result<()> {
                     }
                     // A handled keypress may change scroll, selection, or
                     // mode; repaint once (user-paced, so never a flood).
-                    app.needs_redraw |=
-                        !app.native_selection || was_selecting != app.native_selection;
+                    app.needs_redraw |= !app.native_selection
+                        || was_selecting != app.native_selection
+                        || had_popup
+                        || app.popup.is_some();
                 }
                 Event::Paste(text) => {
                     app.needs_redraw |= app.handle_paste(&text);

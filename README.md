@@ -402,3 +402,19 @@ This project was developed with significant assistance from AI coding assistants
 ## License
 
 See [LICENSE](LICENSE).
+
+### TUI discovery and small terminals
+
+Press **F1** in any TUI view for contextual help, or **F4** to search the
+command palette. The palette shows shortcuts and marks unavailable actions;
+Enter runs the selected action and Esc closes either popup. Search input keeps
+ordinary characters, including `?`, as text. F2 toggles native terminal text
+selection and F3 copies the focused content.
+
+Wide terminals show all panes. Below 110 columns or 30 body rows, the active
+pane is shown with tabs; use Tab/Shift+Tab or click a tab to switch panes.
+Focus and selection survive resizing and fullscreen changes. Scrollbars are
+position indicators; use the existing keyboard shortcuts or mouse wheel to
+navigate. Revision tables keep type and checkout path visible, hide owner
+below 72 columns, and hide timestamp below 48 columns. `*` marks the active
+revision; Enter opens the selected revision diff and Esc returns to its row.

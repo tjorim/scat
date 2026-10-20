@@ -121,6 +121,9 @@ pub(super) fn draw_results(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) 
     }
 
     render_window(frame, area, block, items, selected - offset);
+    let content = app.results.iter().map(result_height).sum();
+    let position = app.results[..offset].iter().map(result_height).sum();
+    super::common::draw_scrollbar(frame, area, content, position, inner_height);
 }
 
 #[cfg(test)]

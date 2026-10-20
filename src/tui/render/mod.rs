@@ -16,6 +16,7 @@ mod footer;
 mod functions;
 mod header;
 mod metadata;
+mod popup;
 mod preview;
 mod results;
 mod revisions;
@@ -68,6 +69,13 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut TuiApp) {
             footer,
         );
     }
+    if !app.native_selection && app.flash.is_none() {
+        let area = frame.area();
+        let footer =
+            ratatui::layout::Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1);
+        draw_footer(frame, app, footer);
+    }
+    popup::draw_popup(frame, app);
 }
 
 fn draw_inner(frame: &mut Frame<'_>, app: &mut TuiApp) {
@@ -75,6 +83,7 @@ fn draw_inner(frame: &mut Frame<'_>, app: &mut TuiApp) {
     // Rebuilt every frame; the mouse handler hit-tests against the panes as
     // they were last drawn.
     app.click_regions.clear();
+    app.pane_tabs.clear();
     match app.mode {
         ViewMode::Detail => {
             draw_detail_view(frame, app);
@@ -105,7 +114,7 @@ fn draw_inner(frame: &mut Frame<'_>, app: &mut TuiApp) {
         .constraints([
             Constraint::Length(1),
             Constraint::Length(3),
-            Constraint::Min(10),
+            Constraint::Min(0),
             Constraint::Length(1),
         ])
         .split(frame.area());
@@ -126,7 +135,7 @@ fn draw_browse_fullscreen(frame: &mut Frame<'_>, app: &mut TuiApp) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
-            Constraint::Min(10),
+            Constraint::Min(0),
             Constraint::Length(1),
         ])
         .split(frame.area());
@@ -134,44 +143,15 @@ fn draw_browse_fullscreen(frame: &mut Frame<'_>, app: &mut TuiApp) {
     draw_header(frame, app, root[0]);
     app.record_click_area(root[0], RegionKind::Header, 0);
     let pane = root[1];
-    match app.focus {
-        Focus::Search => {
-            draw_search(frame, app, pane);
-            app.record_click_area(pane, RegionKind::Search, 0);
-        }
-        Focus::Results => {
-            draw_results(frame, app, pane);
-            app.record_region_with_row_index(
-                pane,
-                RegionKind::Results,
-                app.results_row_index.clone(),
-            );
-        }
-        Focus::Preview => {
-            draw_preview(frame, app, pane);
-            app.record_region(pane, RegionKind::Preview, usize::from(app.preview_scroll));
-        }
-        Focus::Deps => {
-            draw_deps(frame, app, pane);
-            app.record_region(pane, RegionKind::Deps, app.deps_state.offset());
-        }
-        Focus::Functions => {
-            draw_functions(frame, app, pane);
-            app.record_region(pane, RegionKind::Functions, app.functions_state.offset());
-        }
-        Focus::Revisions => {
-            draw_revisions(frame, app, pane);
-            app.record_region(
-                pane,
-                RegionKind::Revisions,
-                usize::from(app.revisions_scroll),
-            );
-        }
-    }
+    draw_focused_pane(frame, app, pane, app.focus);
     draw_footer(frame, app, root[2]);
 }
 
 fn draw_body(frame: &mut Frame<'_>, app: &mut TuiApp, area: ratatui::layout::Rect) {
+    if area.width < 110 || area.height < 30 {
+        draw_compact_body(frame, app, area);
+        return;
+    }
     let columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(34), Constraint::Percentage(66)])
@@ -213,9 +193,89 @@ fn draw_body(frame: &mut Frame<'_>, app: &mut TuiApp, area: ratatui::layout::Rec
         RegionKind::Functions,
         app.functions_state.offset(),
     );
-    app.record_region(
-        right[4],
-        RegionKind::Revisions,
-        usize::from(app.revisions_scroll),
+}
+
+/// Small screens show the active pane; focus remains the source of truth
+/// across resize and fullscreen transitions.
+fn draw_compact_body(frame: &mut Frame<'_>, app: &mut TuiApp, area: ratatui::layout::Rect) {
+    use ratatui::widgets::Tabs;
+    let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(area);
+    let focuses = [
+        Focus::Results,
+        Focus::Preview,
+        Focus::Deps,
+        Focus::Functions,
+        Focus::Revisions,
+    ];
+    let active = focuses.iter().position(|f| *f == app.focus).unwrap_or(0);
+    frame.render_widget(
+        Tabs::new([
+            "Results",
+            "Preview",
+            "Dependencies",
+            "Functions",
+            "Revisions",
+        ])
+        .select(active)
+        .padding("", ""),
+        rows[0],
     );
+    let mut x = rows[0].x;
+    for (label, focus) in [
+        "Results",
+        "Preview",
+        "Dependencies",
+        "Functions",
+        "Revisions",
+    ]
+    .into_iter()
+    .zip(focuses)
+    {
+        let width = (label.len() as u16).min(rows[0].right().saturating_sub(x));
+        app.pane_tabs.push((
+            ratatui::layout::Rect::new(x, rows[0].y, width, rows[0].height),
+            focus,
+        ));
+        x = x.saturating_add(label.len() as u16 + 3);
+    }
+    // Reuse fullscreen pane rendering and its mouse regions without changing
+    // either focus or fullscreen state.
+    draw_focused_pane(frame, app, rows[1], focuses[active]);
+}
+
+fn draw_focused_pane(
+    frame: &mut Frame<'_>,
+    app: &mut TuiApp,
+    pane: ratatui::layout::Rect,
+    focus: Focus,
+) {
+    match focus {
+        Focus::Search => {
+            draw_search(frame, app, pane);
+            app.record_click_area(pane, RegionKind::Search, 0);
+        }
+        Focus::Results => {
+            draw_results(frame, app, pane);
+            app.record_region_with_row_index(
+                pane,
+                RegionKind::Results,
+                app.results_row_index.clone(),
+            );
+        }
+        Focus::Preview => {
+            draw_preview(frame, app, pane);
+            app.record_region(pane, RegionKind::Preview, usize::from(app.preview_scroll));
+        }
+        Focus::Deps => {
+            draw_deps(frame, app, pane);
+            app.record_region(pane, RegionKind::Deps, app.deps_state.offset());
+        }
+        Focus::Functions => {
+            draw_functions(frame, app, pane);
+            app.record_region(pane, RegionKind::Functions, app.functions_state.offset());
+        }
+        Focus::Revisions => {
+            draw_revisions(frame, app, pane);
+        }
+    }
 }

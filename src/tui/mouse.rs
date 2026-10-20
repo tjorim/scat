@@ -72,6 +72,9 @@ impl TuiApp {
     /// Handle a mouse event, returning whether it changed anything (and thus
     /// needs a repaint). Drags select search text; bare movement is ignored.
     pub(super) fn handle_mouse(&mut self, event: MouseEvent) -> Result<bool> {
+        if self.popup.is_some() {
+            return Ok(false);
+        }
         if self.native_selection {
             return Ok(false);
         }
@@ -124,6 +127,14 @@ impl TuiApp {
     }
 
     pub(super) fn handle_left_click(&mut self, col: u16, row: u16) -> Result<bool> {
+        if let Some((_, focus)) = self
+            .pane_tabs
+            .iter()
+            .find(|(area, _)| area.contains((col, row).into()))
+        {
+            self.focus = *focus;
+            return Ok(true);
+        }
         let double = self.register_click(col, row);
         let Some((kind, index)) = hit_test(&self.click_regions, col, row) else {
             return Ok(false);
@@ -197,6 +208,14 @@ impl TuiApp {
             }
             RegionKind::Revisions => {
                 self.focus = Focus::Revisions;
+                if index < self.checkouts.len() {
+                    self.revisions_selected = index;
+                    if double {
+                        self.dispatch_diff_against_selected_revision()?;
+                        self.diff_return_mode = ViewMode::Browse;
+                        self.mode = ViewMode::DetailDiff;
+                    }
+                }
                 Ok(true)
             }
             RegionKind::DetailBody => self.handle_detail_body_click(index),
@@ -246,13 +265,9 @@ impl TuiApp {
                 Ok(true)
             }
             RegionKind::Revisions => {
-                let next = move_selection(
-                    self.revisions_selected,
-                    self.checkouts.len(),
-                    delta as isize,
-                );
-                if next != self.revisions_selected {
-                    self.revisions_selected = next;
+                let previous = self.revisions_selected;
+                self.move_revision(delta as isize);
+                if previous != self.revisions_selected {
                     return Ok(true);
                 }
                 Ok(false)

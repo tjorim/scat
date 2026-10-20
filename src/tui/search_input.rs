@@ -79,6 +79,14 @@ impl TuiApp {
     }
 
     pub(super) fn handle_paste(&mut self, text: &str) -> bool {
+        if let Some(popup) = &mut self.popup {
+            if popup.palette {
+                popup.query.extend(text.chars().filter(|c| !c.is_control()));
+                popup.selected = 0;
+                return true;
+            }
+            return false;
+        }
         if self.native_selection {
             return false;
         }
