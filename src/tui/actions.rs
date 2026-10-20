@@ -185,6 +185,7 @@ impl TuiApp {
         add("Back / exit", "Esc", KeyCode::Esc, true);
         for (label, shortcut, c) in [
             ("Catalog information", "Alt+i", 'i'),
+            ("Host diagnostics (scat doctor)", "Alt+d", 'd'),
             ("Catalog audit findings and thresholds", "Alt+a", 'a'),
             ("Administration: build / rebuild catalog", "Alt+b", 'b'),
             ("Administration: vc passthrough", "Alt+v", 'v'),

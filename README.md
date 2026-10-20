@@ -467,3 +467,48 @@ See [LICENSE](LICENSE).
 
 See [TUI option coverage and administration](docs/TUI_OPTIONS.md) for catalog
 information, audit controls, explicit build/vc execution, and the CLI coverage matrix.
+
+### Host diagnostics
+
+Run `scat doctor` (or `scat doctor --json` for support tooling) without a working
+catalog or privileged access. In the TUI, choose **Host diagnostics** from F4 or
+press **Alt+d**, then Enter. Escape cancels a running diagnostics request. With
+a selected script, this view queries its mapped host-local path and optional RPM
+provenance. CLI examples:
+
+```sh
+scat --db /shared/catalog.sqlite doctor --json
+scat doctor /logical/script --mapping mapping.yaml --rpm --json
+```
+
+Doctor reports terminal capabilities using the same detection as the TUI,
+source/catalog availability, catalog build age, existing cache freshness and the
+predicted read path, mount restrictions, viewer candidates and policy state.
+It never refreshes the cache or changes configuration or system policy. A normal
+catalog read may refresh a stale cache, so its eventual read path can differ
+from doctor's prediction. TUI diagnostics run in a captured worker; terminal
+interactivity in that worker describes its pipes. `scat tui --terminal-info`
+reports the foreground terminal directly.
+
+JSON uses `schema_version: 1`; unavailable tools and timed-out probes return
+explicit unknown/unavailable results. Filesystem probes have six-second budgets;
+individual tool invocations have two-second budgets. Raw command stderr, viewer
+arguments, arbitrary configuration values and credential-bearing mount options
+are omitted. Review paths and host identifiers before sharing support output.
+
+RPM provenance belongs to the queried host and resolved path, independently of
+catalog metadata or indexing-host paths. Only the selected file is hashed:
+size, mode, mtime, link target and SHA-256/SHA-512 digests are compared with RPM
+metadata. `unchanged` applies to these checks; ownership names, capabilities and
+security labels are outside this verification scope. Unsupported digest
+algorithms, RPM failures and unavailable files are `unverifiable`.
+
+A readable catalog on a `noexec` mount is usable; executing a viewer from that
+mount is a separate operation. `PermissionDenied` alone does not establish a
+policy denial. For a selected path, doctor makes bounded, read-only recent audit queries and
+reports counts of matching records and denial markers. Raw logs are omitted;
+no matches and inaccessible logs remain unknown. It also suggests audit commands
+for further investigation. An active fapolicyd service does not prove enforcement.
+See Red Hat's [SELinux troubleshooting](https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/9/html/using_selinux/assembly_troubleshooting-problems-related-to-selinux_using-selinux)
+and [fapolicyd guidance](https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/10/html/security_hardening/blocking-and-allowing-applications-by-using-fapolicyd)
+for administrator-owned investigations.
