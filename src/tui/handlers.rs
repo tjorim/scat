@@ -5,6 +5,14 @@ use super::{
 
 impl TuiApp {
     pub(super) fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
+        if self.workflow.is_some() {
+            self.workflow_key(key);
+            return Ok(false);
+        }
+        if !self.native_selection && matches!(key.code, KeyCode::F(11 | 12)) {
+            self.open_workflow(key.code == KeyCode::F(11));
+            return Ok(false);
+        }
         self.query_dragging = false;
         if self.search_settings.is_some() {
             self.handle_settings_key(key);

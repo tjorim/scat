@@ -118,6 +118,9 @@ fn run(cli: Cli) -> Result<()> {
             return tui::run(
                 &catalog_read_path(db_path, &cache_options),
                 &catalog_read_path(&embeddings_path, &cache_options),
+                db_path,
+                &embeddings_path,
+                cli.config.as_deref(),
                 resolver,
                 scat_config.bookmarks,
             );

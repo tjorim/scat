@@ -38,6 +38,13 @@ impl TuiApp {
             KeyCode::F(6),
             true,
         );
+        add(
+            "Compare files, revisions or catalog snapshots",
+            "F11",
+            KeyCode::F(11),
+            true,
+        );
+        add("Export JSON / search CSV", "F12", KeyCode::F(12), true);
         add("Similar scripts", "F7", KeyCode::F(7), true);
         add("Catalog checkout status", "F8", KeyCode::F(8), true);
         add("Transitive dependency trees", "F9", KeyCode::F(9), true);
