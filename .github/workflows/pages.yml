@@ -2,10 +2,22 @@ name: Website
 on:
   push:
     branches: [main]
-    paths: ['site/**', 'assets/icon.*', 'scripts/build-site.py', '.github/workflows/pages.yml']
+    paths:
+      [
+        "site/**",
+        "assets/icon.*",
+        "scripts/build-site.py",
+        ".github/workflows/pages.yml",
+      ]
   pull_request:
     branches: [main]
-    paths: ['site/**', 'assets/icon.*', 'scripts/build-site.py', '.github/workflows/pages.yml']
+    paths:
+      [
+        "site/**",
+        "assets/icon.*",
+        "scripts/build-site.py",
+        ".github/workflows/pages.yml",
+      ]
   workflow_dispatch:
 permissions:
   contents: read
