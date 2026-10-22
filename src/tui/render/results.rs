@@ -79,7 +79,7 @@ pub(super) fn draw_results(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) 
             ""
         }
     );
-    if app.pending_query.is_some() || app.search_in_flight || app.error.is_some() {
+    if app.search.pending_query.is_some() || app.search.is_loading() || app.error.is_some() {
         title.push_str(" [previous results]");
     }
     let block = Block::default()
@@ -89,7 +89,7 @@ pub(super) fn draw_results(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) 
 
     if app.results.is_empty() {
         app.results_row_index.clear();
-        let items = if app.search_in_flight {
+        let items = if app.search.is_loading() {
             vec![ListItem::new(format!("{spinner} Searching…"))]
         } else {
             vec![ListItem::new(ratatui::text::Span::styled(

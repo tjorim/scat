@@ -90,12 +90,8 @@ impl TuiApp {
             detail_loading: false,
             inflight_detail_id: None,
             next_detail_id: 0,
-            last_keystroke_at: None,
             filter_labels: Vec::new(),
-            pending_query: None,
-            inflight_query_id: None,
-            search_in_flight: false,
-            next_query_id: 0,
+            search: super::search_state::SearchState::default(),
             fullscreen: false,
             tick: 0,
             needs_redraw: true,
@@ -115,7 +111,7 @@ impl TuiApp {
             next_stats_id: 0,
             stats_page: 0,
         };
-        app.dispatch_query()?;
+        app.dispatch_query();
         Ok(app)
     }
 
@@ -170,10 +166,9 @@ impl TuiApp {
         }
     }
 
-    pub(super) fn dispatch_query(&mut self) -> Result<()> {
+    pub(super) fn dispatch_query(&mut self) {
         self.error = None;
-        let id = self.next_query_id;
-        self.next_query_id = self.next_query_id.saturating_add(1);
+        let id = self.search.begin();
         let query = if self.search_options.mode == search_worker::SearchMode::Text {
             if let Some(alias) = self.query.strip_prefix('@') {
                 let expanded = self
@@ -205,35 +200,49 @@ impl TuiApp {
         } else {
             Vec::new()
         };
-        self.search_worker.send(SearchRequest {
+        if let Err(error) = self.search_worker.send(SearchRequest {
             id,
             query,
             limit: self.result_limit,
             options: self.search_options.clone(),
-        })?;
-        self.pending_query = None;
-        self.inflight_query_id = Some(id);
-        self.search_in_flight = true;
-        Ok(())
+        }) {
+            self.search.fail(error.to_string());
+            self.error = Some(error.to_string());
+        }
     }
 
     pub(super) fn apply_results(&mut self) -> Result<()> {
-        while let Some(response) = self.search_worker.try_recv()? {
-            if Some(response.id) != self.inflight_query_id {
-                continue;
-            }
-            self.search_in_flight = false;
-            self.inflight_query_id = None;
-            match response.result {
-                Ok(results) => {
-                    self.error = None;
-                    self.apply_search_results(results)?;
+        loop {
+            let response = match self.search_worker.try_recv() {
+                Ok(Some(response)) => response,
+                Ok(None) => break,
+                Err(error) => {
+                    if self.search.is_loading() {
+                        self.search.fail(error.to_string());
+                        self.error = Some(error.to_string());
+                        self.needs_redraw = true;
+                    }
+                    break;
                 }
-                Err(err) => {
-                    self.error = Some(err);
-                }
-            }
+            };
+            self.apply_search_response(response)?;
         }
+        Ok(())
+    }
+
+    pub(super) fn apply_search_response(
+        &mut self,
+        response: super::search_worker::SearchResponse,
+    ) -> Result<()> {
+        if self.search.phase != (super::search_state::Phase::Loading { id: response.id }) {
+            return Ok(());
+        }
+        if let Some(results) = self.search.accept(response) {
+            self.apply_search_results(results)?;
+        } else if let super::search_state::Phase::Error(error) = &self.search.phase {
+            self.error = Some(error.clone());
+        }
+        self.needs_redraw = true;
         Ok(())
     }
 
@@ -273,9 +282,7 @@ impl TuiApp {
     }
 
     pub(super) fn schedule_query(&mut self) {
-        self.inflight_query_id = None;
-        self.pending_query = Some(self.query.clone());
-        self.last_keystroke_at = Some(Instant::now());
+        self.search.schedule(self.query.clone(), Instant::now());
         // Recompute the filter labels once per query change so the render loop
         // can read them without re-parsing the query every frame.
         self.filter_labels = search_worker::parse_query_filters(&self.query).filter_labels();

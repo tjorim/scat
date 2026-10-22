@@ -29,6 +29,9 @@ relevant guide when commands, defaults, configuration or shortcuts change.
 Verify examples against `src/cli.rs` and keep the
 [TUI coverage matrix](docs/TUI_OPTIONS.md) in sync with new actions.
 
+TUI workflow changes should follow the [worker lifecycle contracts](docs/TUI_WORKERS.md),
+including request supersession, navigation ownership and shutdown guarantees.
+
 ## Schema and format changes
 
 Changing `SCHEMA_VERSION` (catalog) or `SIDECAR_FORMAT_VERSION` (embeddings
