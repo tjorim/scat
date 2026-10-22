@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Distribution
+
+- License original project material (both crates, documentation, website and
+  artwork) under Apache-2.0; record maintainer approval, provenance and third-party
+  exclusions. Align Cargo/RPM metadata and include checked project/dependency,
+  Rust/native notices and dependency sources in standalone and RPM artifacts.
+- Add a distribution checklist linking existing RPM, UBI and catalog compatibility
+  validation.
+
 ### Compatibility
 
 - Record the catalog compatibility decision in [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md): coordinated upgrades with an exact schema match, the supported client/catalog/sidecar/cache combinations, and publisher/client rollout and rollback steps. Add a release checklist ([docs/RELEASING.md](docs/RELEASING.md)).

@@ -29,3 +29,6 @@ The page links to successful CI builds because the project has no tagged
 releases yet. When releases are published, update the install section and
 artifact link together. Keep platform and licensing claims aligned with the
 main README and deployment guide.
+
+The approved Apache-2.0 scope and artifact notice requirements are tracked in
+[the distribution checklist](../docs/DISTRIBUTION.md). The build copies the root LICENSE and NOTICE into the published site.

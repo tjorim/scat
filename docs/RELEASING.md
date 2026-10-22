@@ -4,6 +4,10 @@ Releases are tags (`v*`); the `Rust Release Artifacts` workflow builds the
 static binary and RPM and runs the smoke checks below on every push and pull
 request. Tick these before tagging.
 
+Before distribution outside the organization, complete the
+[licensing and distribution checklist](DISTRIBUTION.md). Retain the matching
+license/source bundles and review new contributions and third-party exclusions.
+
 ## Always
 
 - [ ] `cargo fmt --check`, `cargo clippy --all-targets --locked`, `cargo test --locked`

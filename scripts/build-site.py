@@ -12,5 +12,7 @@ for name in ("index.html", "style.css", "catalog.js"):
     shutil.copy2(ROOT / "site" / name, OUTPUT / name)
 for name in ("icon.svg", "icon.png", "icon.ico"):
     shutil.copy2(ROOT / "assets" / name, OUTPUT / name)
+for name in ("LICENSE", "NOTICE"):
+    shutil.copy2(ROOT / name, OUTPUT / name)
 (OUTPUT / ".nojekyll").touch()
 print(f"Assembled {OUTPUT}")

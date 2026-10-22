@@ -38,6 +38,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-musl
+          components: rust-docs
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
@@ -252,11 +253,21 @@ jobs:
       - name: Report Linux binary size
         run: ls -lh target/x86_64-unknown-linux-musl/release/scat
 
+      - name: Build and verify Linux license bundle
+        run: |
+          python3 scripts/test-release-notices.py
+          libgcc=$(musl-gcc -print-libgcc-file-name)
+          libgcc_package=$(dpkg-query -S "$libgcc" | head -1 | cut -d: -f1)
+          python3 scripts/release-notices.py target/x86_64-unknown-linux-musl/release/licenses --package scat --target x86_64-unknown-linux-musl --native /usr/share/doc/musl --native "/usr/share/doc/$libgcc_package"
+          python3 scripts/release-notices.py target/x86_64-unknown-linux-musl/release/licenses --check
+
       - name: Upload Linux artifact
         uses: actions/upload-artifact@v7
         with:
           name: scat-linux-x86_64-musl
-          path: target/x86_64-unknown-linux-musl/release/scat
+          path: |
+            target/x86_64-unknown-linux-musl/release/scat
+            target/x86_64-unknown-linux-musl/release/licenses/
           if-no-files-found: error
 
   rpm:
@@ -291,6 +302,7 @@ jobs:
           test -z "$(rpm -qp --scripts "$first_rpm")"
           rpm -qp --configfiles "$first_rpm" | grep -Fx /etc/scat/scat.yaml
           cp tests/support/tui_pty.py target/rpm/
+          cp scripts/release-notices.py target/rpm/
           (cd target/static && sha256sum scat) > target/rpm/SHA256SUMS
           (cd target/rpm/first && sha256sum ./*.rpm) >> target/rpm/SHA256SUMS
       - name: Validate UBI 8, 9 and 10 userspaces
@@ -333,6 +345,8 @@ jobs:
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rust-docs
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
@@ -350,9 +364,16 @@ jobs:
       - name: Smoke test Windows binary
         run: .\target\release\scat-embed.exe --help
 
+      - name: Build and verify Windows license bundle
+        run: |
+          python scripts/release-notices.py target/release/licenses --package scat-embed --target x86_64-pc-windows-msvc
+          python scripts/release-notices.py target/release/licenses --check
+
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v7
         with:
           name: scat-embed-windows-x86_64
-          path: target/release/scat-embed.exe
+          path: |
+            target/release/scat-embed.exe
+            target/release/licenses/
           if-no-files-found: error

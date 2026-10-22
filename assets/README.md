@@ -12,5 +12,6 @@ uv run scripts/build-icon.py
 
 The script declares its image-tool dependencies; they are only needed to
 regenerate artwork, never to build or run scat or publish the static site.
-Artwork follows the repository's licensing status; no separate license is
-being assigned by this change. See the README's License section.
+The original SVG and generated PNG/ICO derivatives are licensed under
+[Apache License 2.0](../LICENSE), like the original code. See the
+[scope and provenance record](../docs/DISTRIBUTION.md).

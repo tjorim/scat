@@ -15,7 +15,10 @@ GitHub Actions builds the main Linux executable and an optional RPM:
 | Optional RHEL / Linux x86-64 package | `scat-*.rpm` | Same static executable |
 
 The workflow also builds the separate `scat-embed` utility for Windows; that
-does not add Windows support to the main catalog client.
+does not add Windows support to the main catalog client or publisher. It is
+deployed separately to produce embedding sidecars; clients do not need it.
+See the [licensing and distribution checklist](DISTRIBUTION.md) for the approved
+Apache-2.0 scope and the separate notice review for each executable.
 
 The binary is built for the musl target to avoid host glibc version coupling
 on older RHEL systems. Windows is not a supported target: the build fails
@@ -93,7 +96,8 @@ cron catalog publisher above remain supported. No daemon, language runtime,
 package download, account, catalog or cache is installed by the RPM.
 
 Build on an x86_64 Linux packaging host with Bash, GNU tar/coreutils, Git and
-`rpmbuild`, using the checked-out source revision matching the executable:
+`rpmbuild`, using the checked-out source revision matching the executable and the sibling
+`licenses/` directory from its CI artifact (Python 3 verifies the bundle):
 
 ```bash
 export SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
@@ -110,8 +114,11 @@ the same inputs/toolchain; reproducibility across different RPM/compressor
 versions is not promised. Automatic dependency scanning and binary rewriting
 are disabled because the payload is static. CI checks for an ELF interpreter;
 RPM requirements should contain only RPM format capabilities, no runtime library
-or interpreter dependencies. The repository currently has no LICENSE file;
-the spec records `LicenseRef-Unspecified`. Resolve the project license before distributing packages outside your organization.
+or interpreter dependencies. Original project material is Apache-2.0; the spec records that identifier.
+Standalone artifacts include a `licenses/` directory; the RPM installs the same
+bundle under `/usr/share/licenses/scat` as `%license`. Complete the
+[licensing and distribution checklist](DISTRIBUTION.md) before distributing
+packages, and retain the notice/source bundle with standalone copies.
 
 The payload installs `/usr/bin/scat`, generated Bash/Zsh/Fish completions under
 `/usr/share/{bash-completion/completions,zsh/site-functions,fish/vendor_completions.d}`,

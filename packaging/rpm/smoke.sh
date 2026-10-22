@@ -8,6 +8,8 @@ rpm -q --scripts scat
 for path in /usr/bin/scat /usr/share/doc/scat/help.txt /usr/share/man/man1/scat.1.gz /usr/share/man/man1/scat-catalog-audit.1.gz /usr/share/bash-completion/completions/scat /usr/share/zsh/site-functions/_scat /usr/share/fish/vendor_completions.d/scat.fish; do
     test -s "$path"
 done
+"${PYTHON:-python3}" /input/release-notices.py /usr/share/licenses/scat --check
+rpm -q --qf '%{LICENSE}\n' scat | grep -Fx Apache-2.0
 printf '\n# administrator change\n' >> /etc/scat/scat.yaml
 cp /etc/scat/scat.yaml /tmp/config.expected
 mkdir -p /catalog/scripts
@@ -30,6 +32,7 @@ rpm -e scat
 cmp /etc/scat/scat.yaml.rpmsave /tmp/config.expected
 sha256sum -c /tmp/catalog.sha256
 test -n "$(ls -A /tmp/scat-cache)"
+test ! -e /usr/share/licenses/scat/LICENSE
 test ! -e /usr/bin/scat
 test ! -e /usr/share/man/man1/scat.1.gz
 for path in /usr/share/bash-completion/completions/scat /usr/share/zsh/site-functions/_scat /usr/share/fish/vendor_completions.d/scat.fish; do

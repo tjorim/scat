@@ -1,0 +1,80 @@
+{
+  "packages": [
+    {
+      "name": "tree-sitter-json",
+      "version": "0.24.8",
+      "license": "MIT",
+      "files": [
+        {
+          "path": "tree-sitter-json-0.24.8/LICENSE",
+          "source": "https://raw.githubusercontent.com/tree-sitter/tree-sitter-json/ee35a6ebefcef0c5c416c0d1ccec7370cfca5a24/LICENSE",
+          "sha256": "2e0110e07abef7c2548b26ec9d6969775617ca539a0dc8dbeeb14d6452c711d1"
+        }
+      ]
+    },
+    {
+      "name": "profiling",
+      "version": "1.0.18",
+      "license": "MIT OR Apache-2.0",
+      "files": [
+        {
+          "path": "profiling-1.0.18/LICENSE-MIT",
+          "source": "https://raw.githubusercontent.com/aclysma/profiling/8271551172eb6fa4cba47369aedd93790c623df9/LICENSE-MIT",
+          "sha256": "c8167fdeeed46d3f244d3f85c5bf998ce889343691c32be2c61a8bc4b5c08333"
+        },
+        {
+          "path": "profiling-1.0.18/LICENSE-APACHE",
+          "source": "https://raw.githubusercontent.com/aclysma/profiling/8271551172eb6fa4cba47369aedd93790c623df9/LICENSE-APACHE",
+          "sha256": "10d30a673cd5e9349bdc02aeb48f14b3386d27d0da32df8f0a555d4aa16aa551"
+        }
+      ]
+    },
+    {
+      "name": "pulp-wasm-simd-flag",
+      "version": "0.1.1",
+      "license": "MIT",
+      "files": [
+        {
+          "path": "pulp-wasm-simd-flag-0.1.1/LICENSE",
+          "source": "https://raw.githubusercontent.com/sarah-quinones/pulp/5eb07fd7b68edf0a5e19f71737d315f72a510295/LICENSE",
+          "sha256": "d64f878c89bd5f1e5ada7e4aad57690b122727cf5229b7b87ea1980c188da1d9"
+        }
+      ]
+    },
+    {
+      "name": "zune-inflate",
+      "version": "0.2.54",
+      "license": "MIT OR Apache-2.0 OR Zlib",
+      "files": [
+        {
+          "path": "zune-inflate-0.2.54/LICENSE-ZLIB",
+          "source": "https://raw.githubusercontent.com/etemesi254/zune-image/69502ce83fdfecdd0beefd677e2abb3781b29d98/LICENSE-ZLIB",
+          "sha256": "7fa429541e55b1509909e058f2d21a37467e4958ec713b357f6e0cf9dc4ee352"
+        }
+      ]
+    },
+    {
+      "name": "ort-sys",
+      "version": "2.0.0-rc.13",
+      "license": "MIT OR Apache-2.0",
+      "bundled_checks": [
+        {
+          "path": "build/download/dist.tsv",
+          "sha256": "c706a8bf67367fbec3ad7851d9b119f8830fbabe53696e20f4740131f7f59e78"
+        }
+      ],
+      "files": [
+        {
+          "path": "onnxruntime-1.28.0/LICENSE",
+          "source": "https://raw.githubusercontent.com/microsoft/onnxruntime/da9b5e364c465de65c49d91e696cd6485270757f/LICENSE",
+          "sha256": "2f07c72751aed99790b8a4869cf2311df85a860b22ded05fa22803587a48922c"
+        },
+        {
+          "path": "onnxruntime-1.28.0/ThirdPartyNotices.txt",
+          "source": "https://raw.githubusercontent.com/microsoft/onnxruntime/da9b5e364c465de65c49d91e696cd6485270757f/ThirdPartyNotices.txt",
+          "sha256": "0e07b95f3a8d6230037707c5c4a2b554d12c4cb67369669ac255635528ffcee2"
+        }
+      ]
+    }
+  ]
+}
