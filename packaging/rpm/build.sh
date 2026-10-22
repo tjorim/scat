@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
-# Usage: build.sh STATIC_BINARY OUTPUT_DIR [RPM_RELEASE]
+# Usage: build.sh STATIC_BINARY OUTPUT_DIR [RPM_RELEASE] [THIRD_PARTY_NOTICES]
+# Default notices: sibling THIRD_PARTY_NOTICES.txt from the Linux artifact.
 set -euo pipefail
 umask 022
 root=$(cd "$(dirname "$0")/../.." && pwd)
 binary=$(realpath "$1")
 output=$(realpath -m "$2")
 release=${3:-1}
+notices=$(realpath "${4:-$(dirname "$binary")/THIRD_PARTY_NOTICES.txt}")
+test -s "$notices"
 version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$root/Cargo.toml" | head -1)
 [ -n "$version" ] || { echo "cannot read version from Cargo.toml" >&2; exit 1; }
 SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-$(git -C "$root" log -1 --format=%ct 2>/dev/null)} \
@@ -14,6 +17,9 @@ export SOURCE_DATE_EPOCH
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 mkdir -p "$work"/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS} "$work/payload/usr/bin" "$work/payload/etc/scat" "$work/payload/usr/share/doc/scat"
+mkdir -p "$work/payload/usr/share/licenses/scat"
+install -m644 "$root/LICENSE" "$root/NOTICE" "$work/payload/usr/share/licenses/scat/"
+install -m644 "$notices" "$work/payload/usr/share/licenses/scat/THIRD_PARTY_NOTICES.txt"
 install -m755 "$binary" "$work/payload/usr/bin/scat"
 install -m644 "$root/docs/scat.example.yaml" "$work/payload/etc/scat/scat.yaml"
 cp "$root"/docs/{VENDORING.md,TUI_OPTIONS.md,scat.example.yaml} "$work/payload/usr/share/doc/scat/"

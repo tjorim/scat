@@ -131,4 +131,6 @@ jobs:
         uses: taiki-e/install-action@cargo-deny
 
       - name: Check licenses and duplicate dependencies
-        run: cargo deny check licenses bans
+        run: |
+          cargo deny check licenses bans
+          cargo deny --workspace check licenses
