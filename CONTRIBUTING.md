@@ -34,8 +34,11 @@ including request supersession, navigation ownership and shutdown guarantees.
 
 ## Schema and format changes
 
-Changing `SCHEMA_VERSION` (catalog) or `SIDECAR_FORMAT_VERSION` (embeddings
-sidecar) is a coordinated upgrade for every deployment. Follow
+Changing `SCHEMA_VERSION` (catalog) requires a coordinated upgrade of the
+publisher and all clients in each deployment. Changing `SIDECAR_FORMAT_VERSION`
+(embeddings sidecar) requires coordinating the sidecar publisher and clients
+that read an incompatible sidecar; other clients are unaffected. For either
+change, document the affected versions and release guidance, and follow
 [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md#changing-a-schema-or-format)
 and the compatibility items in [docs/RELEASING.md](docs/RELEASING.md).
 

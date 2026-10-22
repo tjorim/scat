@@ -369,7 +369,7 @@ scat search "deploy" | grep -F ".sh"
 | `Error: Database file not found` | Check that the path to `scripts.sqlite` is correct and accessible |
 | Database access error | Run `scat doctor --json`; check the reported path, permissions and availability before asking the publisher to rebuild |
 | `catalog schema is version N, expected M` | Run `scat catalog info`; the message says whether to upgrade this client or have the publisher upgrade and rebuild — see [COMPATIBILITY.md](COMPATIBILITY.md) |
-| `note: embeddings sidecar … was built from catalog build …` | The sidecar is older than the catalog; rerun `scat-embed` against the current catalog and republish it |
+| `note: embeddings sidecar … was built from catalog build …` | The sidecar was built from a different catalog build; rerun `scat-embed` against the current catalog and republish it |
 
 ---
 

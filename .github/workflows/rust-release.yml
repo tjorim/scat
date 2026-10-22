@@ -234,10 +234,18 @@ jobs:
             IFS=: read -r name advice verdict <<<"$case"
             db="target/compat/$name/scripts.sqlite"
             sha256sum "$db" > "target/compat/$name.sha256"
-            for mode in "--no-cache" "--cache-dir $cache"; do
-              for command in "search patch" "catalog stats" "catalog info"; do
-                if out=$("$scat" --db "$db" $mode $command 2>&1); then
-                  echo "expected '$command' to refuse the $name catalog"; exit 1
+            for cache_mode in off on; do
+              mode=(--no-cache)
+              if [[ "$cache_mode" == on ]]; then
+                mode=(--cache-dir "$cache")
+              fi
+              for command_name in search stats info; do
+                command=(catalog "$command_name")
+                if [[ "$command_name" == search ]]; then
+                  command=(search patch)
+                fi
+                if out=$("$scat" --db "$db" "${mode[@]}" "${command[@]}" 2>&1); then
+                  echo "expected '${command[*]}' to refuse the $name catalog"; exit 1
                 fi
                 grep -F "$advice" <<<"$out"
               done

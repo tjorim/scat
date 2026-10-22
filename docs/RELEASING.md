@@ -34,9 +34,14 @@ Manual, only if `SCHEMA_VERSION` or `SIDECAR_FORMAT_VERSION` changed:
 
 - [ ] `docs/COMPATIBILITY.md` version tables and `docs/QUICKSTART.md` name the
       new version (`tests/compat.rs` fails if the tables are stale).
-- [ ] The changelog entry says "coordinated upgrade" and names who must act
-      (clients, publisher, sidecar publisher).
+- [ ] For a catalog schema change, the changelog entry says "coordinated
+      upgrade" and names the publisher and all clients. For a sidecar format
+      change, it names the sidecar publisher and clients that can no longer
+      read the sidecar.
 - [ ] The rollout and rollback steps in COMPATIBILITY.md were walked on a
       staging catalog with the new and previous binaries, including a client
       cache that was warm before the flip.
+- [ ] Sidecar publication and rollback were walked in staging with the new
+      and previous binaries; `similar` refuses unsupported sidecar formats and
+      `catalog audit` reports the skipped sidecar while completing the audit.
 - [ ] A maintenance window is announced before the catalog is flipped.

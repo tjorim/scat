@@ -163,8 +163,9 @@ Pick the matching case; rollback never needs a migration.
   direct-build route rotated it). Confirm with the old binary's
   `scat catalog info`. Caches follow on their own.
 - **After the flip, rebuild instead:** reinstall the previous RPM on the
-  publisher and run `scat catalog build`. A catalog of another schema is never
-  used to seed a build, so it is a full rebuild.
+  publisher and all clients before or alongside running `scat catalog build`.
+  A catalog of another schema is never used to seed a build, so it is a full
+  rebuild. Verify the rebuilt catalog with the old binary's `scat catalog info`.
 - **Never leave the publisher on an older binary than the catalog it
   published** without intending to roll back: its next nightly build will
   republish the older schema and refuse every upgraded client.
