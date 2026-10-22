@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Website and artwork
+
+- Add a shared terminal/catalog icon, raster derivatives and a responsive static
+  landing page with a fictional search demo, setup links and a GitHub Pages workflow.
+
 ### Reliability and search
 
 - Bound live-source file checks to six seconds in an isolated subprocess and

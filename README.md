@@ -1,5 +1,7 @@
 # Script Catalog
 
+<img src="assets/icon.svg" width="96" height="96" alt="scat script catalog icon">
+
 The **Script Catalog** is a tool for discovering, searching, and understanding scripts.
 
 It provides:
@@ -12,6 +14,9 @@ It provides:
 The catalog is **indexed nightly** on a central CRON server and consumed **read‑only** by engineers on RHEL systems.
 
 ## Documentation
+
+[Website source and preview instructions](site/README.md) ·
+[Project website](https://tjorim.github.io/scat/) (available after Pages deployment)
 
 - [Quick start](docs/QUICKSTART.md): setup, search, browsing and troubleshooting
 - [TUI controls and CLI coverage](docs/TUI_OPTIONS.md): workflows and terminal modes

@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title">
+  <title id="title">scat: a terminal in a stack of catalog cards</title>
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="#102d2b"/>
+  <path d="M64 55h60l15 16h53a12 12 0 0 1 12 12v91a12 12 0 0 1-12 12H64a12 12 0 0 1-12-12V67a12 12 0 0 1 12-12Z" fill="#c96538"/>
+  <rect x="42" y="88" width="162" height="108" rx="13" fill="#d9ed92"/>
+  <rect x="42" y="99" width="162" height="97" rx="13" fill="#f7f5ef"/>
+  <rect x="54" y="110" width="138" height="74" rx="6" fill="#102d2b"/>
+  <path d="m77 131 17 16-17 16M112 163h31" fill="none" stroke="#d9ed92" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="177" cy="70" r="5" fill="#f7f5ef"/>
+</svg>
