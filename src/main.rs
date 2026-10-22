@@ -14,6 +14,7 @@ mod commands;
 mod doctor;
 mod output;
 mod runtime;
+mod subprocess;
 mod tui;
 
 use crate::cli::{CatalogCommands, Cli, Commands};
@@ -39,6 +40,10 @@ fn main() {
 }
 
 fn run(cli: Cli) -> Result<()> {
+    if let Commands::FileCheck { path } = &cli.command {
+        println!("{}", path.is_file());
+        return Ok(());
+    }
     let no_color_env = std::env::var_os("NO_COLOR");
     let no_color = cli::resolve_no_color(cli.no_color, no_color_env.as_deref());
 
@@ -334,6 +339,7 @@ fn run(cli: Cli) -> Result<()> {
             json,
         ),
         Commands::Doctor { .. }
+        | Commands::FileCheck { .. }
         | Commands::Vc { .. }
         | Commands::Tui { .. }
         | Commands::Catalog { .. }

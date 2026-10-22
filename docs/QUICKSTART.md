@@ -1,6 +1,7 @@
 # scat Quick‑Start Guide
 
-> **One page** — everything you need to find, browse, and understand scripts in the catalog.
+Find, browse, and understand scripts in the catalog. For the complete workflow
+and terminal reference, see [TUI and CLI option coverage](TUI_OPTIONS.md).
 
 ---
 
@@ -30,12 +31,14 @@ roots, ignore patterns, vc settings, and search bookmarks (`scat search
 @name`). See **[scat.example.yaml](scat.example.yaml)** for an annotated
 example. CLI flags and env vars always override config-file values.
 
-### Optional: path-mapping file (TUI only)
+### Optional: path-mapping file
 
 `scat tui --mapping <path>` / `SCAT_MAPPING` points at a separate file that
 maps logical catalog paths to real filesystem paths, used by the `V` key to
 open a script's live source. See
 **[scat-mapping.example.yaml](scat-mapping.example.yaml)**.
+The same file works with `scat doctor PATH --mapping <path>` for host-local
+diagnostics; `SCAT_MAPPING` applies to TUI startup.
 
 ---
 
@@ -97,6 +100,14 @@ scat tui
 | `Ctrl+←` / `Ctrl+→` (in search) | Move by word (add Shift to select) |
 | `Ctrl+W` / `Ctrl+Backspace` / `Ctrl+Delete` (in search) | Delete the previous/next word |
 | `Ctrl+U` / `Ctrl+K` (in search) | Delete from the cursor to the start/end |
+| `F1` / `F4` | Contextual help / searchable command palette |
+| `F6` | Edit search mode, filters and result limit |
+| `F7` / `F8` | Similar scripts / checkout and warning status |
+| `F9` / `F10` | Dependency trees / symlink inspection |
+| `Alt+i` / `Alt+a` | Catalog information / audit |
+| `Alt+d` | Host diagnostics |
+| `Alt+b` / `Alt+v` | Explicit catalog-build / vc administration dialogs |
+| `v` / `V` (outside search) | Open indexed content / live source in an external read-only viewer |
 | `F2` | Toggle native terminal text selection; Esc also resumes the TUI |
 | `F11` | Compare catalog scripts with files/revisions, two files, or catalog snapshots |
 | `F12` | Export JSON/search CSV; choose scope, fields and a local save path |
@@ -222,6 +233,16 @@ scat diff /catalog/foo/bar.py --against /catalog/foo/ARCHIVE/bar.py_20240510_103
 `--against` points to a **file** on disk, unlike `scat catalog diff --against` which
 points to a database snapshot.
 
+### Select an indexed revision
+
+```bash
+scat diff /catalog/foo/bar.py --revision-type ARCHIVE
+```
+
+Select DEVELOP, WORKING, ARCHIVE or ROLLBACK; optionally narrow with
+`--revision-timestamp`, or `--revision-user` for DEVELOP/ROLLBACK checkouts.
+Use `scat status /catalog/foo/bar.py` to inspect available revisions.
+
 ### Compare any two explicit files
 
 No catalog access is needed; `--db` / `SCAT_DB` is optional for this mode:
@@ -243,8 +264,8 @@ The JSON output includes:
 | `logical_path` | `string \| null` | Catalog path; `null` when using `--old`/`--new` |
 | `old_path` | `string` | Label for the left (old) side |
 | `new_path` | `string` | Label for the right (new) side |
-| `old_kind` | `string` | `active`, `checkout`, or `explicit` |
-| `new_kind` | `string` | `active`, `checkout`, or `explicit` |
+| `old_kind` | `string` | `active`, `checkout`, `revision`, or `explicit` |
+| `new_kind` | `string` | `active`, `checkout`, `revision`, or `explicit` |
 | `hunks` | `array` | Changed regions, each with `old_start`, `old_count`, `new_start`, `new_count`, and `lines` |
 
 Each element in `lines` has `kind` (`context`, `delete`, or `insert`) and `content`.
@@ -288,11 +309,17 @@ scat catalog info
 
 ### Shared catalog schema upgrades
 
-Schema v8 stores DEVELOP and ARCHIVE revision rows in the shared catalog. After
-deploying a binary with schema v8 support, rebuild the shared database once with
-`scat catalog build` before read-only clients use it. If a client reports
-`re-index required (scat catalog build)`, the shared catalog is still on an old
-schema and needs that rebuild.
+The current catalog schema is **v14**. Clients require the schema version they
+were built for; check `scat catalog info` when coordinating an upgrade. If a
+client reports a schema mismatch or requests re-indexing, have the catalog
+publisher rebuild with the matching binary and the site's existing scan-root
+configuration:
+
+```bash
+scat --config /path/to/site.yaml catalog build --force
+```
+
+Ordinary read-only clients should not rebuild the shared catalog themselves.
 
 ---
 
@@ -307,7 +334,7 @@ scat search --lang python --limit 1000
 ### Find scripts owned by a specific user
 
 ```bash
-scat search --output json | jq '[.[] | select(.owner == "alice@example.com")]'
+scat search --owner alice@example.com --limit 1000
 ```
 
 ### Check whether a specific script exists
@@ -316,7 +343,7 @@ scat search --output json | jq '[.[] | select(.owner == "alice@example.com")]'
 scat show /catalog/scripts/my_script.py && echo "found" || echo "not found"
 ```
 
-### Export the full catalog to JSON
+### Export up to 10,000 matching scripts to JSON
 
 ```bash
 scat search --output json --limit 10000 > catalog.json
@@ -325,7 +352,7 @@ scat search --output json --limit 10000 > catalog.json
 ### Pipe results to `grep`
 
 ```bash
-scat search "deploy" | grep ".ps1"
+scat search "deploy" | grep -F ".sh"
 ```
 
 ---
@@ -336,15 +363,24 @@ scat search "deploy" | grep ".ps1"
 |---|---|
 | `Error: No database specified` | Set `SCAT_DB` or pass `--db <path>` |
 | `Error: Database file not found` | Check that the path to `scripts.sqlite` is correct and accessible |
-| `Error: Database error` | The catalog may be corrupt — ask the CRON team to rebuild it |
-| Schema version mismatch warning | Catalog was built with an older version; re‑index or upgrade `scat` |
+| Database access error | Run `scat doctor --json`; check the reported path, permissions and availability before asking the publisher to rebuild |
+| Schema version mismatch | Coordinate matching client and publisher versions, then rebuild with the publisher |
 
 ---
+
+Use `scat doctor` without a working catalog for read-only host diagnostics.
+For a specific script, include its path and optionally query local RPM metadata:
+
+```bash
+scat doctor --json
+scat doctor /catalog/scripts/patch_check.py --mapping mapping.yaml --rpm --json
+```
 
 ## 10 – Getting help
 
 ```bash
 scat --help
+scat doctor --help
 scat search --help
 scat show --help
 scat deps --help

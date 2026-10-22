@@ -46,6 +46,7 @@ Global overrides inside editors are rejected to retain the active source paths.
 | `diff [PATH] --against --revision-type --revision-user --revision-timestamp --old --new --json` | F11 comparison editor |
 | `catalog diff --against --old --new --json` | F11 comparison editor |
 | `catalog stats --json` | Statistics charts (`s`); JSON through requested workflow |
+| `doctor [PATH] --mapping --rpm --json` | Alt+d; read-only host diagnostics, also available without a working catalog from the CLI |
 | `catalog info --json` | Alt+i |
 | `catalog audit --check --strict --stale-days --near-duplicate-threshold --outlier-threshold --json` | Alt+a; repeat `--check` to select multiple checks |
 | `catalog build --scan-root --head-lines --ignore-file --keep-copies --dry-run --quiet/-q --no-resume --force --no-incremental --threads --json` | Alt+b; repeat scan roots/ignore files; Enter previews, F5 executes |
@@ -55,7 +56,9 @@ Global overrides inside editors are rejected to retain the active source paths.
 | `--config`, `SCAT_CONFIG` | Startup-only config, including scan roots, vc executable and bookmarks |
 | `--embeddings`, `SCAT_EMBEDDINGS` | Startup-only optional sidecar path |
 | `--cache-dir`, `SCAT_CACHE_DIR`, `--no-cache`, `SCAT_NO_CACHE` | Startup-only host cache policy; read-only workflows use CLI cache behavior |
-| `--no-color`, `NO_COLOR` | CLI output color setting; read-only captured output disables color for display; TUI has its own styles |
+| `tui --glyphs --colors`, `SCAT_TUI_GLYPHS`, `SCAT_TUI_COLORS` | Startup-only terminal modes; also configurable with `tui.glyphs` / `tui.colors` |
+| `tui --terminal-info` | CLI-only session/mode report; opens no catalog or fullscreen UI |
+| `--no-color`, `NO_COLOR` | Disable CLI colors and force monochrome TUI rendering; captured output disables color for display |
 | `-v/--verbose/--debug`, `-vv`, `RUST_LOG` | Startup logging; child operations retain default CLI logging and environment; not editable globals |
 | `completions SHELL` | CLI-only stdout utility for generating shell scripts |
 | `man [--dir DIR]` | CLI-only utility that renders man pages from the command definitions (the RPM installs them) |

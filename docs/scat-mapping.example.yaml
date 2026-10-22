@@ -1,13 +1,14 @@
 # Example scat path-mapping file.
 #
-# Used only by `scat tui` to resolve a script's logical catalog path (as
+# Used by `scat tui` and `scat doctor` to resolve a script's logical catalog path (as
 # stored in the database, e.g. /catalog/scripts/foo.py) to a real
-# filesystem path, for the "V" (view live filesystem source) key. It is
+# filesystem path, for the TUI "V" key and host-local doctor probes. It is
 # unrelated to the main --config/SCAT_CONFIG file (see scat.example.yaml)
 # and is passed separately:
 #
 #   scat tui --mapping /path/to/mapping.yaml
-#   export SCAT_MAPPING=/path/to/mapping.yaml
+#   export SCAT_MAPPING=/path/to/mapping.yaml  # TUI startup only
+#   scat doctor /catalog/scripts/foo.py --mapping /path/to/mapping.yaml
 #
 # JSON is also accepted; the format is picked from the file extension
 # (.yml/.yaml -> YAML, anything else -> JSON). Without a mapping file (or

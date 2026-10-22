@@ -68,10 +68,7 @@ fn parse(command: &str) -> Result<(Vec<String>, Cli)> {
                 *output != SearchOutput::Table,
                 "Choose --output json or csv"
             );
-            ensure!(
-                *limit > 0 && i64::try_from(*limit).is_ok(),
-                "Limit must be positive and within SQLite range"
-            );
+            scat_core::core::db::validate_search_limit(*limit)?;
             ensure!(
                 args.iter()
                     .any(|a| a == "--limit" || a.starts_with("--limit=")),
@@ -241,15 +238,16 @@ fn run(
             },
         });
     }
-    let output = child
+    child
         .arg("--db")
         .arg(db)
         .arg("--embeddings")
         .arg(embeddings)
         .arg("--no-color")
-        .args(args)
-        .output()
-        .context("Could not start comparison/export worker")?;
+        .args(args);
+    let never_cancel = std::sync::atomic::AtomicBool::new(false);
+    let output = crate::subprocess::capture(&mut child, cancel.unwrap_or(&never_cancel), None)
+        .context("Comparison/export worker failed")?;
     ensure!(
         output.status.success()
             || matches!(
@@ -1040,5 +1038,52 @@ mod tests {
             .draw(|f| draw(f, app.workflow.as_ref().unwrap()))
             .unwrap();
         assert_ne!(before, format!("{:?}", terminal.backend().buffer()));
+    }
+    #[test]
+    fn requested_workflow_observes_cancellation() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        use std::time::{Duration, Instant};
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("slow-export");
+        let ready = dir.path().join("ready");
+        std::fs::write(
+            &exe,
+            format!(
+                "#!/bin/sh\ntouch {}\nexec sleep 60\n",
+                shell_words::quote(ready.to_str().unwrap())
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let flag = cancel.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = run(
+                &exe,
+                Path::new("/db"),
+                Path::new("/sidecar"),
+                "search --limit 1 --output json",
+                None,
+                None,
+                Some(&flag),
+            );
+            tx.send(result.map(|_| ())).unwrap();
+        });
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !ready.exists() {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        cancel.store(true, Ordering::Relaxed);
+        let err = rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("canceled"));
     }
 }

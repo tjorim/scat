@@ -75,6 +75,16 @@ pub fn row_display(row: &JsonRow, key: &str, fallback: &str) -> String {
     }
 }
 
+/// Validate a result limit consistently for CLI, TUI and core callers.
+pub fn validate_search_limit(limit: usize) -> Result<i64> {
+    let value = i64::try_from(limit)
+        .map_err(|_| Error::Validation("Result limit exceeds SQLite range".into()))?;
+    if value == 0 {
+        return Err(Error::Validation("Result limit must be positive".into()));
+    }
+    Ok(value)
+}
+
 /// Append optional script metadata filters to a SQL `WHERE` clause.
 ///
 /// `column_prefix` qualifies `language`, `owner`, and `tags` when the query
@@ -621,6 +631,7 @@ pub fn fts_query_filtered(
     owner: Option<&str>,
     tag: Option<&str>,
 ) -> Result<Vec<JsonRow>> {
+    let lim = validate_search_limit(limit)?;
     let sanitized = sanitize_fts_query(query);
     if sanitized.is_empty() {
         // No real search terms after sanitizing — `MATCH ''` is itself a
@@ -646,7 +657,6 @@ pub fn fts_query_filtered(
             WHERE script_fts MATCH ?
         ",
     );
-    let lim = limit as i64;
     let mut params = vec![SqlValue::Text(sanitized)];
 
     append_script_filters(&mut sql, &mut params, Some("s."), language, owner, tag);

@@ -50,6 +50,12 @@ pub fn resolve_no_color(flag: bool, no_color_env: Option<&OsStr>) -> bool {
     flag || no_color_env.is_some_and(|value| !value.is_empty())
 }
 
+fn parse_search_limit(value: &str) -> std::result::Result<usize, String> {
+    let limit = value.parse::<usize>().map_err(|err| err.to_string())?;
+    scat_core::core::db::validate_search_limit(limit).map_err(|err| err.to_string())?;
+    Ok(limit)
+}
+
 /// Resolve `--no-cache` against `SCAT_NO_CACHE`.
 ///
 /// Deliberately not clap's `env`: on a `bool` field that accepts only the
@@ -73,6 +79,9 @@ pub fn resolve_no_cache(flag: bool, no_cache_env: Option<&OsStr>) -> bool {
 
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Internal isolated filesystem probe; requires no catalog or config.
+    #[command(hide = true)]
+    FileCheck { path: PathBuf },
     /// Read-only host, catalog, cache and permission diagnostics (no refresh).
     Doctor {
         /// Stable structured support output.
@@ -103,7 +112,7 @@ pub enum Commands {
         #[arg(long)]
         tag: Option<String>,
         /// Maximum number of results.
-        #[arg(long, default_value = "50")]
+        #[arg(long, default_value = "50", value_parser = parse_search_limit)]
         limit: usize,
         /// Comma-separated list of fields to display/export.
         /// Defaults to: path, language, owner, purpose.

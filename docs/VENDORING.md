@@ -7,11 +7,15 @@
 
 ## Release artifacts
 
-GitHub Actions builds and uploads one artifact:
+GitHub Actions builds the main Linux executable and an optional RPM:
 
 | Platform | Artifact | CI target |
 |---|---|---|
 | RHEL / Linux x86-64 | `scat` | `x86_64-unknown-linux-musl` |
+| Optional RHEL / Linux x86-64 package | `scat-*.rpm` | Same static executable |
+
+The workflow also builds the separate `scat-embed` utility for Windows; that
+does not add Windows support to the main catalog client.
 
 The binary is built for the musl target to avoid host glibc version coupling
 on older RHEL systems. Windows is not a supported target: the build fails
@@ -106,9 +110,8 @@ the same inputs/toolchain; reproducibility across different RPM/compressor
 versions is not promised. Automatic dependency scanning and binary rewriting
 are disabled because the payload is static. CI checks for an ELF interpreter;
 RPM requirements should contain only RPM format capabilities, no runtime library
-or interpreter dependencies. The repository currently has no LICENSE file despite
-the README link; the spec records `LicenseRef-Unspecified`. Resolve the project
-license before distributing packages outside your organization.
+or interpreter dependencies. The repository currently has no LICENSE file;
+the spec records `LicenseRef-Unspecified`. Resolve the project license before distributing packages outside your organization.
 
 The payload installs `/usr/bin/scat`, generated Bash/Zsh/Fish completions under
 `/usr/share/{bash-completion/completions,zsh/site-functions,fish/vendor_completions.d}`,

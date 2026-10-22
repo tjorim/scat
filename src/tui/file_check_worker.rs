@@ -1,6 +1,12 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 
@@ -26,30 +32,51 @@ pub struct FileCheckResponse {
     pub native_path: PathBuf,
     pub mapped: bool,
     pub exists: bool,
+    pub error: Option<String>,
     pub language: String,
 }
 
 /// Background worker that performs the (potentially blocking, e.g. on a slow
 /// network mount) `is_file` check for the live-source viewer, keeping the TUI
-/// render loop responsive.
+/// render loop responsive. Each stat runs in an isolated subprocess with a
+/// six-second deadline; shutdown cancels it before joining the worker.
 pub struct FileCheckWorker {
     request_tx: Option<Sender<FileCheckRequest>>,
     response_rx: Receiver<FileCheckResponse>,
     join_handle: Option<JoinHandle<()>>,
+    cancel: Arc<AtomicBool>,
 }
 
 impl FileCheckWorker {
     pub fn new() -> Result<Self> {
+        let executable = std::env::current_exe()?;
+        Self::with_probe(
+            move |path| {
+                let mut command = Command::new(&executable);
+                command.arg("file-check").arg("--").arg(path);
+                command
+            },
+            Duration::from_secs(6),
+        )
+    }
+
+    pub(super) fn with_probe(
+        probe: impl Fn(&Path) -> Command + Send + 'static,
+        timeout: Duration,
+    ) -> Result<Self> {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let worker_cancel = cancel.clone();
         let (request_tx, request_rx) = mpsc::channel::<FileCheckRequest>();
         let (response_tx, response_rx) = mpsc::channel::<FileCheckResponse>();
         let join_handle = thread::Builder::new()
             .name("tui-file-check-worker".to_string())
-            .spawn(move || worker_loop(request_rx, response_tx))
+            .spawn(move || worker_loop(request_rx, response_tx, probe, timeout, worker_cancel))
             .context("failed to spawn TUI file-check worker thread")?;
         Ok(Self {
             request_tx: Some(request_tx),
             response_rx,
             join_handle: Some(join_handle),
+            cancel,
         })
     }
 
@@ -74,6 +101,7 @@ impl FileCheckWorker {
 
 impl Drop for FileCheckWorker {
     fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
         self.request_tx.take();
         if let Some(handle) = self.join_handle.take() {
             let _ = handle.join();
@@ -81,13 +109,35 @@ impl Drop for FileCheckWorker {
     }
 }
 
-fn worker_loop(request_rx: Receiver<FileCheckRequest>, response_tx: Sender<FileCheckResponse>) {
+fn worker_loop(
+    request_rx: Receiver<FileCheckRequest>,
+    response_tx: Sender<FileCheckResponse>,
+    probe: impl Fn(&Path) -> Command,
+    timeout: Duration,
+    cancel: Arc<AtomicBool>,
+) {
     while let Ok(mut request) = request_rx.recv() {
         // Drain stale requests — only process the latest.
         while let Ok(next) = request_rx.try_recv() {
             request = next;
         }
-        let exists = request.native_path.is_file();
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
+        let result =
+            crate::subprocess::capture(&mut probe(&request.native_path), &cancel, Some(timeout))
+                .and_then(|output| {
+                    anyhow::ensure!(output.status.success(), "File check failed");
+                    match output.stdout.as_slice() {
+                        b"true\n" => Ok(true),
+                        b"false\n" => Ok(false),
+                        _ => Err(anyhow!("Invalid file-check response")),
+                    }
+                });
+        let (exists, error) = match result {
+            Ok(exists) => (exists, None),
+            Err(err) => (false, Some(err.to_string())),
+        };
         if response_tx
             .send(FileCheckResponse {
                 id: request.id,
@@ -95,6 +145,7 @@ fn worker_loop(request_rx: Receiver<FileCheckRequest>, response_tx: Sender<FileC
                 native_path: request.native_path,
                 mapped: request.mapped,
                 exists,
+                error,
                 language: request.language,
             })
             .is_err()
@@ -130,7 +181,20 @@ mod tests {
         let script = dir.path().join("foo.py");
         std::fs::write(&script, "print(1)\n").unwrap();
 
-        let worker = FileCheckWorker::new().unwrap();
+        let worker = FileCheckWorker::with_probe(
+            |path| {
+                let mut cmd = std::process::Command::new("/bin/sh");
+                cmd.args([
+                    "-c",
+                    "if test -f \"$1\"; then echo true; else echo false; fi",
+                    "probe",
+                ])
+                .arg(path);
+                cmd
+            },
+            Duration::from_secs(2),
+        )
+        .unwrap();
         worker
             .send(FileCheckRequest {
                 id: 7,
@@ -154,7 +218,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("missing.py");
 
-        let worker = FileCheckWorker::new().unwrap();
+        let worker = FileCheckWorker::with_probe(
+            |path| {
+                let mut cmd = std::process::Command::new("/bin/sh");
+                cmd.args([
+                    "-c",
+                    "if test -f \"$1\"; then echo true; else echo false; fi",
+                    "probe",
+                ])
+                .arg(path);
+                cmd
+            },
+            Duration::from_secs(2),
+        )
+        .unwrap();
         worker
             .send(FileCheckRequest {
                 id: 1,
@@ -169,5 +246,46 @@ mod tests {
         assert_eq!(response.id, 1);
         assert!(!response.exists);
         assert!(!response.mapped);
+    }
+    #[test]
+    fn slow_probe_times_out_and_worker_shutdown_cancels_inflight_check() {
+        for timeout in [Duration::from_millis(40), Duration::from_secs(60)] {
+            let dir = tempfile::tempdir().unwrap();
+            let ready = dir.path().join("ready");
+            let marker = ready.clone();
+            let worker = FileCheckWorker::with_probe(
+                move |_| {
+                    let mut command = std::process::Command::new("/bin/sh");
+                    command
+                        .args(["-c", "touch \"$1\"; exec sleep 60", "probe"])
+                        .arg(&marker);
+                    command
+                },
+                timeout,
+            )
+            .unwrap();
+            worker
+                .send(FileCheckRequest {
+                    id: 1,
+                    logical_path: "/slow".into(),
+                    native_path: "/slow".into(),
+                    mapped: false,
+                    language: "shell".into(),
+                })
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while !ready.exists() {
+                assert!(Instant::now() < deadline);
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            if timeout < Duration::from_secs(1) {
+                let response = recv_response(&worker);
+                assert!(!response.exists);
+                assert!(response.error.unwrap().contains("timed out"));
+            }
+            let start = Instant::now();
+            drop(worker);
+            assert!(start.elapsed() < Duration::from_secs(2));
+        }
     }
 }

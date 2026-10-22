@@ -184,10 +184,7 @@ fn run_search_with_options(
     limit: usize,
     options: &SearchOptions,
 ) -> Result<Vec<JsonRow>> {
-    anyhow::ensure!(
-        limit > 0 && i64::try_from(limit).is_ok(),
-        "Result limit must be a positive integer within SQLite range"
-    );
+    scat_core::core::db::validate_search_limit(limit)?;
     anyhow::ensure!(
         options.role.is_none() || options.mode == SearchMode::Declares,
         "Role requires declared-file mode"
