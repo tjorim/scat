@@ -1,9 +1,9 @@
 use regex::Regex;
 use rusqlite::{Connection, params_from_iter, types::Value as SqlValue};
-use serde_json::Value;
 
 use crate::core::db::{
-    JsonRow, append_script_filters, fts_query_filtered, query_rows, row_string, row_to_map,
+    JsonRow, append_script_filters, fts_query_filtered, query_rows, row_string,
+    validate_search_limit,
 };
 use crate::core::script_view::logical_parent_dir;
 use crate::error::{Error, Result};
@@ -41,7 +41,7 @@ impl SearchApi {
         owner: Option<&str>,
         tag: Option<&str>,
     ) -> Result<Vec<JsonRow>> {
-        let lim = limit as i64;
+        let lim = validate_search_limit(limit)?;
         let mut sql =
             String::from("SELECT * FROM scripts WHERE INSTR(LOWER(logical_path), LOWER(?)) > 0");
         let mut params = vec![SqlValue::Text(query.to_string())];
@@ -73,35 +73,30 @@ impl SearchApi {
         owner: Option<&str>,
         tag: Option<&str>,
     ) -> Result<Vec<JsonRow>> {
+        validate_search_limit(limit)?;
         let re = Regex::new(pattern)
             .map_err(|e| Error::Validation(format!("invalid regex pattern {pattern:?}: {e}")))?;
 
-        let mut sql = String::from("SELECT * FROM scripts WHERE 1=1");
+        let mut sql = String::from("SELECT id, logical_path, purpose FROM scripts WHERE 1=1");
         let mut params = Vec::new();
         append_script_filters(&mut sql, &mut params, None, language, owner, tag);
         sql.push_str(" ORDER BY logical_path");
 
         let mut stmt = self.conn.prepare_cached(&sql)?;
-        let cols: Vec<String> = stmt
-            .column_names()
-            .iter()
-            .map(std::string::ToString::to_string)
-            .collect();
         let mut rows = stmt.query(params_from_iter(params))?;
 
         let mut results = Vec::new();
         while let Some(row) = rows.next()? {
-            let json_row = row_to_map(row, &cols);
-            let path = json_row
-                .get("logical_path")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            let purpose = json_row
-                .get("purpose")
-                .and_then(Value::as_str)
-                .unwrap_or("");
+            // Inspect borrowed text first: rejected rows must not copy script content
+            // or serialize every column into JSON.
+            let path = row.get_ref("logical_path")?.as_str().unwrap_or("");
+            let purpose = row.get_ref("purpose")?.as_str().unwrap_or("");
             if re.is_match(path) || re.is_match(purpose) {
-                results.push(json_row);
+                results.extend(query_script_rows(
+                    &self.conn,
+                    "SELECT * FROM scripts WHERE id = ?",
+                    vec![SqlValue::Integer(row.get("id")?)],
+                )?);
                 if results.len() >= limit {
                     break;
                 }
@@ -124,8 +119,9 @@ impl SearchApi {
         limit: usize,
         offset: usize,
     ) -> Result<Vec<JsonRow>> {
-        let lim = limit as i64;
-        let off = offset as i64;
+        let lim = validate_search_limit(limit)?;
+        let off = i64::try_from(offset)
+            .map_err(|_| Error::Validation("Offset exceeds SQLite range".into()))?;
         let mut sql = String::from("SELECT * FROM scripts WHERE 1=1");
         let mut params = Vec::new();
         append_script_filters(&mut sql, &mut params, None, language, owner, tag);
@@ -162,27 +158,18 @@ impl SearchApi {
         if dir.is_empty() {
             return Ok(vec![]);
         }
-        // Escape LIKE metacharacters in the folder path so a literal `%`/`_`
-        // in a directory name can't widen the match.
-        let escaped_dir = dir
-            .replace('\\', "\\\\")
-            .replace('%', "\\%")
-            .replace('_', "\\_");
         let prefix = if dir == "/" {
-            escaped_dir
+            dir.to_owned()
         } else {
-            format!("{escaped_dir}/")
+            format!("{dir}/")
         };
-        let one_level = format!("{prefix}%");
-        let two_level = format!("{prefix}%/%");
-
         query_script_rows(
             &self.conn,
             "SELECT * FROM scripts
-             WHERE logical_path LIKE ?1 ESCAPE '\\'
-               AND logical_path NOT LIKE ?2 ESCAPE '\\'
+             WHERE substr(logical_path, 1, length(?1)) = ?1 COLLATE BINARY
+               AND instr(substr(logical_path, length(?1) + 1), '/') = 0
              ORDER BY logical_path",
-            vec![SqlValue::Text(one_level), SqlValue::Text(two_level)],
+            vec![SqlValue::Text(prefix)],
         )
     }
 
@@ -204,32 +191,21 @@ impl SearchApi {
         if dir.is_empty() {
             return Ok(vec![]);
         }
-        let escaped_dir = dir
-            .replace('\\', "\\\\")
-            .replace('%', "\\%")
-            .replace('_', "\\_");
-        let (escaped_prefix, prefix) = if dir == "/" {
-            (escaped_dir, dir.to_string())
+        let prefix = if dir == "/" {
+            dir.to_owned()
         } else {
-            (format!("{escaped_dir}/"), format!("{dir}/"))
+            format!("{dir}/")
         };
-        let pattern = format!("{escaped_prefix}%/%");
-        // SQLite substr is 1-indexed and counts characters for text, so the
-        // unescaped prefix's char count locates the first char after it.
-        let start = (prefix.chars().count() + 1) as i64;
-
         let mut stmt = self.conn.prepare_cached(
-            "SELECT DISTINCT substr(substr(logical_path, ?2), 1,
-                                    instr(substr(logical_path, ?2), '/') - 1) AS name
+            "SELECT DISTINCT substr(substr(logical_path, length(?1) + 1), 1,
+                                    instr(substr(logical_path, length(?1) + 1), '/') - 1) AS name
              FROM scripts
-             WHERE logical_path LIKE ?1 ESCAPE '\\'
+             WHERE substr(logical_path, 1, length(?1)) = ?1 COLLATE BINARY
+               AND instr(substr(logical_path, length(?1) + 1), '/') > 0
              ORDER BY name",
         )?;
         let rows: Result<Vec<String>> = stmt
-            .query_map(
-                rusqlite::params![SqlValue::Text(pattern), SqlValue::Integer(start)],
-                |row| row.get(0),
-            )?
+            .query_map(rusqlite::params![prefix], |row| row.get(0))?
             .map(|r| r.map_err(Error::from))
             .collect();
         rows

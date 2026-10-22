@@ -1,5 +1,7 @@
 # Script Catalog
 
+<img src="assets/icon.svg" width="96" height="96" alt="scat script catalog icon">
+
 The **Script Catalog** is a tool for discovering, searching, and understanding scripts.
 
 It provides:
@@ -10,6 +12,18 @@ It provides:
 - Offline support for RHEL environments (no internet required)
 
 The catalog is **indexed nightly** on a central CRON server and consumed **read‑only** by engineers on RHEL systems.
+
+## Documentation
+
+[Website source and preview instructions](site/README.md) ·
+[Project website](https://tjorim.github.io/scat/) (available after Pages deployment)
+
+- [Quick start](docs/QUICKSTART.md): setup, search, browsing and troubleshooting
+- [TUI controls and CLI coverage](docs/TUI_OPTIONS.md): workflows and terminal modes
+- [Deployment](docs/VENDORING.md): standalone binary, RPM and RHEL validation
+- [Architecture](docs/ARCHITECTURE.md): paths, read-only access and publication
+- [vc contract](docs/VC_CONTRACT.md): checkout and revision semantics
+- [Contributing](CONTRIBUTING.md): toolchain and development checks
 
 ---
 
@@ -57,7 +71,7 @@ This tool provides a **single searchable index** without:
 │   ↑ scat TUI  │                │   ↑ scat TUI  │
 └───────────────┘                └───────────────┘
 
-````
+```
 
 ---
 
@@ -87,7 +101,7 @@ This tool provides a **single searchable index** without:
 - Man pages: `scat man --dir /usr/share/man/man1` (one page per command; the RPM installs them)
 - Find related scripts by embedding similarity: `scat similar <path> [--limit N]`
   — requires an `embeddings.sqlite` sidecar built separately by `scat-embed`
-  (see [crates/scat-embed](crates/scat-embed)) and published next to the
+  (see the [scat-embed source](crates/scat-embed/src/main.rs)) and published next to the
   catalog (or wherever `embeddings_path`/`--embeddings`/`SCAT_EMBEDDINGS`
   points); ranks scripts already in the catalog against each other and never
   embeds a typed query — see
@@ -164,7 +178,7 @@ scat deps /catalog/scripts/foo/bar.py --tree --depth 3
 scat catalog stats
 scat tui
 scat completions bash
-````
+```
 
 ### TUI discovery and small terminals
 
@@ -296,7 +310,8 @@ example covering every field.
 Separately, `scat tui` accepts an optional **path-mapping file** (`--mapping
 <path>` / `SCAT_MAPPING`) that resolves a script's logical catalog path to
 its real filesystem path, used by the `V` (view live filesystem source)
-key. See
+key. `scat doctor PATH --mapping <path>` accepts the same file for host-local
+diagnostics. See
 **[docs/scat-mapping.example.yaml](docs/scat-mapping.example.yaml)**.
 
 ***
@@ -316,8 +331,7 @@ file instead — see [docs/scat-mapping.example.yaml](docs/scat-mapping.example.
 
 ### Local catalog cache
 
-The published `scripts.sqlite` lives on a shared network drive, but no `scat`
-process queries it there. On first use after a rebuild, one process copies the
+The published `scripts.sqlite` lives on a shared network drive, and normal browsing uses a local copy. On first use after a rebuild, one process copies the
 catalog into tmpfs (`/dev/shm` by default) with SQLite's Online Backup API and
 every `scat` process on that host — TUI session or one-off CLI query — reads
 the local copy instead. Staleness is detected from the published file's
@@ -441,8 +455,9 @@ wheels, and the `scat.sh` bootstrap script.
 *   No central web UI
 *   No live filesystem monitoring
 *   No mandatory Git usage
-*   No write access from clients
-*   No AI or semantic search (for now)
+*   Read-only browsing; catalog publication requires an explicit administrator build
+*   No local embedding model or typed-query semantic search on clients; optional
+    script-to-script similarity uses a separately built sidecar
 
 ***
 
@@ -462,14 +477,7 @@ This project was developed with significant assistance from AI coding assistants
 
 ***
 
-## License
-
-See [LICENSE](LICENSE).
-
-See [TUI option coverage and administration](docs/TUI_OPTIONS.md) for catalog
-information, audit controls, explicit build/vc execution, and the CLI coverage matrix.
-
-### Host diagnostics
+## Host diagnostics
 
 Run `scat doctor` (or `scat doctor --json` for support tooling) without a working
 catalog or privileged access. In the TUI, choose **Host diagnostics** from F4 or
@@ -513,3 +521,9 @@ for further investigation. An active fapolicyd service does not prove enforcemen
 See Red Hat's [SELinux troubleshooting](https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/9/html/using_selinux/assembly_troubleshooting-problems-related-to-selinux_using-selinux)
 and [fapolicyd guidance](https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/10/html/security_hardening/blocking-and-allowing-applications-by-using-fapolicyd)
 for administrator-owned investigations.
+
+## License
+
+A project license has not yet been specified; this repository contains no
+LICENSE file. The optional RPM records `LicenseRef-Unspecified`; see the
+[deployment guide](docs/VENDORING.md) before distributing packages.

@@ -76,7 +76,9 @@ impl TuiApp {
             return;
         }
         self.inflight_filecheck_id = None;
-        if response.exists {
+        if let Some(error) = response.error {
+            self.error = Some(format!("Could not check live source: {error}"));
+        } else if response.exists {
             // The file may exist at the logical path itself (e.g. running scat
             // on the host where the catalog was built, where logical paths are
             // real filesystem paths), so a missing mapping is not an error here.

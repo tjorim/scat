@@ -4,6 +4,7 @@ use std::collections::BTreeSet;
 
 use crate::core::db::{
     DECLARED_FILE_KINDS, JsonRow, append_script_filters, query_rows, row_string, row_to_map,
+    validate_search_limit,
 };
 use crate::error::{Error, Result};
 
@@ -361,7 +362,7 @@ impl SearchApi {
         owner: Option<&str>,
         tag: Option<&str>,
     ) -> Result<Vec<JsonRow>> {
-        let lim = limit as i64;
+        let lim = validate_search_limit(limit)?;
         let pattern = format!("%{name}%");
         let mut sql = String::from(
             "SELECT DISTINCT s.*
@@ -393,6 +394,7 @@ impl SearchApi {
         owner: Option<&str>,
         tag: Option<&str>,
     ) -> Result<Vec<JsonRow>> {
+        let lim = validate_search_limit(limit)?;
         let escaped = needle
             .replace('\\', "\\\\")
             .replace('%', "\\%")
@@ -417,7 +419,7 @@ impl SearchApi {
         }
         append_script_filters(&mut sql, &mut params, Some("s."), language, owner, tag);
         sql.push_str(" ORDER BY s.logical_path LIMIT ?");
-        params.push(SqlValue::Integer(limit as i64));
+        params.push(SqlValue::Integer(lim));
         query_script_rows(&self.conn, &sql, params)
     }
 

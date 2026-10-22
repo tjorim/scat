@@ -259,7 +259,7 @@ pub(super) fn make_app(db_path: &std::path::Path) -> TuiApp {
     let diff_worker = DiffWorker::new(db_path).unwrap();
     let folder_worker = FolderWorker::new(db_path).unwrap();
     let stats_worker = StatsWorker::new(db_path).unwrap();
-    TuiApp::new(
+    let mut app = TuiApp::new(
         search_worker,
         detail_worker,
         diff_worker,
@@ -267,7 +267,25 @@ pub(super) fn make_app(db_path: &std::path::Path) -> TuiApp {
         stats_worker,
         PathResolver::new(),
     )
-    .unwrap()
+    .unwrap();
+    // Unit tests run a libtest executable, which cannot serve the production
+    // hidden subcommand. Integration tests cover the real probe executable.
+    app.file_check_worker = super::FileCheckWorker::with_probe(
+        |path| {
+            let mut command = std::process::Command::new("/bin/sh");
+            command
+                .args([
+                    "-c",
+                    "if test -f \"$1\"; then echo true; else echo false; fi",
+                    "probe",
+                ])
+                .arg(path);
+            command
+        },
+        std::time::Duration::from_secs(2),
+    )
+    .unwrap();
+    app
 }
 
 fn drain_until_folder_loaded(app: &mut TuiApp, previous_dir: Option<&str>) {

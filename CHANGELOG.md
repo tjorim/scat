@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Website and artwork
+
+- Add a shared terminal/catalog icon, raster derivatives and a responsive static
+  landing page with a fictional search demo, setup links and a GitHub Pages workflow.
+
+### Reliability and search
+
+- Bound live-source file checks to six seconds in an isolated subprocess and
+  cancel in-flight checks on TUI shutdown. Failed or timed-out probes report an
+  error rather than treating the source as missing.
+- Cancel requested comparison/export subprocess groups when their TUI dialog
+  closes, including child processes.
+- Keep folder and subdirectory navigation case-sensitive for Linux paths.
+- Match regex searches against path/purpose before fetching full script rows.
+- Reject zero and out-of-range search limits consistently in CLI, TUI and core
+  queries; reject offsets outside SQLite's integer range.
+
 ### TUI
 
 - Add `tui.glyphs` / `tui.colors` to the config file as site-wide terminal-mode defaults (flag, then environment, then config, then detection; unknown values are an error). Add scrollbars to the help/command-palette popup, the similar/status/dependency/symlink pages and the workflow output pane, make the workflow help page scrollable, and stop workflow output paging past its last line. Add a TUI-versus-CLI row-parity test over every search mode, filter, role and limit, backed by a shared `collect_results` that `scat search` now prints from.

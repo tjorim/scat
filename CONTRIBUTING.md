@@ -3,7 +3,7 @@
 ## Rust toolchain
 
 The Rust implementation uses Rust 2024 edition and supports Rust
-1.88.0 or newer.
+1.95.0 or newer.
 
 CI checks the minimum supported Rust version (MSRV) with `cargo check --locked
 --all-targets` and runs formatting, clippy, and tests on the current stable
@@ -20,3 +20,11 @@ policy, and `CHANGELOG.md`.
 Run `cargo fmt` before committing Rust changes.
 
 CI enforces formatting with `cargo fmt --check`.
+
+## Documentation
+
+Start with [README.md](README.md) for the overview and
+[docs/QUICKSTART.md](docs/QUICKSTART.md) for everyday workflows. Update the
+relevant guide when commands, defaults, configuration or shortcuts change.
+Verify examples against `src/cli.rs` and keep the
+[TUI coverage matrix](docs/TUI_OPTIONS.md) in sync with new actions.

@@ -15,24 +15,27 @@ separate portable-prefix scheme to keep in sync with it.
 
 For the rarer case where a client's local mount doesn't match the indexing
 host's layout, `scat`'s client tools accept an optional mapping file
-(`--mapping`, see `docs/scat-mapping.example.yaml`) that translates a logical
+(`--mapping`, see [the mapping example](scat-mapping.example.yaml)) that translates a logical
 path's leading segment to that host's real root before opening the file.
 Absent a mapping, the logical path *is* the real path.
 
 ---
 
-## 2. CRON-only indexing
+## 2. Central catalog publication
 
-The Rust indexer (`src/indexer/`) **runs exclusively on the central RHEL CRON server**, nightly.  
-No other machine, user process, or tool is permitted to write to the database.
+In the shared-catalog deployment, the Rust indexer (`src/indexer/`) runs on
+the central RHEL CRON server nightly. Only the designated publisher should
+replace the shared catalog; ordinary clients consume it read-only.
 
 Rationale:
-- Tree-sitter grammar compilation is a one-time, server-side step.
-- Indexing requires read access to the script directories, which only the CRON server has.
+- Tree-sitter grammars are compiled into the binary; parsing runs during indexing.
+- The indexing host has read access to all configured script directories.
 - Keeping a single writer eliminates write conflicts and simplifies operations.
 
 Concretely this means:
-- The `index` command is run only by the CRON job.
+- The CRON job runs `scat catalog build`.
+- Authorized administrators can explicitly invoke the same build through the CLI
+  or the TUI administration dialog; launching the TUI never starts a build.
 - Client commands open the database in **read-only mode**.
 
 ---
@@ -88,12 +91,13 @@ observes a half-written database.
 
 ---
 
-## 3a. Clients read a host-local copy, not the share
+## 3a. Host-local catalog cache
 
-Clients never query the published catalog on the network share directly.
+Clients normally query a host-local copy of the published catalog.
 `core::cache` copies it into tmpfs (`/dev/shm`) once per host per rebuild —
 via SQLite's Online Backup API, under an `flock` so concurrent starters
-produce one copy — and every read-only command opens that copy.
+produce one copy — and normal browsing commands open that copy.
+`--no-cache` deliberately bypasses it.
 
 Rationale:
 - SQLite's own documentation flags network filesystems as a known source of
@@ -147,7 +151,8 @@ codebase rely on POSIX semantics rather than paper over the differences:
   backslash-bearing unquoted program paths.
 - The path-mapping file's `windows:` root is ignored (files carrying one
   still load).
-- `/dev/shm` can be assumed present for the local catalog cache.
+- `/dev/shm` is the default cache location; unavailable or unusable caches fall
+  back to the published catalog.
 
 The build fails fast on non-Unix targets (`src/lib.rs`).
 

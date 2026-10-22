@@ -42,6 +42,7 @@ pub fn collect_results(
         ..
     } = opts;
     let limit = *limit;
+    scat_core::core::db::validate_search_limit(limit)?;
 
     let (results, is_fts) = if let Some(file) = declares {
         let rows = api

@@ -96,9 +96,8 @@ impl Editor {
         }
         let limit = self.fields[5]
             .parse::<usize>()
-            .ok()
-            .filter(|n| *n > 0 && i64::try_from(*n).is_ok())
-            .ok_or("Limit must be a positive integer")?;
+            .map_err(|_| "Limit must be a positive integer")?;
+        scat_core::core::db::validate_search_limit(limit).map_err(|e| e.to_string())?;
         Ok((
             SearchOptions {
                 mode,

@@ -42,3 +42,6 @@ Thumbs.db
 .coverage
 htmlcov/
 .claude/settings.local.json
+
+# Assembled GitHub Pages website
+_site/

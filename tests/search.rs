@@ -2317,3 +2317,96 @@ fn list_scripts_owner_and_tag_filter() {
         "/catalog/scripts/a.py"
     );
 }
+
+#[test]
+fn folder_queries_preserve_case_and_literal_path_characters() {
+    let (api, _file) = make_api();
+    for path in [
+        "/catalog/Tools/a.py",
+        "/catalog/tools/b.py",
+        "/catalog/Tools/Upper/c.py",
+        "/catalog/tools/lower/d.py",
+        "/catalog/T_%[x]\\/literal.py",
+        "/catalog/T_%[x]\\/child/e.py",
+    ] {
+        insert(&api, path, "", "python", "", "");
+    }
+    let paths: Vec<_> = api
+        .scripts_in_dir("/catalog/Tools")
+        .unwrap()
+        .iter()
+        .map(|r| r["logical_path"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(paths, ["/catalog/Tools/a.py"]);
+    assert_eq!(api.subdirs_of("/catalog/Tools").unwrap(), ["Upper"]);
+    assert_eq!(api.subdirs_of("/catalog/tools").unwrap(), ["lower"]);
+    assert_eq!(api.scripts_in_dir("/catalog/T_%[x]\\").unwrap().len(), 1);
+    assert_eq!(api.subdirs_of("/catalog/T_%[x]\\").unwrap(), ["child"]);
+}
+
+#[test]
+fn every_search_mode_rejects_zero_and_out_of_range_limits() {
+    let (api, _file) = make_api();
+    insert(&api, "/catalog/a.py", "alpha", "python", "", "alpha");
+    for limit in [0, usize::MAX] {
+        assert!(
+            api.search_with_filters("alpha", limit, None, None, None)
+                .is_err()
+        );
+        assert!(
+            api.search_with_filters("", limit, None, None, None)
+                .is_err()
+        );
+        assert!(
+            api.search_by_path_with_filters("a", limit, None, None, None)
+                .is_err()
+        );
+        assert!(
+            api.search_by_regex_with_filters(".*", limit, None, None, None)
+                .is_err()
+        );
+        assert!(api.list_scripts(None, None, None, limit, 0).is_err());
+        assert!(
+            api.search_scripts_by_function_with_filters("a", limit, None, None, None)
+                .is_err()
+        );
+        assert!(
+            api.search_scripts_by_declared_file_with_filters("a", None, limit, None, None, None)
+                .is_err()
+        );
+    }
+    assert!(api.list_scripts(None, None, None, 1, usize::MAX).is_err());
+}
+
+#[test]
+fn regex_search_skips_large_content_and_preserves_complete_matches() {
+    let (api, _file) = make_api();
+    insert(
+        &api,
+        "/catalog/a.py",
+        &"x".repeat(8 * 1024 * 1024),
+        "python",
+        "alice",
+        "unrelated",
+    );
+    insert(
+        &api,
+        "/catalog/b.py",
+        "match content",
+        "python",
+        "bob",
+        "needle",
+    );
+    let rows = api
+        .search_by_regex_with_filters("needle", 1, None, None, None)
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec![api.get_script("/catalog/b.py").unwrap().unwrap()]
+    );
+    assert!(
+        api.search_by_regex_with_filters("not-present", 1, None, None, None)
+            .unwrap()
+            .is_empty()
+    );
+}
