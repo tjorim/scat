@@ -28,7 +28,7 @@ impl TuiApp {
     /// Only these states animate; when none hold, the screen is static and the
     /// run loop can leave it untouched (preserving any mouse selection).
     pub(super) fn is_animating(&self) -> bool {
-        (self.search_in_flight && self.results.is_empty())
+        (self.search.is_loading() && self.results.is_empty())
             || self.detail_loading
             || self.detail_diff_loading
             || self.stats_loading

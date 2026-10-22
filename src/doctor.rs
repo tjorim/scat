@@ -273,9 +273,9 @@ fn catalog(cli: &Cli) -> Value {
         .as_str()
         .map(Path::new)
         .unwrap_or(db);
-    let metadata = scat_core::core::search::open_search_api(read_path)
-        .and_then(|api| api.index_metadata())
-        .ok();
+    // Not `open_search_api`: an older/newer catalog must still be reported,
+    // with its `compatibility` verdict, rather than collapsing to `null`.
+    let metadata = scat_core::core::search::read_index_metadata(read_path).ok();
     let age = metadata
         .as_ref()
         .and_then(|m| {

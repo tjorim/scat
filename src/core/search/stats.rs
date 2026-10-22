@@ -1,7 +1,7 @@
 use rusqlite::OptionalExtension;
 use serde_json::Value;
 
-use crate::core::db::{SCHEMA_VERSION, query_rows, row_string};
+use crate::core::db::{SCHEMA_VERSION, query_rows, row_string, schema_compatibility};
 use crate::core::vc::{REVISION_TYPE_ARCHIVE, REVISION_TYPE_DEVELOP, REVISION_TYPE_WORKING};
 use crate::error::{Error, Result};
 
@@ -322,6 +322,7 @@ impl SearchApi {
             build_timestamp: ts.map_or(Value::Null, Value::String),
             schema_version: sv.map_or(Value::Null, |n| Value::Number(n.into())),
             current_schema_version: SCHEMA_VERSION,
+            compatibility: sv.map(schema_compatibility),
         })
     }
 

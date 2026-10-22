@@ -255,6 +255,9 @@ pub struct IndexMetadata {
     pub schema_version: Value,
     /// Schema version expected by the running binary.
     pub current_schema_version: i64,
+    /// Whether this binary can read the catalog; `None` when the catalog
+    /// carries no schema version at all.
+    pub compatibility: Option<crate::core::db::SchemaCompatibility>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -374,6 +377,18 @@ fn query_script_rows(conn: &Connection, sql: &str, params: Vec<SqlValue>) -> Res
     stmt.query_map(params_from_iter(params), |row| Ok(row_to_map(row, &cols)))?
         .map(|r| r.map_err(Error::from))
         .collect()
+}
+
+/// Read a catalog's [`IndexMetadata`] without requiring a compatible schema.
+///
+/// This is how `catalog info` and `doctor` can still say *why* a catalog is
+/// unreadable (older, newer, or not a catalog) instead of failing the same
+/// way every other command does.
+pub fn read_index_metadata(path: &std::path::Path) -> Result<IndexMetadata> {
+    if !path.exists() {
+        return Err(Error::NotFound(path.display().to_string()));
+    }
+    SearchApi::new(crate::core::db::open_readonly(path)?).index_metadata()
 }
 
 /// Open a read-only database and construct a [`SearchApi`].

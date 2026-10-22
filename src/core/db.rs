@@ -6,7 +6,41 @@ use tracing::{debug, trace};
 use crate::error::{Error, Result};
 
 /// Current SQLite schema version expected by this binary.
+///
+/// Bumping it is a coordinated-upgrade event: follow the schema-change
+/// checklist in `docs/COMPATIBILITY.md` (and update its version table, which
+/// a test checks) before merging.
 pub const SCHEMA_VERSION: i64 = 14;
+
+/// How a catalog's stored `schema_version` relates to this binary.
+///
+/// The compatibility *policy* lives in [`schema_compatibility`] and nowhere
+/// else; see `docs/COMPATIBILITY.md` for the decision behind it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SchemaCompatibility {
+    /// This binary reads the catalog.
+    Compatible,
+    /// The catalog predates this binary; its publisher must rebuild it.
+    CatalogOlder,
+    /// The catalog was published by a newer scat; this binary must be upgraded.
+    CatalogNewer,
+}
+
+/// Classify a catalog `schema_version` against this binary.
+///
+/// Policy: coordinated upgrades with an exact match — a client reads only the
+/// schema it was built for. Widening this (a reader window) is a one-function
+/// change here, but needs the decision in `docs/COMPATIBILITY.md` revisited
+/// first.
+#[must_use]
+pub fn schema_compatibility(found: i64) -> SchemaCompatibility {
+    match found.cmp(&SCHEMA_VERSION) {
+        std::cmp::Ordering::Equal => SchemaCompatibility::Compatible,
+        std::cmp::Ordering::Less => SchemaCompatibility::CatalogOlder,
+        std::cmp::Ordering::Greater => SchemaCompatibility::CatalogNewer,
+    }
+}
 
 /// Edge kinds for vc's author-declared related-file header keywords
 /// (`@parentfile`, `@childfile`, `@inputfile`, `@outputfile`, `@paramfile`),
@@ -375,10 +409,10 @@ pub fn open_db(path: &Path) -> Result<Connection> {
         )
         .map_err(|e| {
             Error::Validation(format!(
-                "database has no index_metadata ({e}) — re-index required (scat catalog build)"
+                "database has no index_metadata ({e}) — not a scat catalog, or published by a much older scat; the catalog publisher must (re)build it with `scat catalog build` (see docs/COMPATIBILITY.md)"
             ))
         })?;
-    if schema_version != SCHEMA_VERSION {
+    if schema_compatibility(schema_version) != SchemaCompatibility::Compatible {
         return Err(Error::SchemaMismatch {
             found: schema_version,
             expected: SCHEMA_VERSION,

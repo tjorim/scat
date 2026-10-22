@@ -38,7 +38,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::{debug, warn};
 
-use crate::core::db::open_readonly;
+use crate::core::db::{SchemaCompatibility, open_readonly, schema_compatibility};
 use crate::error::{Error, Result};
 
 /// Default cache root — tmpfs on every mainstream Linux distribution.
@@ -195,7 +195,9 @@ fn refresh(source: &Path, options: &CacheOptions) -> Result<Option<PathBuf>> {
         return Ok(Some(entry.db));
     }
 
-    entry.populate(source, &stamp)?;
+    if !entry.populate(source, &stamp)? {
+        return Ok(None);
+    }
     Ok(Some(entry.db))
 }
 
@@ -252,8 +254,23 @@ impl CacheEntry {
     }
 
     /// Copy `source` into the cache and record `stamp` as what it holds.
-    fn populate(&self, source: &Path, stamp: &SourceStamp) -> Result<()> {
+    ///
+    /// Returns `false`, copying nothing, when `source` is a catalog this scat
+    /// cannot read (see [`schema_compatibility`]): the caller then reads the
+    /// published file in place and reports the mismatch from there. Caching it
+    /// would only park an unopenable catalog in RAM — and a stale entry for an
+    /// older, readable build must not be served in its place either.
+    fn populate(&self, source: &Path, stamp: &SourceStamp) -> Result<bool> {
         let src = open_readonly(source)?;
+        let schema = schema_version(&src);
+        if schema.is_some_and(|v| schema_compatibility(v) != SchemaCompatibility::Compatible) {
+            debug!(
+                source = %source.display(),
+                schema_version = ?schema,
+                "published catalog schema is not readable by this scat; not caching it"
+            );
+            return Ok(false);
+        }
         // Only the catalog carries `index_metadata`; other SQLite files this
         // cache is used for (e.g. the scat-embed embeddings sidecar, which
         // has no such table) have no build marker to read, so the shortcut
@@ -266,11 +283,15 @@ impl CacheEntry {
         // The published file changed identity (a rebuild, a rotation, a
         // restore from backup) but still carries the build we already hold.
         // Re-stamp the existing copy instead of pulling every page across the
-        // network for a catalog we have byte-for-byte.
+        // network for a catalog we have byte-for-byte. The schema version is
+        // part of "the build": a timestamp alone must never pair a copy of
+        // one format with a published file of another.
         if self.db.is_file()
             && cached_build_timestamp(&self.db).as_deref() == Some(&*build_timestamp)
+            && cached_schema_version(&self.db) == schema
         {
-            return self.write_meta(stamp, build_timestamp);
+            self.write_meta(stamp, build_timestamp)?;
+            return Ok(true);
         }
 
         // A copy killed between creating its scratch file and renaming it
@@ -295,7 +316,8 @@ impl CacheEntry {
         // between the two leaves an entry that simply looks stale and gets
         // rebuilt, never one that looks fresh while holding the wrong build.
         fs::rename(&tmp, &self.db)?;
-        self.write_meta(stamp, build_timestamp)
+        self.write_meta(stamp, build_timestamp)?;
+        Ok(true)
     }
 
     /// Record what the cached copy now holds, atomically.
@@ -405,6 +427,21 @@ fn build_timestamp(conn: &Connection) -> Result<String> {
 fn cached_build_timestamp(path: &Path) -> Option<String> {
     let conn = open_readonly(path).ok()?;
     build_timestamp(&conn).ok()
+}
+
+/// `index_metadata.schema_version`, or `None` for a file without one (the
+/// embeddings sidecar, or a catalog that has no metadata row yet).
+fn schema_version(conn: &Connection) -> Option<i64> {
+    conn.query_row(
+        "SELECT schema_version FROM index_metadata WHERE id = 1",
+        [],
+        |row| row.get(0),
+    )
+    .ok()
+}
+
+fn cached_schema_version(path: &Path) -> Option<i64> {
+    schema_version(&open_readonly(path).ok()?)
 }
 
 // ---------------------------------------------------------------------------
@@ -714,6 +751,40 @@ mod tests {
             &cache_key(&source),
         );
         assert!(entry.is_current(&stamp));
+    }
+
+    #[test]
+    fn same_build_timestamp_with_another_schema_is_recopied_not_restamped() {
+        let dir = TempDir::new().unwrap();
+        let root = TempDir::new().unwrap();
+        let source = dir.path().join("scripts.sqlite");
+        let build = "2026-07-30T02:00:00";
+        publish(&source, build);
+        let cached = catalog_read_path(&source, &options(&root));
+
+        // A newer scat on the same host (cache entries are per-user, shared
+        // across scat versions) left a copy of the *same-timestamp* build in
+        // a schema this scat cannot read.
+        let newer = dir.path().join("newer.sqlite");
+        publish(&newer, build);
+        rusqlite::Connection::open(&newer)
+            .unwrap()
+            .execute(
+                "UPDATE index_metadata SET schema_version = schema_version + 1",
+                [],
+            )
+            .unwrap();
+        fs::copy(&newer, &cached).unwrap();
+
+        // The published file is replaced by the readable build: the entry must
+        // be recopied, not re-stamped on the strength of the timestamp alone.
+        let republished = dir.path().join("republished.sqlite");
+        publish(&republished, build);
+        fs::rename(&republished, &source).unwrap();
+
+        let refreshed = catalog_read_path(&source, &options(&root));
+        assert_ne!(refreshed, source);
+        assert!(crate::core::db::open_db(&refreshed).is_ok());
     }
 
     #[test]

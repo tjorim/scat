@@ -50,6 +50,9 @@ pub struct SearchResponse {
     pub result: std::result::Result<Vec<JsonRow>, String>,
 }
 
+/// Coalesces queued requests; running catalog reads are not interrupted.
+/// Drop closes the request channel and joins after outstanding work finishes.
+/// SearchState owns stale-response rejection independently of this worker.
 pub struct SearchWorker {
     request_tx: Option<Sender<SearchRequest>>,
     response_rx: Receiver<SearchResponse>,
@@ -346,6 +349,34 @@ mod tests {
         .unwrap();
         drop(conn);
         db
+    }
+
+    #[test]
+    fn closed_request_queue_finishes_only_the_newest_pending_search() {
+        // Queue everything before executing the loop: no scheduler race can
+        // decide which requests were already in flight.
+        let db = make_db();
+        let (requests, request_rx) = std::sync::mpsc::channel();
+        let (responses, response_rx) = std::sync::mpsc::channel();
+        for id in 0..3 {
+            requests
+                .send(SearchRequest {
+                    id,
+                    query: "alpha".into(),
+                    limit: 200,
+                    options: SearchOptions::default(),
+                })
+                .unwrap();
+        }
+        drop(requests);
+        super::worker_loop(db.path().to_owned(), request_rx, responses);
+        let response = response_rx.recv().unwrap();
+        assert_eq!(response.id, 2);
+        assert!(response.result.is_ok());
+        assert!(matches!(
+            response_rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Disconnected)
+        ));
     }
 
     #[test]

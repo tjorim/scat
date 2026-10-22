@@ -532,7 +532,7 @@ mod tests {
             load(&api, Path::new("/missing-sidecar"), &r)
                 .unwrap_err()
                 .to_string()
-                .contains("missing or incompatible")
+                .contains("no embeddings sidecar found")
         );
         let mut absent = r;
         absent.path = "/b".into();

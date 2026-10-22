@@ -17,7 +17,7 @@ allow = [
 ]
 
 [licenses.private]
-ignore = true
+ignore = false
 
 [bans]
 multiple-versions = "deny"
@@ -33,3 +33,16 @@ skip = [
   # and others are still on syn 2.x; allow this duplicate until they converge.
   { name = "syn" },
 ]
+
+# scat-embed's HTTPS CA certificate data uses CDLA-Permissive-2.0.
+# Section 2.1 requires the agreement text when sharing data; the
+# agreement text is included in generated release notices.
+[[licenses.exceptions]]
+name = "webpki-roots"
+version = "=1.0.9"
+allow = ["CDLA-Permissive-2.0"]
+
+[[licenses.exceptions]]
+name = "webpki-root-certs"
+version = "=1.0.9"
+allow = ["CDLA-Permissive-2.0"]

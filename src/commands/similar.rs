@@ -48,9 +48,11 @@ pub fn load_similar(
         anyhow::bail!("script '{path}' not found in catalog");
     }
 
-    let Some(sidecar) = EmbeddingsSidecar::open(sidecar_path) else {
+    // A sidecar that exists but is unusable (newer format, unreadable) is
+    // reported with its own reason, not folded into "missing".
+    let Some(sidecar) = EmbeddingsSidecar::open_checked(sidecar_path)? else {
         anyhow::bail!(
-            "no embeddings sidecar found at {} (missing or incompatible) — generate one with scat-embed \
+            "no embeddings sidecar found at {} — generate one with scat-embed \
              (see crates/scat-embed) and publish it there to use `scat similar`",
             sidecar_path.display()
         );
@@ -72,11 +74,17 @@ pub fn load_similar(
         );
     };
     let results = drop_stale_and_truncate(api, all_ranked, limit);
-    let mut warning = None;
+    let mut notes = Vec::new();
+
+    if let Some(build) = api.index_metadata()?.build_timestamp.as_str()
+        && let Some(note) = sidecar.provenance_note(build)
+    {
+        notes.push(note);
+    }
 
     let total_scripts = api.stats()?.total_scripts;
     if (sidecar.len() as i64) < total_scripts {
-        warning = Some(format!(
+        notes.push(format!(
             "note: embeddings sidecar ({}) covers {}/{total_scripts} cataloged scripts; \
              results may miss scripts added since the last scat-embed run",
             sidecar.model(),
@@ -84,7 +92,7 @@ pub fn load_similar(
         ));
     }
 
-    Ok((results, warning))
+    Ok((results, (!notes.is_empty()).then(|| notes.join(" "))))
 }
 
 /// Drop ranked results for scripts no longer in the catalog, then take the

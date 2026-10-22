@@ -16,9 +16,45 @@
 
 use std::path::{Path, PathBuf};
 
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::Serialize;
+use thiserror::Error;
 use tracing::warn;
+
+/// Sidecar layout this scat reads (`script_embeddings`, plus the optional
+/// `embedding_metadata` table). `scat-embed` writes the same constant; a
+/// sidecar with no `embedding_metadata` table predates versioning and is
+/// format 1. Bump it only for a layout older clients cannot read, and update
+/// `docs/COMPATIBILITY.md`.
+pub const SIDECAR_FORMAT_VERSION: i64 = 1;
+
+/// Why a sidecar that exists could not be used.
+#[derive(Debug, Error)]
+pub enum SidecarError {
+    /// Written by a newer `scat-embed` in a layout this scat does not read.
+    #[error(
+        "embeddings sidecar {path} is format {found}, but this scat reads format {supported} — \
+         this scat is older than the sidecar; upgrade scat on this host (see docs/COMPATIBILITY.md)"
+    )]
+    UnsupportedFormat {
+        /// Sidecar that was opened.
+        path: String,
+        /// Format recorded in the sidecar.
+        found: i64,
+        /// Format this scat reads.
+        supported: i64,
+    },
+    /// Not a SQLite database, or missing/odd tables.
+    #[error(
+        "embeddings sidecar {path} is unreadable ({reason}) — rebuild and republish it with scat-embed"
+    )]
+    Unreadable {
+        /// Sidecar that was opened.
+        path: String,
+        /// Underlying failure.
+        reason: String,
+    },
+}
 
 /// The sidecar's conventional location: same directory as the published
 /// catalog, fixed filename. `scat-embed --output` can point anywhere, but
@@ -70,6 +106,9 @@ pub struct NearDuplicatePair {
 pub struct EmbeddingsSidecar {
     embeddings: Vec<Embedding>,
     model: String,
+    /// `index_metadata.build_timestamp` of the catalog the sidecar was built
+    /// from; `None` for a sidecar written before provenance was recorded.
+    catalog_build_timestamp: Option<String>,
 }
 
 impl EmbeddingsSidecar {
@@ -78,29 +117,76 @@ impl EmbeddingsSidecar {
     /// Returns `Ok(None)` when `path` doesn't exist: the sidecar is built
     /// out of band by a separate tool and is never guaranteed to be present,
     /// so a missing file means the feature isn't available yet, not that the
-    /// command failed. Any other failure to open or read it (not a SQLite
-    /// database, missing table) is logged and also folded into `Ok(None)`,
-    /// on the same reasoning `core::cache` uses for the catalog cache: a
-    /// broken or half-configured sidecar shouldn't take down a command that
-    /// depends on it, only leave the feature unavailable.
-    pub fn open(path: &Path) -> Option<Self> {
+    /// command failed. A sidecar that exists but cannot be used is an
+    /// [`SidecarError`] saying why (unsupported newer format, unreadable) so
+    /// callers can tell it apart from "absent" instead of pairing with it
+    /// silently or hiding it.
+    pub fn open_checked(path: &Path) -> Result<Option<Self>, SidecarError> {
         if !path.is_file() {
-            return None;
+            return Ok(None);
         }
-        let conn = match Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY) {
-            Ok(conn) => conn,
-            Err(err) => {
-                warn!(path = %path.display(), error = %err, "failed to open embeddings sidecar");
-                return None;
-            }
+        let unreadable = |err: &dyn std::fmt::Display| SidecarError::Unreadable {
+            path: path.display().to_string(),
+            reason: err.to_string(),
         };
-        match read_embeddings(&conn) {
-            Ok((embeddings, model)) => Some(Self { embeddings, model }),
+        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|e| unreadable(&e))?;
+        let (format_version, catalog_build_timestamp) =
+            read_metadata(&conn).map_err(|e| unreadable(&e))?;
+        if format_version > SIDECAR_FORMAT_VERSION {
+            return Err(SidecarError::UnsupportedFormat {
+                path: path.display().to_string(),
+                found: format_version,
+                supported: SIDECAR_FORMAT_VERSION,
+            });
+        }
+        let (embeddings, model) = read_embeddings(&conn).map_err(|e| unreadable(&e))?;
+        Ok(Some(Self {
+            embeddings,
+            model,
+            catalog_build_timestamp,
+        }))
+    }
+
+    /// [`open_checked`](Self::open_checked) for optional consumers: absent,
+    /// unsupported and unreadable sidecars all leave the feature unavailable
+    /// rather than failing the command, on the same reasoning `core::cache`
+    /// uses for the catalog cache. The reason is logged; callers that can
+    /// show it to the user should use `open_checked` instead.
+    pub fn open(path: &Path) -> Option<Self> {
+        match Self::open_checked(path) {
+            Ok(sidecar) => sidecar,
             Err(err) => {
-                warn!(path = %path.display(), error = %err, "embeddings sidecar is unreadable");
+                warn!(path = %path.display(), error = %err, "embeddings sidecar not usable");
                 None
             }
         }
+    }
+
+    /// Note to show the user when the sidecar was built from a different
+    /// catalog build than `catalog_build_timestamp` (the one being queried).
+    ///
+    /// Pairing is by `logical_path`, so a sidecar from another build is still
+    /// usable — scat-embed runs out of band and is routinely older than the
+    /// nightly catalog — but never silently. `None` when the builds match or
+    /// the sidecar records no provenance (published by an older scat-embed).
+    #[must_use]
+    pub fn provenance_note(&self, catalog_build_timestamp: &str) -> Option<String> {
+        let built_from = self.catalog_build_timestamp.as_deref()?;
+        (built_from != catalog_build_timestamp).then(|| {
+            format!(
+                "note: embeddings sidecar ({}) was built from catalog build {built_from}, \
+                 but the catalog is build {catalog_build_timestamp}; results may not reflect \
+                 scripts changed since — rerun scat-embed against the current catalog",
+                self.model,
+            )
+        })
+    }
+
+    /// Catalog build the sidecar was generated from, when it recorded one.
+    #[must_use]
+    pub fn catalog_build_timestamp(&self) -> Option<&str> {
+        self.catalog_build_timestamp.as_deref()
     }
 
     /// Embedding model recorded in the sidecar (every row shares one, since
@@ -226,6 +312,27 @@ impl EmbeddingsSidecar {
         });
         results
     }
+}
+
+/// `(format_version, catalog_build_timestamp)` from `embedding_metadata`.
+/// A sidecar without that table is a pre-versioning one: format 1, no provenance.
+fn read_metadata(conn: &Connection) -> rusqlite::Result<(i64, Option<String>)> {
+    let has_table: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'embedding_metadata')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_table {
+        return Ok((1, None));
+    }
+    Ok(conn
+        .query_row(
+            "SELECT format_version, catalog_build_timestamp FROM embedding_metadata WHERE id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?
+        .unwrap_or((1, None)))
 }
 
 fn read_embeddings(conn: &Connection) -> rusqlite::Result<(Vec<Embedding>, String)> {

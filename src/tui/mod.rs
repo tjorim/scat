@@ -2,7 +2,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -43,6 +43,7 @@ mod perf_tests;
 mod render;
 mod search_input;
 mod search_settings;
+mod search_state;
 mod search_worker;
 mod stats_worker;
 #[cfg(test)]
@@ -282,14 +283,10 @@ struct TuiApp {
     detail_loading: bool,
     inflight_detail_id: Option<u64>,
     next_detail_id: u64,
-    last_keystroke_at: Option<Instant>,
     /// Active `lang:`/`owner:`/`tag:` filter labels for the current query,
     /// recomputed only when the query changes (not per render frame).
     filter_labels: Vec<String>,
-    pending_query: Option<String>,
-    inflight_query_id: Option<u64>,
-    search_in_flight: bool,
-    next_query_id: u64,
+    search: search_state::SearchState,
     fullscreen: bool,
     tick: u64,
     /// Set whenever visible state changes; the run loop only repaints when
@@ -356,6 +353,13 @@ pub fn run(
     options: RunOptions,
 ) -> Result<()> {
     options.terminal_modes.validate()?;
+    // The workers open the catalog on their own threads, where a schema
+    // mismatch would only surface as a per-query error inside the fullscreen
+    // UI. Check once up front so it is reported on the terminal, with the
+    // actionable message, before any terminal setup.
+    scat_core::core::db::open_db(db_path)
+        .map(drop)
+        .with_context(|| format!("Failed to open database: {}", source_db.display()))?;
     let search_worker = SearchWorker::new(db_path)?;
     let detail_worker = DetailWorker::new(db_path)?;
     let diff_worker = DiffWorker::new(db_path)?;
@@ -487,13 +491,13 @@ impl TuiApp {
         self.drain_stats_channel();
         self.drain_inspection();
         self.drain_workflow();
-        if self.pending_query.is_some()
-            && self.last_keystroke_at.is_some_and(|keystroke| {
+        if self.search.pending_query.is_some()
+            && self.search.last_keystroke_at.is_some_and(|keystroke| {
                 now.saturating_duration_since(keystroke) >= Duration::from_millis(DEBOUNCE_MS)
             })
         {
-            self.last_keystroke_at = None;
-            self.dispatch_query()?;
+            self.search.last_keystroke_at = None;
+            self.dispatch_query();
             self.needs_redraw = true;
         }
         // Advance the spinner only while something is loading; a frozen tick
@@ -509,7 +513,7 @@ impl TuiApp {
     /// the loop drains rather than as terminal events, so it keeps polling
     /// at `POLL_TICK_MS` until they land.
     fn has_pending_work(&self) -> bool {
-        self.search_in_flight
+        self.search.is_loading()
             || self.detail_loading
             || self.inflight_detail_id.is_some()
             || self.inflight_diff_id.is_some()
@@ -534,7 +538,7 @@ impl TuiApp {
         if self.is_animating() || self.has_pending_work() {
             return tick;
         }
-        match (&self.pending_query, self.last_keystroke_at) {
+        match (&self.search.pending_query, self.search.last_keystroke_at) {
             (Some(_), Some(keystroke)) => Duration::from_millis(DEBOUNCE_MS)
                 .saturating_sub(now.saturating_duration_since(keystroke))
                 .min(idle),

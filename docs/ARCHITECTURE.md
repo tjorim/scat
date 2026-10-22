@@ -158,6 +158,15 @@ The build fails fast on non-Unix targets (`src/lib.rs`).
 
 ---
 
+## 3c. Compatibility between publisher, clients and caches
+
+Clients read exactly the catalog schema they were built for; a schema change
+is a coordinated upgrade. The decision, the supported combinations, cache and
+embeddings-sidecar behavior, and the rollout and rollback steps are recorded in
+[COMPATIBILITY.md](COMPATIBILITY.md). This section is deliberately only a pointer.
+
+---
+
 ## 4. No web UI
 
 scat deliberately has **no central web service**.
