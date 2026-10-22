@@ -18,10 +18,7 @@ fn open_db_rejects_missing_index_metadata() {
     let err = open_db(db.path()).unwrap_err();
     assert!(matches!(&err, Error::Validation(_)));
     assert!(err.to_string().contains("index_metadata"));
-    assert!(
-        err.to_string()
-            .contains("re-index required (scat catalog build)")
-    );
+    assert!(err.to_string().contains("scat catalog build"));
 }
 
 #[test]
@@ -67,10 +64,31 @@ fn open_db_rejects_schema_mismatch() {
         SCHEMA_VERSION - 1,
         SCHEMA_VERSION
     )));
+    // The catalog is the older side: only its publisher can fix that.
     assert!(
         err.to_string()
-            .contains("re-index required (scat catalog build)")
+            .contains("the catalog publisher must upgrade")
     );
+}
+
+#[test]
+fn open_db_rejects_a_newer_catalog_with_upgrade_advice() {
+    let db = NamedTempFile::new().unwrap();
+    let conn = create_db(db.path()).unwrap();
+    insert_index_metadata(&conn, SCHEMA_VERSION + 1);
+    conn.close().unwrap();
+
+    let err = open_db(db.path()).unwrap_err();
+    assert!(matches!(
+        &err,
+        Error::SchemaMismatch { found, expected }
+            if *found == SCHEMA_VERSION + 1 && *expected == SCHEMA_VERSION
+    ));
+    // This client is the older side: upgrade it, and never rebuild the share.
+    let msg = err.to_string();
+    assert!(msg.contains("upgrade scat on this host"), "{msg}");
+    assert!(msg.contains("do not rebuild the shared catalog"), "{msg}");
+    assert!(!msg.contains("publisher must"), "{msg}");
 }
 
 #[test]

@@ -22,6 +22,8 @@ The catalog is **indexed nightly** on a central CRON server and consumed **readâ
 - [TUI controls and CLI coverage](docs/TUI_OPTIONS.md): workflows and terminal modes
 - [Deployment](docs/VENDORING.md): standalone binary, RPM and RHEL validation
 - [Architecture](docs/ARCHITECTURE.md): paths, read-only access and publication
+- [Compatibility](docs/COMPATIBILITY.md): catalog/client/sidecar versions, upgrade and rollback
+- [Releasing](docs/RELEASING.md): release checklist
 - [vc contract](docs/VC_CONTRACT.md): checkout and revision semantics
 - [Contributing](CONTRIBUTING.md): toolchain and development checks
 
@@ -361,7 +363,9 @@ separately (a `scat-embed` run, not the nightly indexer), but it lands on the
 same kind of shared drive and gets the same treatment. It has no
 `index_metadata.build_timestamp` the way the catalog does, so a changed
 sidecar is always recopied rather than sometimes re-stamped in place; that's
-a fine tradeoff for a file this much smaller than the catalog.
+a fine tradeoff for a file this much smaller than the catalog. The sidecar
+records its format and the catalog build it embedded; see
+[COMPATIBILITY.md](docs/COMPATIBILITY.md) for how mismatches are reported.
 
 ***
 

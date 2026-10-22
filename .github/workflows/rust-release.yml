@@ -58,7 +58,13 @@ jobs:
       - name: Create compatibility database
         run: |
           mkdir -p target/compat
+          # The fixture is stamped with the schema this tree compiles in;
+          # nothing here is hardcoded, so a schema bump cannot leave the
+          # smoke check silently testing the previous version.
+          export SCHEMA_VERSION=$(sed -n 's/^pub const SCHEMA_VERSION: i64 = \([0-9][0-9]*\);$/\1/p' src/core/db.rs)
+          test -n "$SCHEMA_VERSION"
           python - <<'PY'
+          import os
           import json
           import sqlite3
           from pathlib import Path
@@ -190,17 +196,58 @@ jobs:
           )
           conn.execute(
               "INSERT INTO index_metadata (id, build_timestamp, schema_version) VALUES (1, ?, ?)",
-              # Must match scat_core::core::db::SCHEMA_VERSION.
-              ("2026-06-01T00:00:00Z", 14),
+              ("2026-06-01T00:00:00Z", int(os.environ["SCHEMA_VERSION"])),
           )
           conn.commit()
           conn.close()
+
+          # Unsupported neighbours of the current schema: one older, one newer.
+          import shutil
+          for name, delta in (("older", -1), ("newer", 1)):
+              target = Path("target/compat") / name
+              target.mkdir(exist_ok=True)
+              copy = target / "scripts.sqlite"
+              shutil.copy(db, copy)
+              other = sqlite3.connect(copy)
+              other.execute("UPDATE index_metadata SET schema_version = schema_version + ?", (delta,))
+              other.commit()
+              other.close()
           PY
 
+      # Verifies the policy in docs/COMPATIBILITY.md against the release binary.
       - name: Smoke test Linux database compatibility
         run: |
-          ./target/x86_64-unknown-linux-musl/release/scat --db target/compat/scripts.sqlite catalog info
-          ./target/x86_64-unknown-linux-musl/release/scat --db target/compat/scripts.sqlite search patch --output json
+          set -euo pipefail
+          scat=./target/x86_64-unknown-linux-musl/release/scat
+          cache="$PWD/target/compat/cache"
+          mkdir -p "$cache"
+
+          # Supported: the current schema reads, with the cache off and on.
+          "$scat" --db target/compat/scripts.sqlite catalog info | tee target/compat/info.txt
+          grep -F 'Compatibility      : compatible' target/compat/info.txt
+          "$scat" --db target/compat/scripts.sqlite --no-cache search patch --output json
+          "$scat" --db target/compat/scripts.sqlite --cache-dir "$cache" search patch --output json
+
+          # Unsupported: older and newer schemas are refused, say which side
+          # is behind, report a verdict, and leave the catalog untouched.
+          for case in older:'the catalog publisher must upgrade':catalog_older newer:'upgrade scat on this host':catalog_newer; do
+            IFS=: read -r name advice verdict <<<"$case"
+            db="target/compat/$name/scripts.sqlite"
+            sha256sum "$db" > "target/compat/$name.sha256"
+            for mode in "--no-cache" "--cache-dir $cache"; do
+              for command in "search patch" "catalog stats" "catalog info"; do
+                if out=$("$scat" --db "$db" $mode $command 2>&1); then
+                  echo "expected '$command' to refuse the $name catalog"; exit 1
+                fi
+                grep -F "$advice" <<<"$out"
+              done
+            done
+            json=$("$scat" --db "$db" --no-cache catalog info --json 2>/dev/null || true)
+            grep -F "\"compatibility\": \"$verdict\"" <<<"$json"
+            sha256sum -c "target/compat/$name.sha256"
+          done
+          # Refusals must not have parked an unreadable catalog in the cache.
+          test "$(find "$cache" -name '*.sqlite' | wc -l)" -eq 1
 
       - name: Report Linux binary size
         run: ls -lh target/x86_64-unknown-linux-musl/release/scat

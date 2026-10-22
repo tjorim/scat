@@ -309,17 +309,21 @@ scat catalog info
 
 ### Shared catalog schema upgrades
 
-The current catalog schema is **v14**. Clients require the schema version they
-were built for; check `scat catalog info` when coordinating an upgrade. If a
-client reports a schema mismatch or requests re-indexing, have the catalog
-publisher rebuild with the matching binary and the site's existing scan-root
-configuration:
+The current catalog schema is **v14**. A client reads exactly the schema it was
+built for, so a schema change is a coordinated upgrade of the publisher, the
+catalog and the clients. `scat catalog info` prints the catalog's and the
+client's schema versions and a `compatibility` verdict even for a catalog the
+client refuses, and exits non-zero when it is unreadable.
 
-```bash
-scat --config /path/to/site.yaml catalog build --force
-```
+The error says which side is behind:
 
-Ordinary read-only clients should not rebuild the shared catalog themselves.
+- *the catalog is older than this scat* — the publisher must upgrade scat and
+  rebuild: `scat --config /path/to/site.yaml catalog build`.
+- *this scat is older than the catalog* — upgrade scat on this host.
+
+Ordinary read-only clients never rebuild the shared catalog. The decision,
+supported combinations, rollout and rollback steps are in
+[COMPATIBILITY.md](COMPATIBILITY.md).
 
 ---
 
@@ -364,7 +368,8 @@ scat search "deploy" | grep -F ".sh"
 | `Error: No database specified` | Set `SCAT_DB` or pass `--db <path>` |
 | `Error: Database file not found` | Check that the path to `scripts.sqlite` is correct and accessible |
 | Database access error | Run `scat doctor --json`; check the reported path, permissions and availability before asking the publisher to rebuild |
-| Schema version mismatch | Coordinate matching client and publisher versions, then rebuild with the publisher |
+| `catalog schema is version N, expected M` | Run `scat catalog info`; the message says whether to upgrade this client or have the publisher upgrade and rebuild — see [COMPATIBILITY.md](COMPATIBILITY.md) |
+| `note: embeddings sidecar … was built from catalog build …` | The sidecar is older than the catalog; rerun `scat-embed` against the current catalog and republish it |
 
 ---
 

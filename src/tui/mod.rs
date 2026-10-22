@@ -2,7 +2,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -356,6 +356,13 @@ pub fn run(
     options: RunOptions,
 ) -> Result<()> {
     options.terminal_modes.validate()?;
+    // The workers open the catalog on their own threads, where a schema
+    // mismatch would only surface as a per-query error inside the fullscreen
+    // UI. Check once up front so it is reported on the terminal, with the
+    // actionable message, before any terminal setup.
+    scat_core::core::db::open_db(db_path)
+        .map(drop)
+        .with_context(|| format!("Failed to open database: {}", source_db.display()))?;
     let search_worker = SearchWorker::new(db_path)?;
     let detail_worker = DetailWorker::new(db_path)?;
     let diff_worker = DiffWorker::new(db_path)?;

@@ -402,12 +402,17 @@ fn cmd_catalog(
     }
 
     let read_path = catalog_read_path(db_path, cache_options);
+    if let CatalogCommands::Info { json } = command {
+        // Reports an unreadable (older/newer) catalog instead of failing to open it.
+        return cmd_info(db_path, &read_path, json)
+            .with_context(|| format!("Failed to read catalog: {}", db_path.display()));
+    }
     let api = open_search_api(&read_path)
         .with_context(|| format!("Failed to open database: {}", db_path.display()))?;
 
     match command {
         CatalogCommands::Stats { json } => cmd_stats(&api, json, no_color, config.configured()),
-        CatalogCommands::Info { json } => cmd_info(&api, db_path, &read_path, json),
+        CatalogCommands::Info { .. } => unreachable!(),
         CatalogCommands::Audit {
             checks,
             strict,

@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Compatibility
+
+- Record the catalog compatibility decision in [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md): coordinated upgrades with an exact schema match, the supported client/catalog/sidecar/cache combinations, and publisher/client rollout and rollback steps. Add a release checklist ([docs/RELEASING.md](docs/RELEASING.md)).
+- Schema-mismatch errors now say which side is behind. A client with an older scat is told to upgrade it (and never to rebuild the shared catalog); an older catalog is the publisher's to upgrade and rebuild. The TUI reports a mismatch on the terminal at launch instead of inside the fullscreen UI.
+- `scat catalog info` and `scat doctor` now describe a catalog the client cannot read (both schema versions and a `compatibility` verdict of `compatible`, `catalog_older` or `catalog_newer`); `catalog info` exits non-zero for it.
+- The local cache no longer copies a catalog this scat cannot read into tmpfs, never serves an older entry in its place, and re-stamps an existing copy only when the schema version also matches.
+- Embeddings sidecar: `scat-embed` now records a format version and the catalog build it embedded. `scat similar` fails with an explicit reason for a sidecar in a newer format and notes when the sidecar was built from a different catalog build; `catalog audit` reports a skipped sidecar instead of ignoring it. Sidecars written earlier keep working.
+- The release workflow derives its compatibility fixture from `SCHEMA_VERSION` and smoke-tests the current, older and newer schemas against the release binary, including that refused catalogs are left untouched and uncached. `tests/compat.rs` exercises the same policy.
+
 ### Website and artwork
 
 - Add a shared terminal/catalog icon, raster derivatives and a responsive static

@@ -25,9 +25,11 @@ pub enum Error {
     #[error("validation failed: {0}")]
     Validation(String),
     /// Indexed database schema version differs from current binary schema.
-    #[error(
-        "catalog schema is version {found}, expected {expected} — re-index required (scat catalog build)"
-    )]
+    ///
+    /// The advice depends on which side is older: only a *newer* scat (the
+    /// publisher) can fix an older catalog, and only upgrading the client
+    /// can fix a newer one — clients never rebuild the shared catalog.
+    #[error("catalog schema is version {found}, expected {expected} — {}", schema_mismatch_advice(*found, *expected))]
     SchemaMismatch {
         /// Schema version found in the opened database.
         found: i64,
@@ -41,3 +43,14 @@ pub enum Error {
 
 /// Convenience result type using [`enum@Error`].
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// Actionable next step for a [`Error::SchemaMismatch`], by direction.
+fn schema_mismatch_advice(found: i64, expected: i64) -> &'static str {
+    if found < expected {
+        "the catalog is older than this scat; the catalog publisher must upgrade scat \
+         and run `scat catalog build` (clients cannot rebuild it; see docs/COMPATIBILITY.md)"
+    } else {
+        "this scat is older than the catalog; upgrade scat on this host \
+         (do not rebuild the shared catalog; see docs/COMPATIBILITY.md)"
+    }
+}

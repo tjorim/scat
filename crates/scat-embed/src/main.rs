@@ -62,6 +62,13 @@ impl ModelChoice {
     }
 }
 
+/// Layout of the sidecar this tool writes. Must equal
+/// `scat_core::core::embeddings::SIDECAR_FORMAT_VERSION` (a root-crate test
+/// checks it; this crate cannot depend on `scat_core`, which is Unix-only).
+/// Bump it only for a layout older scat clients cannot read — see
+/// `docs/COMPATIBILITY.md`.
+const SIDECAR_FORMAT_VERSION: i64 = 1;
+
 struct ScriptRow {
     id: i64,
     logical_path: String,
@@ -90,6 +97,7 @@ fn main() -> Result<()> {
     let args = Args::parse();
 
     let rows = read_scripts(&args.input)?;
+    let catalog_build = read_catalog_build(&args.input)?;
     if rows.is_empty() {
         println!("no scripts found in {}", args.input.display());
         return Ok(());
@@ -110,7 +118,13 @@ fn main() -> Result<()> {
         .embed(documents, None)
         .context("embedding generation failed")?;
 
-    write_embeddings(&args.output, &rows, &embeddings, args.model.label())?;
+    write_embeddings(
+        &args.output,
+        &rows,
+        &embeddings,
+        args.model.label(),
+        catalog_build.as_deref(),
+    )?;
     println!(
         "wrote {} embeddings to {}",
         rows.len(),
@@ -158,6 +172,29 @@ fn read_scripts(path: &PathBuf) -> Result<Vec<ScriptRow>> {
     Ok(rows)
 }
 
+/// The input catalog's `index_metadata.build_timestamp`, recorded in the
+/// sidecar so scat can tell which catalog build the embeddings describe.
+/// `None` for an input without that table (a hand-made or very old catalog).
+fn read_catalog_build(path: &PathBuf) -> Result<Option<String>> {
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .with_context(|| format!("failed to open {}", path.display()))?;
+    let has_table: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'index_metadata')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_table {
+        return Ok(None);
+    }
+    Ok(conn
+        .query_row(
+            "SELECT build_timestamp FROM index_metadata WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .ok())
+}
+
 /// Truncate `s` to at most `max_chars` characters, respecting UTF-8
 /// boundaries (a plain byte-length truncation could split a multi-byte
 /// character and produce invalid UTF-8).
@@ -182,6 +219,7 @@ fn write_embeddings(
     rows: &[ScriptRow],
     embeddings: &[Vec<f32>],
     model_label: &str,
+    catalog_build: Option<&str>,
 ) -> Result<()> {
     let tmp_path = scratch_path(path);
     // A leftover from a previous crashed run; SQLite would otherwise append
@@ -199,7 +237,17 @@ fn write_embeddings(
                 model         TEXT    NOT NULL,
                 dim           INTEGER NOT NULL,
                 embedding     BLOB    NOT NULL
+            );
+            CREATE TABLE embedding_metadata (
+                id                      INTEGER PRIMARY KEY CHECK (id = 1),
+                format_version          INTEGER NOT NULL,
+                catalog_build_timestamp TEXT
             );",
+        )?;
+        conn.execute(
+            "INSERT INTO embedding_metadata (id, format_version, catalog_build_timestamp)
+             VALUES (1, ?1, ?2)",
+            rusqlite::params![SIDECAR_FORMAT_VERSION, catalog_build],
         )?;
 
         let tx = conn.transaction()?;
@@ -354,7 +402,7 @@ mod tests {
         let rows = vec![sample_row(1, "/catalog/scripts/a.py")];
         let embeddings = vec![vec![0.1_f32, 0.2, 0.3]];
 
-        write_embeddings(&output, &rows, &embeddings, "test-model").unwrap();
+        write_embeddings(&output, &rows, &embeddings, "test-model", None).unwrap();
 
         assert!(output.is_file());
         assert!(!scratch_path(&output).exists());
@@ -376,6 +424,7 @@ mod tests {
             &[sample_row(1, "/catalog/scripts/a.py")],
             &[vec![0.1_f32]],
             "test-model",
+            None,
         )
         .unwrap();
 
@@ -390,6 +439,7 @@ mod tests {
             ],
             &[vec![0.1_f32], vec![0.2_f32]],
             "test-model",
+            None,
         )
         .unwrap();
 
@@ -399,6 +449,51 @@ mod tests {
             .unwrap();
         assert_eq!(count, 2);
         assert!(!scratch_path(&output).exists());
+    }
+
+    #[test]
+    fn sidecar_records_its_format_and_the_catalog_build_it_describes() {
+        let dir = TempDir::new().unwrap();
+        let output = dir.path().join("embeddings.sqlite");
+        write_embeddings(
+            &output,
+            &[sample_row(1, "/catalog/scripts/a.py")],
+            &[vec![0.1_f32]],
+            "test-model",
+            Some("2026-06-01T00:00:00Z"),
+        )
+        .unwrap();
+
+        let conn = Connection::open_with_flags(&output, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let (format, build): (i64, Option<String>) = conn
+            .query_row(
+                "SELECT format_version, catalog_build_timestamp FROM embedding_metadata WHERE id = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(format, SIDECAR_FORMAT_VERSION);
+        assert_eq!(build.as_deref(), Some("2026-06-01T00:00:00Z"));
+    }
+
+    #[test]
+    fn read_catalog_build_reads_index_metadata_when_present() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("scripts.sqlite");
+        write_catalog(&path, "/catalog/scripts/a.py", "", "", "", "");
+        // A catalog with no index_metadata (hand-made, very old) has no build to record.
+        assert_eq!(read_catalog_build(&path).unwrap(), None);
+
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE index_metadata (id INTEGER PRIMARY KEY, build_timestamp TEXT NOT NULL, schema_version INTEGER NOT NULL);
+             INSERT INTO index_metadata VALUES (1, '2026-06-01T00:00:00Z', 14);",
+        )
+        .unwrap();
+        assert_eq!(
+            read_catalog_build(&path).unwrap().as_deref(),
+            Some("2026-06-01T00:00:00Z")
+        );
     }
 
     #[test]
@@ -412,6 +507,7 @@ mod tests {
             &[sample_row(1, "/catalog/scripts/a.py")],
             &[vec![0.1_f32]],
             "test-model",
+            None,
         )
         .unwrap();
 

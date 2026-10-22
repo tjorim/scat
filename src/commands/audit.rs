@@ -20,7 +20,12 @@ pub fn cmd_audit(
     json: bool,
 ) -> Result<()> {
     let selected = (!checks.is_empty()).then_some(checks);
-    let sidecar = EmbeddingsSidecar::open(sidecar_path);
+    // Audit works without a sidecar, but an unusable one is said out loud
+    // rather than quietly skipping the checks that need it.
+    let sidecar = EmbeddingsSidecar::open_checked(sidecar_path).unwrap_or_else(|err| {
+        eprintln!("warning: {err}; skipping embedding-based checks");
+        None
+    });
     let options = AuditOptions {
         sidecar: sidecar.as_ref(),
         near_duplicate_threshold,

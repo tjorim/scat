@@ -8,6 +8,7 @@ import pty
 import re
 import select
 import shlex
+import sqlite3
 import struct
 import subprocess
 import sys
@@ -80,6 +81,31 @@ with tempfile.TemporaryDirectory(prefix="scat-pty-") as directory:
     finally:
         os.close(master)
         os.close(slave)
+
+    # A catalog this scat cannot read is reported on the terminal at launch,
+    # with the actionable message, before any fullscreen setup. The catalog
+    # must be left byte-identical.
+    for label, delta, expected in (("newer", 1, b"upgrade scat on this host"), ("older", -1, b"publisher must upgrade")):
+        mismatched = root / f"{label}.sqlite"
+        mismatched.write_bytes(db.read_bytes())
+        conn = sqlite3.connect(mismatched)
+        conn.execute("UPDATE index_metadata SET schema_version = schema_version + ?", (delta,))
+        conn.commit()
+        conn.close()
+        before = mismatched.read_bytes()
+        master, slave = pty.openpty()
+        try:
+            process = subprocess.Popen([binary, "--db", str(mismatched), "--no-cache", "tui"], stdin=slave, stdout=slave, stderr=slave, env=env)
+            process.wait(timeout=5)
+            output = read_for(master)
+            assert process.returncode != 0 and expected in output, (label, output)
+            assert b"catalog schema is version" in output, (label, output)
+            assert b"\x1b[?1049h" not in output, (label, output)
+        finally:
+            os.close(master)
+            os.close(slave)
+        assert mismatched.read_bytes() == before
+        assert sorted(p.name for p in root.glob(f"{label}.sqlite*")) == [f"{label}.sqlite"]
 
     for viewer_exit in (0, 1):
         viewer = root / "viewer.py"
