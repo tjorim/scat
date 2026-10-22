@@ -761,7 +761,7 @@ fn is_animating_only_while_a_spinner_is_on_screen() {
     // Once results and the detail load settle, nothing animates and the
     // run loop can leave the screen (and any selection) untouched.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    while app.search_in_flight {
+    while app.search.is_loading() {
         app.apply_results().unwrap();
         assert!(
             std::time::Instant::now() < deadline,
@@ -785,7 +785,7 @@ fn is_animating_only_while_a_spinner_is_on_screen() {
 
     // An in-flight search with results already shown has no visible
     // spinner, so it must not animate.
-    app.search_in_flight = true;
+    app.search.begin();
     assert!(!app.results.is_empty());
     assert!(!app.is_animating());
 }
@@ -1214,7 +1214,7 @@ fn q_key_in_search_updates_query_without_quitting() {
     }
 
     assert_eq!(app.query, "query.sql");
-    assert!(app.pending_query.is_some());
+    assert!(app.search.pending_query.is_some());
 }
 
 #[test]
@@ -1918,26 +1918,26 @@ fn search_edits_at_the_cursor_and_preserves_utf8() {
     assert_eq!(app.query, "az");
     press(&mut app, KeyCode::Char('q'));
     assert_eq!(app.query, "aqz");
-    assert_eq!(app.pending_query.as_deref(), Some("aqz"));
+    assert_eq!(app.search.pending_query.as_deref(), Some("aqz"));
 
     // Moving the cursor and deleting beyond the bounds must not rerun search.
-    app.pending_query = None;
+    app.search.pending_query = None;
     press(&mut app, KeyCode::Home);
     press(&mut app, KeyCode::Left);
     press(&mut app, KeyCode::Backspace);
     assert_eq!(app.query_cursor, 0);
-    assert!(app.pending_query.is_none());
+    assert!(app.search.pending_query.is_none());
     press(&mut app, KeyCode::Char('界'));
     assert_eq!(app.query, "界aqz");
     press(&mut app, KeyCode::Home);
     press(&mut app, KeyCode::Right);
     assert_eq!(app.query_cursor, "界".len());
     press(&mut app, KeyCode::End);
-    app.pending_query = None;
+    app.search.pending_query = None;
     press(&mut app, KeyCode::Right);
     press(&mut app, KeyCode::Delete);
     assert_eq!(app.query_cursor, app.query.len());
-    assert!(app.pending_query.is_none());
+    assert!(app.search.pending_query.is_none());
 }
 
 #[test]
@@ -2064,12 +2064,15 @@ fn bracketed_paste_is_atomic_normalized_and_replaces_selection() {
     assert_eq!(app.query, "query second line");
     assert_eq!(app.query_cursor, app.query.len());
     assert!(app.query_selection().is_none());
-    assert_eq!(app.pending_query.as_deref(), Some("query second line"));
+    assert_eq!(
+        app.search.pending_query.as_deref(),
+        Some("query second line")
+    );
     assert_eq!(app.mode, ViewMode::Browse);
     assert_eq!(app.focus, Focus::Search);
-    app.pending_query = None;
+    app.search.pending_query = None;
     assert!(!app.handle_paste("\x1b\x03\x00"));
-    assert!(app.pending_query.is_none());
+    assert!(app.search.pending_query.is_none());
 }
 
 #[test]
@@ -2085,12 +2088,12 @@ fn paste_in_other_views_never_executes_shortcuts() {
     ] {
         app.mode = mode;
         app.focus = Focus::Results;
-        app.pending_query = None;
+        app.search.pending_query = None;
         assert!(app.handle_paste("q\n\x1b\x03dvfs"));
         assert_eq!(app.mode, mode);
         assert_eq!(app.focus, Focus::Results);
         assert!(app.query.is_empty());
-        assert!(app.pending_query.is_none());
+        assert!(app.search.pending_query.is_none());
         assert!(app.flash.as_deref().unwrap().contains("Focus search"));
     }
 }
@@ -2143,11 +2146,11 @@ fn search_word_deletion_and_line_shortcuts_schedule_only_edits() {
     let db = super::make_test_db();
     let mut app = make_app(db.path());
     app.handle_paste("alpha beta gamma");
-    app.pending_query = None;
+    app.search.pending_query = None;
     app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL))
         .unwrap();
     assert_eq!(app.query_cursor, 11);
-    assert!(app.pending_query.is_none());
+    assert!(app.search.pending_query.is_none());
     app.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::CONTROL))
         .unwrap();
     assert_eq!(app.query, "alpha beta ");
@@ -2475,7 +2478,7 @@ fn advanced_settings_invalidate_old_results_and_preserve_query() {
     let mut app = make_app(db.path());
     app.query = "[".into();
     app.query_cursor = 1;
-    app.inflight_query_id = Some(99);
+    app.search.begin();
     app.handle_key(KeyEvent::new(KeyCode::F(6), KeyModifiers::NONE))
         .unwrap();
     let editor = app.search_settings.as_mut().unwrap();
@@ -2488,7 +2491,7 @@ fn advanced_settings_invalidate_old_results_and_preserve_query() {
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
         .unwrap();
     assert!(app.search_settings.is_none());
-    assert_eq!(app.inflight_query_id, None);
+    assert!(!app.search.is_loading());
     assert_eq!(app.query, "[");
     assert_eq!(app.result_limit, 1);
     assert_eq!(
@@ -2503,7 +2506,7 @@ fn bookmarks_expand_exact_alias_with_cli_fallback() {
     let mut app = make_app(db.path());
     app.bookmarks.insert("mine".into(), "scripts\\a.py".into());
     app.query = "@mine".into();
-    app.dispatch_query().unwrap();
+    app.dispatch_query();
     assert!(
         app.expanded_query
             .as_deref()
@@ -2512,7 +2515,7 @@ fn bookmarks_expand_exact_alias_with_cli_fallback() {
     );
     assert_eq!(app.query, "@mine");
     app.query = "@missing".into();
-    app.dispatch_query().unwrap();
+    app.dispatch_query();
     assert!(
         app.expanded_query
             .as_deref()
@@ -2658,7 +2661,7 @@ fn idle_loop_neither_redraws_nor_churns_state() {
     }
     assert_eq!(app.tick, tick, "spinner advanced while idle");
     assert_eq!(app.results, results);
-    assert!(app.pending_query.is_none() && !app.search_in_flight);
+    assert!(app.search.pending_query.is_none() && !app.search.is_loading());
 }
 
 #[test]
@@ -2673,7 +2676,7 @@ fn poll_timeout_wakes_for_debounce_and_pending_work() {
     // A typed query sleeps exactly until its debounce deadline, then fires.
     app.query = "a".into();
     app.schedule_query();
-    let typed = app.last_keystroke_at.unwrap();
+    let typed = app.search.last_keystroke_at.unwrap();
     let debounce = Duration::from_millis(super::DEBOUNCE_MS);
     assert_eq!(app.poll_timeout(typed), debounce);
     assert_eq!(
@@ -2682,11 +2685,11 @@ fn poll_timeout_wakes_for_debounce_and_pending_work() {
     );
     app.advance(typed + Duration::from_millis(100)).unwrap();
     assert!(
-        app.pending_query.is_some(),
+        app.search.pending_query.is_some(),
         "dispatched before the debounce"
     );
     app.advance(typed + debounce).unwrap();
-    assert!(app.pending_query.is_none() && app.search_in_flight);
+    assert!(app.search.pending_query.is_none() && app.search.is_loading());
     assert!(app.needs_redraw);
     // An in-flight search (even behind previous results) keeps the tick.
     assert_eq!(app.poll_timeout(Instant::now()), tick);
@@ -2717,4 +2720,56 @@ fn poll_timeout_wakes_for_debounce_and_pending_work() {
     app.advance(Instant::now()).unwrap();
     assert_eq!(app.tick, before);
     assert!(!app.needs_redraw);
+}
+
+#[test]
+fn search_replies_preserve_navigation_and_ignore_superseded_errors() {
+    use super::search_worker::SearchResponse;
+    let db = super::make_test_db();
+    let mut app = make_app(db.path());
+    settle(&mut app);
+    let rows = app.results.clone();
+    assert!(!rows.is_empty());
+    app.selected = rows.len() - 1;
+    let selected = app.selected;
+    let old = app.search.begin();
+    app.query = "new query".into();
+    app.schedule_query();
+    app.mode = ViewMode::Detail;
+    app.needs_redraw = false;
+    app.apply_search_response(SearchResponse {
+        id: old,
+        result: Err("late".into()),
+    })
+    .unwrap();
+    assert!(!app.needs_redraw);
+    assert_eq!(app.results, rows);
+    assert_eq!(app.selected, selected);
+    let current = app.search.begin();
+    app.apply_search_response(SearchResponse {
+        id: current,
+        result: Err("invalid".into()),
+    })
+    .unwrap();
+    assert_eq!(app.error.as_deref(), Some("invalid"));
+    assert_eq!(app.results, rows);
+    assert_eq!(app.selected, selected);
+    let current = app.search.begin();
+    app.apply_search_response(SearchResponse {
+        id: current,
+        result: Ok(rows.clone()),
+    })
+    .unwrap();
+    assert_eq!(app.mode, ViewMode::Detail);
+    app.mode = ViewMode::Browse;
+    assert_eq!(app.selected, selected);
+    assert_eq!(app.results, rows);
+    assert!(app.error.is_none());
+    let current = app.search.begin();
+    app.apply_search_response(SearchResponse {
+        id: current,
+        result: Ok(rows[..1].to_vec()),
+    })
+    .unwrap();
+    assert_eq!(app.selected, 0);
 }

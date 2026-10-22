@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.95.0"
 publish = false
+license = "Apache-2.0"
 
 # scat itself stays Unix-only (see src/lib.rs). scat-embed is a separate,
 # ordinary cross-platform member so it can run on non-Unix laptops without

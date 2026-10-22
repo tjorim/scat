@@ -13,7 +13,7 @@ use super::common::focus_border;
 
 pub(super) fn draw_search(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
     let mut title =
-        super::super::search_title(app.error.is_some(), app.search_in_flight).to_string();
+        super::super::search_title(app.error.is_some(), app.search.is_loading()).to_string();
     if !app.filter_labels.is_empty() {
         title = format!("{title} [{}]", app.filter_labels.join(" "));
     }

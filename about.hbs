@@ -1,0 +1,14 @@
+Third-party software notices
+Generated from Cargo.lock for this executable's dependencies.
+
+{{#each licenses}}
+========================================================================
+{{name}} ({{id}})
+{{#each used_by}}
+- {{crate.name}} {{crate.version}}{{#if crate.repository}} ({{crate.repository}}){{/if}}
+  Source: https://crates.io/api/v1/crates/{{crate.name}}/{{crate.version}}/download
+{{/each}}
+
+{{{text}}}
+
+{{/each}}

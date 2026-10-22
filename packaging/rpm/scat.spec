@@ -2,7 +2,7 @@ Name:           scat
 Version:        %{scat_version}
 Release:        %{scat_release}%{?dist}
 Summary:        Standalone script catalog CLI and terminal UI
-License:        LicenseRef-Unspecified
+License:        Apache-2.0
 URL:            https://github.com/tjorim/scat
 Source0:        payload.tar
 ExclusiveArch:  x86_64
@@ -33,3 +33,5 @@ cp -a . %{buildroot}/
 %{_datadir}/fish/vendor_completions.d/scat.fish
 %{_mandir}/man1/scat*.1.gz
 %doc %{_docdir}/scat
+
+%license %{_datadir}/licenses/scat

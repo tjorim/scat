@@ -29,9 +29,20 @@ relevant guide when commands, defaults, configuration or shortcuts change.
 Verify examples against `src/cli.rs` and keep the
 [TUI coverage matrix](docs/TUI_OPTIONS.md) in sync with new actions.
 
+TUI workflow changes should follow the [worker lifecycle contracts](docs/TUI_WORKERS.md),
+including request supersession, navigation ownership and shutdown guarantees.
+
 ## Schema and format changes
 
 Changing `SCHEMA_VERSION` (catalog) or `SIDECAR_FORMAT_VERSION` (embeddings
 sidecar) is a coordinated upgrade for every deployment. Follow
 [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md#changing-a-schema-or-format)
 and the compatibility items in [docs/RELEASING.md](docs/RELEASING.md).
+
+## Licensing
+
+Original project material is Apache-2.0; contributions are submitted under that
+license unless explicitly agreed otherwise. Preserve third-party notices and
+identify copied/adapted material and its source/terms in reviews. New dependencies
+must pass cargo-deny and release notice generation; see
+[distribution and provenance](docs/DISTRIBUTION.md).

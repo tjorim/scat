@@ -1,0 +1,23 @@
+# Release attribution; dependency policy remains in deny.toml.
+accepted = [
+    "Apache-2.0", "Zlib", "MIT", "BSD-2-Clause", "BSD-3-Clause", "ISC",
+    "Unicode-3.0", "NCSA", "CC0-1.0", "Unlicense", "MPL-2.0",
+    "Apache-2.0 WITH LLVM-exception", "CDLA-Permissive-2.0",
+]
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+workarounds = ["ring", "rustls"]
+
+# These crates omit their MIT copyright text from the published package.
+# Let cargo-about retrieve the original text from each crate's upstream commit.
+[tree-sitter-json.clarify]
+license = "MIT"
+[[tree-sitter-json.clarify.git]]
+path = "LICENSE"
+checksum = "2e0110e07abef7c2548b26ec9d6969775617ca539a0dc8dbeeb14d6452c711d1"
+
+[pulp-wasm-simd-flag.clarify]
+license = "MIT"
+[[pulp-wasm-simd-flag.clarify.git]]
+path = "LICENSE"
+checksum = "d64f878c89bd5f1e5ada7e4aad57690b122727cf5229b7b87ea1980c188da1d9"

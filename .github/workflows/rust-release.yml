@@ -252,11 +252,29 @@ jobs:
       - name: Report Linux binary size
         run: ls -lh target/x86_64-unknown-linux-musl/release/scat
 
+      - name: Install cargo-about
+        uses: taiki-e/install-action@cargo-about
+
+      - name: Generate Linux dependency notices
+        run: |
+          notices=target/x86_64-unknown-linux-musl/release/THIRD_PARTY_NOTICES.txt
+          cargo about generate --locked --fail --target x86_64-unknown-linux-musl about.hbs -o "$notices"
+          cat /usr/share/doc/musl/copyright >> "$notices"
+          libgcc=$(musl-gcc -print-libgcc-file-name)
+          libgcc_package=$(dpkg-query -S "$libgcc" | head -1 | cut -d: -f1)
+          cat "/usr/share/doc/$libgcc_package/copyright" >> "$notices"
+          cp LICENSE NOTICE target/x86_64-unknown-linux-musl/release/
+          test -s "$notices"
+
       - name: Upload Linux artifact
         uses: actions/upload-artifact@v7
         with:
           name: scat-linux-x86_64-musl
-          path: target/x86_64-unknown-linux-musl/release/scat
+          path: |
+            target/x86_64-unknown-linux-musl/release/scat
+            target/x86_64-unknown-linux-musl/release/LICENSE
+            target/x86_64-unknown-linux-musl/release/NOTICE
+            target/x86_64-unknown-linux-musl/release/THIRD_PARTY_NOTICES.txt
           if-no-files-found: error
 
   rpm:
@@ -350,9 +368,29 @@ jobs:
       - name: Smoke test Windows binary
         run: .\target\release\scat-embed.exe --help
 
+      - name: Install cargo-about
+        uses: taiki-e/install-action@cargo-about
+
+      - name: Generate Windows dependency notices
+        run: |
+          $notices = "target/release/THIRD_PARTY_NOTICES.txt"
+          cargo about generate --locked --fail --target x86_64-pc-windows-msvc --manifest-path crates/scat-embed/Cargo.toml -c about.toml about.hbs -o $notices
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # fastembed's native ONNX Runtime is separate from the Rust wrapper.
+          foreach ($name in @("LICENSE", "ThirdPartyNotices.txt")) {
+            $text = (Invoke-WebRequest "https://raw.githubusercontent.com/microsoft/onnxruntime/v1.28.0/$name").Content
+            Add-Content -Path $notices -Value $text -Encoding utf8
+          }
+          Copy-Item LICENSE, NOTICE target/release/
+          if ((Get-Item $notices).Length -eq 0) { throw "Empty dependency notices" }
+
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v7
         with:
           name: scat-embed-windows-x86_64
-          path: target/release/scat-embed.exe
+          path: |
+            target/release/scat-embed.exe
+            target/release/LICENSE
+            target/release/NOTICE
+            target/release/THIRD_PARTY_NOTICES.txt
           if-no-files-found: error
