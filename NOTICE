@@ -3,6 +3,5 @@ Copyright 2026 scat contributors
 
 Original project material is licensed under the Apache License, Version 2.0.
 Third-party components retain their own licenses and copyright notices.
-Release license bundles contain inventory.json and third-party-sources.tar.gz
-with the original dependency sources/notices and Rust/native toolchain notices.
+Binary distributions include THIRD_PARTY_NOTICES.txt with dependency notices.
 See docs/DISTRIBUTION.md for scope, provenance and distribution requirements.

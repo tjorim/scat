@@ -532,4 +532,4 @@ Original project material, including scat, scat-embed, documentation, website
 and artwork, is licensed under the [Apache License 2.0](LICENSE).
 Copyright 2026 scat contributors. Third-party dependencies and downloaded models
 retain their own terms. See the [licensing and distribution guide](docs/DISTRIBUTION.md)
-for provenance, exclusions and the notice bundles that accompany releases.
+for provenance, exclusions and the notices that accompany releases.

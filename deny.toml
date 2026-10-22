@@ -35,8 +35,8 @@ skip = [
 ]
 
 # scat-embed's HTTPS CA certificate data uses CDLA-Permissive-2.0.
-# Section 2.1 requires the agreement text when sharing data; the complete
-# published source/license text is retained in each matching release bundle.
+# Section 2.1 requires the agreement text when sharing data; the
+# agreement text is included in generated release notices.
 [[licenses.exceptions]]
 name = "webpki-roots"
 version = "=1.0.9"

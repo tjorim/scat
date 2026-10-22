@@ -97,7 +97,7 @@ package download, account, catalog or cache is installed by the RPM.
 
 Build on an x86_64 Linux packaging host with Bash, GNU tar/coreutils, Git and
 `rpmbuild`, using the checked-out source revision matching the executable and the sibling
-`licenses/` directory from its CI artifact (Python 3 verifies the bundle):
+`THIRD_PARTY_NOTICES.txt` from its CI artifact:
 
 ```bash
 export SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
@@ -115,10 +115,10 @@ versions is not promised. Automatic dependency scanning and binary rewriting
 are disabled because the payload is static. CI checks for an ELF interpreter;
 RPM requirements should contain only RPM format capabilities, no runtime library
 or interpreter dependencies. Original project material is Apache-2.0; the spec records that identifier.
-Standalone artifacts include a `licenses/` directory; the RPM installs the same
-bundle under `/usr/share/licenses/scat` as `%license`. Complete the
+Standalone artifacts include LICENSE, NOTICE and THIRD_PARTY_NOTICES.txt;
+the RPM installs those files under `/usr/share/licenses/scat` as `%license`. Complete the
 [licensing and distribution checklist](DISTRIBUTION.md) before distributing
-packages, and retain the notice/source bundle with standalone copies.
+packages, and retain the notices with standalone copies.
 
 The payload installs `/usr/bin/scat`, generated Bash/Zsh/Fish completions under
 `/usr/share/{bash-completion/completions,zsh/site-functions,fish/vendor_completions.d}`,

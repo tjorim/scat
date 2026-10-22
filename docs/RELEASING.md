@@ -6,7 +6,7 @@ request. Tick these before tagging.
 
 Before distribution outside the organization, complete the
 [licensing and distribution checklist](DISTRIBUTION.md). Retain the matching
-license/source bundles and review new contributions and third-party exclusions.
+license and notice files and review new contributions and third-party exclusions.
 
 ## Always
 

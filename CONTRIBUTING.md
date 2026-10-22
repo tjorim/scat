@@ -44,5 +44,5 @@ and the compatibility items in [docs/RELEASING.md](docs/RELEASING.md).
 Original project material is Apache-2.0; contributions are submitted under that
 license unless explicitly agreed otherwise. Preserve third-party notices and
 identify copied/adapted material and its source/terms in reviews. New dependencies
-must pass cargo-deny and the release notice inventory; see
+must pass cargo-deny and release notice generation; see
 [distribution and provenance](docs/DISTRIBUTION.md).
