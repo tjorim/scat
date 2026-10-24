@@ -11,6 +11,22 @@ on:
       - main
       - rust-rewrite
       - feat/rust-phase-*
+    paths-ignore:
+      # The website only; Rust CI does not read any of it.
+      - "site/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".nvmrc"
+      - "scripts/build-site.py"
+      - "scripts/check-site.py"
+      - "scripts/prepare-site.mjs"
+      - "scripts/site-links.test.mjs"
+      - ".github/workflows/pages.yml"
+      - "README.md"
+      - "CONTRIBUTING.md"
+      - "CHANGELOG.md"
+      - "docs/README.md"
+      - "docs/ARCHITECTURE.md"
   workflow_dispatch:
   schedule:
     - cron: "0 5 * * 1"
