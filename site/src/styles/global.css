@@ -994,3 +994,19 @@ footer {
     margin: 8px 0 0;
   }
 }
+.not-found {
+  padding-block: 72px 112px;
+}
+.not-found h1 {
+  font-size: clamp(2.2rem, 5vw, 3.4rem);
+  margin: 0 0 20px;
+}
+.not-found .lead {
+  color: var(--muted);
+}
+.not-found .text-link {
+  border-bottom-color: var(--ink);
+}
+.not-found .eyebrow {
+  color: var(--muted);
+}

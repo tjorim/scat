@@ -43,6 +43,9 @@ install dependencies first.
 - `site/src/scripts/catalog.js`: the sample-catalog demo, bundled by Astro.
 - `site/src/layouts/`: shared metadata, skip link and footer (`SiteLayout`) and the
   header navigation (`SiteNav`).
+- `site/src/pages/404.astro`: the not-found page GitHub Pages serves for unknown URLs.
+- `site/lib/nav.mjs`: the grouped documentation navigation; `site/lib/describe.mjs`
+  derives each page's meta description from its first paragraph.
 - `site/src/pages/docs/[...slug].astro`: documentation shell, navigation, table of
   contents and explicit GitHub source/edit links.
 - `site/src/styles/global.css`: shared design and responsive documentation styles.
@@ -64,8 +67,8 @@ Edit `assets/icon.svg` and regenerate raster derivatives with
 `docs/README.md` renders at `/scat/docs/`; every other `docs/*.md` file renders at
 `/scat/docs/<name>/`, using a lowercase name with `_` replaced by `-` (for
 example `TUI_OPTIONS.md` becomes `/scat/docs/tui-options/`). The route discovers
-all Markdown in that directory automatically. Add new pages to the documentation
-navigation groups in `[...slug].astro`; unlisted pages are still published.
+all Markdown in that directory automatically. Add every new page to the documentation
+navigation in `site/lib/nav.mjs`; `npm test` fails when a published page is missing.
 
 Astro's Unified Markdown processor supplies GitHub-flavored tables, fenced code
 highlighting and heading IDs. A Remark transform resolves relative links from the

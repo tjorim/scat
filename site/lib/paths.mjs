@@ -1,7 +1,10 @@
 // Kept independent of Astro so config, Markdown transforms and tests share routing.
+import { readdirSync } from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 export const base = '/scat/';
+export const origin = 'https://tjorim.github.io';
 export const repository = 'https://github.com/tjorim/scat';
 export const siteUrl = (route = '') => base + route.replace(/^\/+/, '');
 
@@ -33,4 +36,13 @@ export function rewriteUrl(url, source) {
   }
   // Other repository files remain available from their source.
   return `${repository}/blob/main/${target}${suffix}`;
+}
+
+// Every published Markdown source in the working tree, as repository-relative paths.
+export function listSources() {
+  const root = fileURLToPath(new URL('../../docs/', import.meta.url));
+  const docs = readdirSync(root, { recursive: true })
+    .map(name => `docs/${name.replaceAll(path.sep, '/')}`)
+    .filter(source => documentRoute(source) !== undefined);
+  return [...docs, websiteSource].sort();
 }

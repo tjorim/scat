@@ -1,13 +1,13 @@
 ---
 import '../styles/global.css';
-import { siteUrl } from '../../lib/paths.mjs';
+import { origin, siteUrl } from '../../lib/paths.mjs';
 const {
   title,
   description = 'Search, browse and understand your scripts with scat. A native Rust CLI and terminal browser for shared, offline Linux script catalogs.',
   ogDescription = description,
-  path = '',
+  noindex = false,
 } = Astro.props;
-const canonical = new URL(siteUrl(path), Astro.site).href;
+const canonical = origin + Astro.url.pathname;
 const icon = (name) => siteUrl(`assets/${name}`);
 ---
 <!doctype html>
@@ -21,9 +21,12 @@ const icon = (name) => siteUrl(`assets/${name}`);
     <meta property="og:title" content={title} />
     <meta property="og:description" content={ogDescription} />
     <meta property="og:type" content="website" />
-    <meta property="og:url" content={canonical} />
-    <meta property="og:image" content={new URL(icon('icon.png'), Astro.site).href} />
-    <link rel="canonical" href={canonical} />
+    <meta property="og:image" content={origin + icon('icon.png')} />
+    <meta name="twitter:card" content="summary" />
+    {noindex ? <meta name="robots" content="noindex" /> : <>
+      <link rel="canonical" href={canonical} />
+      <meta property="og:url" content={canonical} />
+    </>}
     <link rel="icon" type="image/svg+xml" href={icon('icon.svg')} />
     <link rel="alternate icon" href={icon('icon.ico')} />
     <link rel="apple-touch-icon" href={icon('icon.png')} />
