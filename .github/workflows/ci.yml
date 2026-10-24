@@ -3,24 +3,74 @@ name: Scat CI
 on:
   push:
     branches:
-      - main
-      - rust-rewrite
-      - feat/rust-phase-*
+      - 'main'
+      - 'rust-rewrite'
+      - 'feat/rust-phase-*'
+    paths:
+      # Rust build, test and packaging inputs. Keep new inputs in this list.
+      # Website sources and unrelated prose do not trigger Rust jobs.
+      - 'src/**'
+      - 'tests/**'
+      - 'benches/**'
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rustfmt.toml'
+      - 'deny.toml'
+      - 'about.toml'
+      - 'about.hbs'
+      - 'packaging/**'
+      - 'LICENSE'
+      - 'NOTICE'
+      - '.gitattributes'
+      # Read by tests/compat.rs and bundled into the RPM.
+      - 'docs/COMPATIBILITY.md'
+      - 'docs/scat.example.yaml'
+      - 'docs/scat-mapping.example.yaml'
+      - 'docs/VENDORING.md'
+      - 'docs/TUI_OPTIONS.md'
+      - '.github/workflows/**'
+      - '!.github/workflows/pages.yml'
   pull_request:
     branches:
-      - main
-      - rust-rewrite
-      - feat/rust-phase-*
+      - 'main'
+      - 'rust-rewrite'
+      - 'feat/rust-phase-*'
+    paths:
+      # Rust build, test and packaging inputs. Keep new inputs in this list.
+      # Website sources and unrelated prose do not trigger Rust jobs.
+      - 'src/**'
+      - 'tests/**'
+      - 'benches/**'
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rustfmt.toml'
+      - 'deny.toml'
+      - 'about.toml'
+      - 'about.hbs'
+      - 'packaging/**'
+      - 'LICENSE'
+      - 'NOTICE'
+      - '.gitattributes'
+      # Read by tests/compat.rs and bundled into the RPM.
+      - 'docs/COMPATIBILITY.md'
+      - 'docs/scat.example.yaml'
+      - 'docs/scat-mapping.example.yaml'
+      - 'docs/VENDORING.md'
+      - 'docs/TUI_OPTIONS.md'
+      - '.github/workflows/**'
+      - '!.github/workflows/pages.yml'
   workflow_dispatch:
   schedule:
     - cron: "0 5 * * 1"
 
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
-
-permissions:
-  contents: read
 
 jobs:
   msrv:

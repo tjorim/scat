@@ -32,6 +32,12 @@ Verify examples against `src/cli.rs` and keep the
 TUI workflow changes should follow the [worker lifecycle contracts](docs/TUI_WORKERS.md),
 including request supersession, navigation ownership and shutdown guarantees.
 
+Documentation Markdown under `docs/` is also published on the project website,
+so keep relative links between files (the site rewrites them). Preview the
+website with the pinned Node/npm toolchain as described in
+[site/README.md](site/README.md): `npm ci`, `npm test`, `npm run build`,
+`npm run check:site`.
+
 ## Schema and format changes
 
 Changing `SCHEMA_VERSION` (catalog) requires a coordinated upgrade of the

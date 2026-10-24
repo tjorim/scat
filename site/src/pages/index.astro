@@ -1,48 +1,15 @@
-<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="theme-color" content="#102d2b" />
-    <title>scat — find the script you need</title>
-    <meta
-      name="description"
-      content="Search, browse and understand your scripts with scat. A native Rust CLI and terminal browser for shared, offline Linux script catalogs."
-    />
-    <meta property="og:title" content="scat — find the script you need" />
-    <meta
-      property="og:description"
-      content="One searchable catalog. A keyboard-first browser. All your scripts, connected."
-    />
-    <meta property="og:type" content="website" />
-    <meta property="og:url" content="https://tjorim.github.io/scat/" />
-    <meta
-      property="og:image"
-      content="https://tjorim.github.io/scat/icon.png"
-    />
-    <link rel="canonical" href="https://tjorim.github.io/scat/" />
-    <link rel="icon" type="image/svg+xml" href="icon.svg" />
-    <link rel="alternate icon" href="icon.ico" />
-    <link rel="apple-touch-icon" href="icon.png" />
-    <link rel="stylesheet" href="style.css" />
-    <script src="catalog.js" defer></script>
-  </head>
-  <body>
-    <a class="skip" href="#main">Skip to content</a>
+---
+import SiteLayout from "../layouts/SiteLayout.astro";
+import SiteNav from "../layouts/SiteNav.astro";
+import { siteUrl } from "../../lib/paths.mjs";
+---
+
+<SiteLayout
+  title="scat — find the script you need"
+  ogDescription="One searchable catalog. A keyboard-first browser. All your scripts, connected."
+>
     <header class="masthead">
-      <nav class="wrap navigation" aria-label="Main navigation">
-        <a class="brand" href="#"
-          ><img src="icon.svg" width="42" height="42" alt="" /><span
-            >scat<span class="brand-note">script catalog</span></span
-          ></a
-        >
-        <div class="nav-links">
-          <a href="#explore">Explore</a><a href="#setup">Get started</a
-          ><a href="https://github.com/tjorim/scat"
-            >GitHub <span aria-hidden="true">↗</span></a
-          >
-        </div>
-      </nav>
+      <SiteNav />
       <div class="wrap hero">
         <div class="hero-copy">
           <p class="eyebrow">
@@ -108,7 +75,7 @@
         ><span>No client model downloads</span>
       </div>
     </header>
-    <main id="main">
+    <main id="main" tabindex="-1">
       <section class="wrap section introduction" aria-labelledby="intro-title">
         <p class="eyebrow">From “somewhere on the shared drive”</p>
         <div class="section-heading">
@@ -200,7 +167,7 @@
                 The sample search needs JavaScript. Scat itself runs in your
                 terminal; explore its features in the
                 <a
-                  href="https://github.com/tjorim/scat/blob/main/docs/QUICKSTART.md"
+                  href={siteUrl("docs/quickstart/")}
                   >quick-start guide</a
                 >.
               </p></noscript
@@ -238,8 +205,8 @@
           </p>
           <a
             class="inline-link"
-            href="https://github.com/tjorim/scat/blob/main/docs/ARCHITECTURE.md"
-            >See how it fits together <span aria-hidden="true">↗</span></a
+            href={siteUrl("docs/architecture/")}
+            >See how it fits together <span aria-hidden="true">→</span></a
           >
         </div>
         <div
@@ -300,8 +267,8 @@ export SCAT_DB=/shared/scripts.sqlite
 ./scat tui</code></pre>
               <a
                 class="inline-link"
-                href="https://github.com/tjorim/scat/blob/main/docs/QUICKSTART.md"
-                >Read the quick start ↗</a
+                href={siteUrl("docs/quickstart/")}
+                >Read the quick start →</a
               >
             </div>
           </div>
@@ -329,7 +296,7 @@ export SCAT_DB=/shared/scripts.sqlite
               glyph and color overrides for constrained sessions. Clipboard
               forwarding depends on your terminal. See the
               <a
-                href="https://github.com/tjorim/scat/blob/main/docs/TUI_OPTIONS.md#terminal-modes-and-remote-sessions"
+                href={siteUrl("docs/tui-options/#terminal-modes-and-remote-sessions")}
                 >SSH and terminal guide</a
               >.
             </p>
@@ -341,7 +308,7 @@ export SCAT_DB=/shared/scripts.sqlite
               the intended support matrix, with UBI userspace checks in CI.
               Actual host-policy and mount validation is site-specific; see the
               <a
-                href="https://github.com/tjorim/scat/blob/main/docs/VENDORING.md"
+                href={siteUrl("docs/vendoring/")}
                 >deployment guide</a
               >. Windows is not supported by the main client.
             </p>
@@ -360,33 +327,8 @@ export SCAT_DB=/shared/scripts.sqlite
         </div>
       </section>
     </main>
-    <footer>
-      <div class="wrap footer-top">
-        <a class="brand" href="#"
-          ><img src="icon.svg" width="48" height="48" alt="" /><span
-            >scat<span class="brand-note"
-              >Find your way through your scripts.</span
-            ></span
-          ></a
-        >
-        <div>
-          <a href="https://github.com/tjorim/scat">Source</a
-          ><a href="https://github.com/tjorim/scat/blob/main/docs/QUICKSTART.md"
-            >Docs</a
-          ><a href="https://github.com/tjorim/scat/issues">Issues</a>
-        </div>
-      </div>
-      <div class="wrap footer-bottom">
-        <span
-          >Built with Rust. Maintained by
-          <a href="https://github.com/tjorim">tjorim</a>.</span
-        ><span
-          >Developed with AI assistance ·
-          <a href="https://github.com/tjorim/scat#license"
-            >Apache 2.0 license</a
-          ></span
-        >
-      </div>
-    </footer>
-  </body>
-</html>
+</SiteLayout>
+
+<script>
+  import "../scripts/catalog.js";
+</script>

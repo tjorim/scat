@@ -1,0 +1,47 @@
+---
+import SiteLayout from '../../layouts/SiteLayout.astro';
+import SiteNav from '../../layouts/SiteNav.astro';
+import { documentRoute, repository, siteUrl } from '../../../lib/paths.mjs';
+import { describe } from '../../../lib/describe.mjs';
+import { navigation } from '../../../lib/nav.mjs';
+
+export async function getStaticPaths() {
+  // Keys are relative to this file: four levels up is the repository root, three is site/.
+  const modules = import.meta.glob(['../../../../docs/**/*.md', '../../../README.md'], { eager: true });
+  return Object.entries(modules).flatMap(([file, doc]) => {
+    const source = file.startsWith('../../../../') ? file.slice(12) : `site/${file.slice(9)}`;
+    const route = documentRoute(source);
+    if (route === undefined) return [];
+    return [{ params: { slug: route.slice(5).replace(/\/$/, '') || undefined }, props: { doc, source } }];
+  });
+}
+const { doc, source } = Astro.props;
+const { Content, getHeadings, rawContent } = doc;
+const headings = getHeadings();
+const labels = Object.fromEntries(navigation.flatMap(([, pages]) => pages));
+const title = source === 'docs/README.md' ? 'Documentation'
+  : labels[source] ?? headings.find(heading => heading.depth === 1)?.text ?? 'Documentation';
+---
+<SiteLayout title={`${title} · scat documentation`} description={describe(rawContent(), undefined)}>
+  <header class="masthead"><SiteNav documentation /></header>
+  <main id="main" tabindex="-1" class="wrap docs-layout">
+    <aside class="docs-sidebar">
+      <a href={siteUrl()}>← Back to home</a>
+      <nav aria-label="Documentation">
+        <a href={siteUrl('docs/')} aria-current={source === 'docs/README.md' ? 'page' : undefined}>Overview</a>
+        {navigation.map(([group, pages]) => <>
+          <p class="docs-group">{group}</p>
+          {pages.map(([file, label]) => <a href={siteUrl(documentRoute(file))} aria-current={file === source ? 'page' : undefined}>{label}</a>)}
+        </>)}
+      </nav>
+      {headings.some(h => h.depth === 2) && <details class="toc" open>
+        <summary>On this page</summary>
+        <ul>{headings.filter(h => h.depth === 2).map(h => <li><a href={`#${h.slug}`}>{h.text}</a></li>)}</ul>
+      </details>}
+    </aside>
+    <article class="prose">
+      <div class="source-links"><a href={`${repository}/blob/main/${source}`}>View Markdown source ↗</a><a href={`${repository}/edit/main/${source}`}>Edit on GitHub ↗</a></div>
+      <Content />
+    </article>
+  </main>
+</SiteLayout>

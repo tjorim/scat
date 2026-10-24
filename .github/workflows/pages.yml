@@ -1,41 +1,70 @@
 name: Website
+
 on:
   push:
-    branches: [main]
+    branches:
+      - 'main'
     paths:
-      [
-        "site/**",
-        "assets/icon.*",
-        "scripts/build-site.py",
-        ".github/workflows/pages.yml",
-      ]
+      - 'site/**'
+      - 'docs/**'
+      - 'assets/**'
+      - 'LICENSE'
+      - 'NOTICE'
+      - 'scripts/prepare-site.mjs'
+      - 'scripts/site-links.test.mjs'
+      - 'scripts/check-site.py'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.nvmrc'
+      - '.github/workflows/pages.yml'
   pull_request:
-    branches: [main]
+    branches:
+      - 'main'
     paths:
-      [
-        "site/**",
-        "assets/icon.*",
-        "scripts/build-site.py",
-        ".github/workflows/pages.yml",
-      ]
+      - 'site/**'
+      - 'docs/**'
+      - 'assets/**'
+      - 'LICENSE'
+      - 'NOTICE'
+      - 'scripts/prepare-site.mjs'
+      - 'scripts/site-links.test.mjs'
+      - 'scripts/check-site.py'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.nvmrc'
+      - '.github/workflows/pages.yml'
   workflow_dispatch:
+
 permissions:
   contents: read
+
 concurrency:
   group: pages-${{ github.ref }}
   cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: Assemble static site
-        run: python3 scripts/build-site.py
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Install pinned npm
+        run: npm install --global npm@10.9.8
+      - run: npm ci
+      - name: Build Astro site
+        run: npm run build
+      - name: Check routes, links, anchors and assets
+        run: |
+          npm test
+          npm run check:site
       - uses: actions/upload-pages-artifact@v5
         with:
           path: _site
   deploy:
-    if: github.event_name != 'pull_request'
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     needs: build
     runs-on: ubuntu-latest
     permissions:

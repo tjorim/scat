@@ -1,0 +1,16 @@
+---
+import { siteUrl } from '../../lib/paths.mjs';
+const { documentation = false } = Astro.props;
+---
+<nav class="wrap navigation" aria-label="Main navigation">
+  <a class="brand" href={siteUrl()}
+    ><img src={siteUrl('assets/icon.svg')} width="42" height="42" alt="" /><span
+      >scat<span class="brand-note">script catalog</span></span
+    ></a
+  >
+  <div class="nav-links">
+    <a href={siteUrl('#explore')}>Explore</a><a href={siteUrl('#setup')}>Get started</a
+    ><a href={siteUrl('docs/')} aria-current={documentation ? 'true' : undefined}>Documentation</a
+    ><a href="https://github.com/tjorim/scat">GitHub <span aria-hidden="true">↗</span></a>
+  </div>
+</nav>
