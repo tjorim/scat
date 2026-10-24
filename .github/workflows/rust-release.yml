@@ -9,22 +9,31 @@ on:
   pull_request:
     branches:
       - main
-    paths-ignore:
-      # The website only; Rust CI does not read any of it.
-      - "site/**"
-      - "package.json"
-      - "package-lock.json"
-      - ".nvmrc"
-      - "scripts/build-site.py"
-      - "scripts/check-site.py"
-      - "scripts/prepare-site.mjs"
-      - "scripts/site-links.test.mjs"
-      - ".github/workflows/pages.yml"
-      - "README.md"
-      - "CONTRIBUTING.md"
-      - "CHANGELOG.md"
-      - "docs/README.md"
-      - "docs/ARCHITECTURE.md"
+    paths:
+      # Everything the Rust jobs read. The website and the prose docs it does not
+      # read are left out so that website-only changes skip these workflows.
+      - "src/**"
+      - "tests/**"
+      - "benches/**"
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rustfmt.toml"
+      - "deny.toml"
+      - "about.toml"
+      - "about.hbs"
+      - "packaging/**"
+      - "LICENSE"
+      - "NOTICE"
+      - ".gitattributes"
+      # Read by tests/compat.rs and bundled into the RPM.
+      - "docs/COMPATIBILITY.md"
+      - "docs/scat.example.yaml"
+      - "docs/scat-mapping.example.yaml"
+      - "docs/VENDORING.md"
+      - "docs/TUI_OPTIONS.md"
+      - ".github/workflows/**"
+      - "!.github/workflows/pages.yml"
   workflow_dispatch:
 
 concurrency:
