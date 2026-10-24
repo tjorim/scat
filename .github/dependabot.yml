@@ -39,3 +39,21 @@ updates:
       # dtolnay/rust-toolchain's tag IS the Rust version — must match rust-version in Cargo.toml
       - dependency-name: "dtolnay/rust-toolchain"
         update-types: ["version-update:semver-major", "version-update:semver-minor", "version-update:semver-patch"]
+
+  # Monitor the website toolchain (Astro)
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "friday"
+      time: "18:00"
+      timezone: "Etc/UTC"
+    assignees:
+      - "tjorim"
+    commit-message:
+      prefix: "deps"
+      include: "scope"
+    open-pull-requests-limit: 20
+    labels:
+      - "dependencies"
+      - "javascript"

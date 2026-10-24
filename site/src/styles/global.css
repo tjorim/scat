@@ -724,8 +724,13 @@ footer {
   .brand {
     font-size: 1.3rem;
   }
+  .navigation {
+    flex-wrap: wrap;
+    gap: 12px 20px;
+  }
   .nav-links {
-    gap: 16px;
+    flex-wrap: wrap;
+    gap: 6px 16px;
     font-size: 0.72rem;
   }
   .brand-note {
@@ -852,5 +857,140 @@ footer {
 @media (prefers-reduced-motion: reduce) {
   :root {
     scroll-behavior: auto;
+  }
+}
+.nav-links a[aria-current="true"] {
+  color: var(--lime);
+}
+.docs-layout {
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr);
+  gap: 56px;
+  padding-block: 48px 80px;
+}
+.docs-sidebar {
+  font-size: 0.9rem;
+  line-height: 1.6;
+}
+.docs-sidebar nav {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 24px 0;
+}
+.docs-group {
+  margin: 18px 0 4px;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.68rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.docs-group:first-child {
+  margin-top: 0;
+}
+.docs-sidebar nav a {
+  padding: 5px 10px;
+  border-left: 3px solid transparent;
+  text-decoration: none;
+}
+.docs-sidebar nav a:hover {
+  border-color: var(--line);
+}
+.docs-sidebar a[aria-current="page"] {
+  border-color: var(--forest);
+  background: var(--lime);
+  font-weight: 650;
+}
+.toc summary {
+  font-weight: 600;
+}
+.toc ul {
+  padding-left: 20px;
+}
+.toc li {
+  margin: 8px 0;
+}
+.prose {
+  min-width: 0;
+  line-height: 1.75;
+  overflow-wrap: anywhere;
+}
+.prose h1 {
+  font-size: clamp(2rem, 4vw, 3.2rem);
+  line-height: 1.15;
+  letter-spacing: -0.04em;
+  margin: 24px 0 32px;
+}
+.prose h2 {
+  font-size: 1.7rem;
+  letter-spacing: -0.03em;
+  margin: 48px 0 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+.prose h3 {
+  margin: 32px 0 16px;
+}
+.prose :is(h1, h2, h3, h4) {
+  scroll-margin-top: 24px;
+}
+.prose img {
+  max-width: 100%;
+  height: auto;
+}
+.prose pre {
+  color: #e6edf3;
+  line-height: 1.6;
+  white-space: pre;
+  overflow-x: auto;
+  overflow-wrap: normal;
+}
+.prose pre code {
+  overflow-wrap: normal;
+}
+.prose table {
+  display: block;
+  overflow-x: auto;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+.prose :is(th, td) {
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  text-align: left;
+}
+.prose blockquote {
+  margin-inline: 0;
+  padding-left: 20px;
+  border-left: 4px solid var(--forest);
+  color: var(--muted);
+}
+.prose hr {
+  border: 0;
+  border-top: 1px solid var(--line);
+  margin-block: 32px;
+}
+.source-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 24px;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+@media (max-width: 850px) {
+  .docs-layout {
+    grid-template-columns: 1fr;
+    gap: 24px;
+    padding-block: 32px 56px;
+  }
+  .docs-sidebar nav {
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .docs-group {
+    flex-basis: 100%;
+    margin: 8px 0 0;
   }
 }

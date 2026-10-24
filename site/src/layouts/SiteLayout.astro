@@ -1,0 +1,58 @@
+---
+import '../styles/global.css';
+import { siteUrl } from '../../lib/paths.mjs';
+const {
+  title,
+  description = 'Search, browse and understand your scripts with scat. A native Rust CLI and terminal browser for shared, offline Linux script catalogs.',
+  ogDescription = description,
+  path = '',
+} = Astro.props;
+const canonical = new URL(siteUrl(path), Astro.site).href;
+const icon = (name) => siteUrl(`assets/${name}`);
+---
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#102d2b" />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={ogDescription} />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content={canonical} />
+    <meta property="og:image" content={new URL(icon('icon.png'), Astro.site).href} />
+    <link rel="canonical" href={canonical} />
+    <link rel="icon" type="image/svg+xml" href={icon('icon.svg')} />
+    <link rel="alternate icon" href={icon('icon.ico')} />
+    <link rel="apple-touch-icon" href={icon('icon.png')} />
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
+    <slot />
+    <footer>
+      <div class="wrap footer-top">
+        <a class="brand" href={siteUrl()}
+          ><img src={icon('icon.svg')} width="48" height="48" alt="" /><span
+            >scat<span class="brand-note">Find your way through your scripts.</span></span
+          ></a
+        >
+        <div>
+          <a href={siteUrl()}>Home</a><a href="https://github.com/tjorim/scat">Source</a
+          ><a href={siteUrl('docs/')}>Docs</a
+          ><a href="https://github.com/tjorim/scat/issues">Issues</a>
+        </div>
+      </div>
+      <div class="wrap footer-bottom">
+        <span
+          >Built with Rust. Maintained by
+          <a href="https://github.com/tjorim">tjorim</a>.</span
+        ><span
+          >Developed with AI assistance ·
+          <a href="https://github.com/tjorim/scat#license">Apache 2.0 license</a></span
+        >
+      </div>
+    </footer>
+  </body>
+</html>

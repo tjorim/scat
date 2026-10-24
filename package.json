@@ -1,0 +1,18 @@
+{
+  "name": "scat-site",
+  "private": true,
+  "type": "module",
+  "packageManager": "npm@10.9.8",
+  "engines": { "node": "24.14.0", "npm": "10.9.8" },
+  "scripts": {
+    "dev": "node scripts/prepare-site.mjs && astro dev --root site --host 127.0.0.1",
+    "build": "node scripts/prepare-site.mjs && astro build --root site",
+    "preview": "astro preview --root site --host 127.0.0.1",
+    "test": "node --test scripts/site-links.test.mjs",
+    "check:site": "python3 scripts/check-site.py"
+  },
+  "devDependencies": {
+    "@astrojs/markdown-remark": "7.3.4",
+    "astro": "7.4.2"
+  }
+}

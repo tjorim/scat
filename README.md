@@ -15,16 +15,18 @@ The catalog is **indexed nightly** on a central CRON server and consumed **read�
 
 ## Documentation
 
-[Website source and preview instructions](site/README.md) ·
-[Project website](https://tjorim.github.io/scat/) (available after Pages deployment)
+The [project website](https://tjorim.github.io/scat/) publishes these guides with
+shared navigation; the [documentation index](https://tjorim.github.io/scat/docs/)
+lists them all. The Markdown in [`docs/`](docs/README.md) is the source of truth.
+[Website development instructions](site/README.md) cover the Astro build.
 
-- [Quick start](docs/QUICKSTART.md): setup, search, browsing and troubleshooting
-- [TUI controls and CLI coverage](docs/TUI_OPTIONS.md): workflows and terminal modes
-- [Deployment](docs/VENDORING.md): standalone binary, RPM and RHEL validation
-- [Architecture](docs/ARCHITECTURE.md): paths, read-only access and publication
-- [Compatibility](docs/COMPATIBILITY.md): catalog/client/sidecar versions, upgrade and rollback
-- [Releasing](docs/RELEASING.md): release checklist
-- [vc contract](docs/VC_CONTRACT.md): checkout and revision semantics
+- [Quick start](https://tjorim.github.io/scat/docs/quickstart/): setup, search, browsing and troubleshooting
+- [TUI controls and CLI coverage](https://tjorim.github.io/scat/docs/tui-options/): workflows and [terminal modes](https://tjorim.github.io/scat/docs/tui-options/#terminal-modes-and-remote-sessions)
+- [Deployment](https://tjorim.github.io/scat/docs/vendoring/): standalone binary, RPM and RHEL validation
+- [Architecture](https://tjorim.github.io/scat/docs/architecture/): paths, read-only access and publication
+- [Compatibility](https://tjorim.github.io/scat/docs/compatibility/): catalog/client/sidecar versions, upgrade and rollback
+- [Releasing](https://tjorim.github.io/scat/docs/releasing/): release checklist
+- [vc contract](https://tjorim.github.io/scat/docs/vc-contract/): checkout and revision semantics
 - [Contributing](CONTRIBUTING.md): toolchain and development checks
 
 ---
@@ -191,7 +193,7 @@ ordinary characters, including `?`, as text. F2 toggles native terminal text
 selection and F3 copies the focused content. Use `scat tui --terminal-info` to
 inspect terminal/session hints, `--glyphs ascii` for constrained fonts/locales,
 and `--colors reduced|mono` or global `--no-color` to limit colors. See
-[terminal modes and SSH guidance](docs/TUI_OPTIONS.md#terminal-modes-and-remote-sessions).
+[terminal modes and SSH guidance](https://tjorim.github.io/scat/docs/tui-options/#terminal-modes-and-remote-sessions).
 
 Wide terminals show all panes. Below 110 columns or 30 body rows, the active
 pane is shown with tabs; use Tab/Shift+Tab or click a tab to switch panes.
@@ -365,7 +367,7 @@ same kind of shared drive and gets the same treatment. It has no
 sidecar is always recopied rather than sometimes re-stamped in place; that's
 a fine tradeoff for a file this much smaller than the catalog. The sidecar
 records its format and the catalog build it embedded; see
-[COMPATIBILITY.md](docs/COMPATIBILITY.md) for how mismatches are reported.
+[COMPATIBILITY.md](https://tjorim.github.io/scat/docs/compatibility/) for how mismatches are reported.
 
 ***
 
@@ -390,7 +392,7 @@ The release artifact is a compiled Rust binary:
 Copy the artifact to a directory on `PATH`, set `SCAT_DB` to the shared
 `scripts.sqlite` catalog, and run `scat`.
 
-For deployment details, see **[docs/VENDORING.md](docs/VENDORING.md)**.
+For deployment details, see **[the deployment guide](https://tjorim.github.io/scat/docs/vendoring/)**.
 
 ***
 
@@ -423,7 +425,8 @@ Typical flow:
     scat/
     ├── src/         # Rust CLI, core search API, and indexer
     ├── tests/       # Rust integration tests
-    ├── docs/        # design documents and deployment guides
+    ├── docs/        # design documents and deployment guides (Markdown)
+    ├── site/        # Astro website that publishes the landing page and docs
     └── README.md
 
 ***
@@ -531,5 +534,5 @@ for administrator-owned investigations.
 Original project material, including scat, scat-embed, documentation, website
 and artwork, is licensed under the [Apache License 2.0](LICENSE).
 Copyright 2026 scat contributors. Third-party dependencies and downloaded models
-retain their own terms. See the [licensing and distribution guide](docs/DISTRIBUTION.md)
+retain their own terms. See the [licensing and distribution guide](https://tjorim.github.io/scat/docs/distribution/)
 for provenance, exclusions and the notices that accompany releases.

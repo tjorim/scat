@@ -45,3 +45,6 @@ htmlcov/
 
 # Assembled GitHub Pages website
 _site/
+node_modules/
+site/.astro/
+site/public/

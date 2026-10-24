@@ -1,0 +1,47 @@
+---
+import SiteLayout from '../../layouts/SiteLayout.astro';
+import SiteNav from '../../layouts/SiteNav.astro';
+import { documentRoute, siteUrl, repository } from '../../../lib/paths.mjs';
+
+export async function getStaticPaths() {
+  const modules = import.meta.glob('../../../../docs/*.md', { eager: true });
+  const website = import.meta.glob('../../../README.md', { eager: true });
+  return Object.entries({ ...modules, ...website }).map(([file, doc]) => {
+    const source = file.endsWith('../../../README.md') ? 'site/README.md' : `docs/${file.split('/').pop()}`;
+    const slug = documentRoute(source).slice(5).replace(/\/$/, '') || undefined;
+    return { params: { slug }, props: { doc, source } };
+  });
+}
+const { doc, source } = Astro.props;
+const { Content, getHeadings } = doc;
+const headings = getHeadings();
+const title = headings.find(heading => heading.depth === 1)?.text ?? 'Documentation';
+// Grouped navigation; pages missing here are still published and reachable by link.
+const groups = [
+  ['Start here', [['docs/README.md', 'Overview'], ['docs/QUICKSTART.md', 'Quick start'], ['docs/TUI_OPTIONS.md', 'TUI and CLI options']]],
+  ['Deploy and operate', [['docs/VENDORING.md', 'Deployment'], ['docs/ARCHITECTURE.md', 'Architecture'], ['docs/COMPATIBILITY.md', 'Compatibility'], ['docs/VC_CONTRACT.md', 'vc contract']]],
+  ['Maintain', [['docs/RELEASING.md', 'Releasing'], ['docs/DISTRIBUTION.md', 'Licensing and distribution'], ['docs/TUI_WORKERS.md', 'TUI workers'], ['site/README.md', 'Website development']]],
+];
+---
+<SiteLayout title={`${title} · scat documentation`} path={documentRoute(source)}>
+  <header class="masthead"><SiteNav documentation /></header>
+  <main id="main" tabindex="-1" class="wrap docs-layout">
+    <aside class="docs-sidebar">
+      <a href={siteUrl()}>← Back to home</a>
+      <nav aria-label="Documentation">
+        {groups.map(([group, pages]) => <>
+          <p class="docs-group">{group}</p>
+          {pages.map(([file, label]) => <a href={siteUrl(documentRoute(file))} aria-current={file === source ? 'page' : undefined}>{label}</a>)}
+        </>)}
+      </nav>
+      {headings.some(h => h.depth === 2) && <details class="toc" open>
+        <summary>On this page</summary>
+        <ul>{headings.filter(h => h.depth === 2).map(h => <li><a href={`#${h.slug}`}>{h.text}</a></li>)}</ul>
+      </details>}
+    </aside>
+    <article class="prose">
+      <div class="source-links"><a href={`${repository}/blob/main/${source}`}>View Markdown source ↗</a><a href={`${repository}/edit/main/${source}`}>Edit on GitHub ↗</a></div>
+      <Content />
+    </article>
+  </main>
+</SiteLayout>

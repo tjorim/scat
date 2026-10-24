@@ -180,3 +180,8 @@ Rationale:
 This decision is **final for v1**.  If a web UI is ever reconsidered, it must be
 an optional, opt-in sidecar and must never become a runtime dependency of the
 core catalog functionality.
+
+The static project website is documentation, not a web UI: an Astro build of the
+landing page and these Markdown files, hosted on GitHub Pages with no server
+runtime. Its sample-catalog demo is a fictional, browser-only illustration. See
+[the website guide](../site/README.md).
