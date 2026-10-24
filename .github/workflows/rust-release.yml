@@ -3,45 +3,70 @@ name: Rust Release Artifacts
 on:
   push:
     branches:
-      - main
+      - 'main'
     tags:
-      - "v*"
+      - 'v*'
+    paths:
+      # Rust build, test and packaging inputs. Keep new inputs in this list.
+      # Website sources and unrelated prose do not trigger Rust jobs.
+      - 'src/**'
+      - 'tests/**'
+      - 'benches/**'
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rustfmt.toml'
+      - 'deny.toml'
+      - 'about.toml'
+      - 'about.hbs'
+      - 'packaging/**'
+      - 'LICENSE'
+      - 'NOTICE'
+      - '.gitattributes'
+      # Read by tests/compat.rs and bundled into the RPM.
+      - 'docs/COMPATIBILITY.md'
+      - 'docs/scat.example.yaml'
+      - 'docs/scat-mapping.example.yaml'
+      - 'docs/VENDORING.md'
+      - 'docs/TUI_OPTIONS.md'
+      - '.github/workflows/**'
+      - '!.github/workflows/pages.yml'
   pull_request:
     branches:
-      - main
+      - 'main'
     paths:
-      # Everything the Rust jobs read. The website and the prose docs it does not
-      # read are left out so that website-only changes skip these workflows.
-      - "src/**"
-      - "tests/**"
-      - "benches/**"
-      - "crates/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "rustfmt.toml"
-      - "deny.toml"
-      - "about.toml"
-      - "about.hbs"
-      - "packaging/**"
-      - "LICENSE"
-      - "NOTICE"
-      - ".gitattributes"
+      # Rust build, test and packaging inputs. Keep new inputs in this list.
+      # Website sources and unrelated prose do not trigger Rust jobs.
+      - 'src/**'
+      - 'tests/**'
+      - 'benches/**'
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rustfmt.toml'
+      - 'deny.toml'
+      - 'about.toml'
+      - 'about.hbs'
+      - 'packaging/**'
+      - 'LICENSE'
+      - 'NOTICE'
+      - '.gitattributes'
       # Read by tests/compat.rs and bundled into the RPM.
-      - "docs/COMPATIBILITY.md"
-      - "docs/scat.example.yaml"
-      - "docs/scat-mapping.example.yaml"
-      - "docs/VENDORING.md"
-      - "docs/TUI_OPTIONS.md"
-      - ".github/workflows/**"
-      - "!.github/workflows/pages.yml"
+      - 'docs/COMPATIBILITY.md'
+      - 'docs/scat.example.yaml'
+      - 'docs/scat-mapping.example.yaml'
+      - 'docs/VENDORING.md'
+      - 'docs/TUI_OPTIONS.md'
+      - '.github/workflows/**'
+      - '!.github/workflows/pages.yml'
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
-
-permissions:
-  contents: read
 
 jobs:
   linux:

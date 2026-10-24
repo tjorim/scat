@@ -1,41 +1,47 @@
 name: Website
+
 on:
   push:
-    branches: [main]
+    branches:
+      - 'main'
     paths:
-      [
-        "site/**",
-        "docs/**",
-        "assets/**",
-        "LICENSE",
-        "NOTICE",
-        "scripts/**",
-        "package.json",
-        "package-lock.json",
-        ".nvmrc",
-        ".github/workflows/pages.yml",
-      ]
+      - 'site/**'
+      - 'docs/**'
+      - 'assets/**'
+      - 'LICENSE'
+      - 'NOTICE'
+      - 'scripts/prepare-site.mjs'
+      - 'scripts/site-links.test.mjs'
+      - 'scripts/check-site.py'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.nvmrc'
+      - '.github/workflows/pages.yml'
   pull_request:
-    branches: [main]
+    branches:
+      - 'main'
     paths:
-      [
-        "site/**",
-        "docs/**",
-        "assets/**",
-        "LICENSE",
-        "NOTICE",
-        "scripts/**",
-        "package.json",
-        "package-lock.json",
-        ".nvmrc",
-        ".github/workflows/pages.yml",
-      ]
+      - 'site/**'
+      - 'docs/**'
+      - 'assets/**'
+      - 'LICENSE'
+      - 'NOTICE'
+      - 'scripts/prepare-site.mjs'
+      - 'scripts/site-links.test.mjs'
+      - 'scripts/check-site.py'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.nvmrc'
+      - '.github/workflows/pages.yml'
   workflow_dispatch:
+
 permissions:
   contents: read
+
 concurrency:
   group: pages-${{ github.ref }}
   cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
