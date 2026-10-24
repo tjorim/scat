@@ -1,7 +1,12 @@
 // A search-result summary for a documentation page: its first prose paragraph, as plain text.
 export function describe(markdown, fallback, limit = 160) {
-  const paragraph = markdown
-    .replace(/<!--[\s\S]*?-->/g, '')
+  // Repeat until stable so removing one comment cannot splice a new one together.
+  let source = markdown;
+  for (let previous = ''; previous !== source;) {
+    previous = source;
+    source = source.replace(/<!--[\s\S]*?-->/g, '');
+  }
+  const paragraph = source
     .replace(/^```[\s\S]*?^```/gm, '')
     .split(/\n\s*\n/)
     .map(block => block.trim())

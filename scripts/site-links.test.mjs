@@ -25,6 +25,8 @@ test('page descriptions are the first prose paragraph as plain text', () => {
   const markdown = '# Title\n\n![badge](x.svg)\n\n> note\n\nA [guide](a.md) with `code` and **bold**\ntext.\n\nSecond paragraph.';
   assert.equal(describe(markdown, 'fallback'), 'A guide with code and bold text.');
   assert.equal(describe('# Only a title\n\n- item', 'fallback'), 'fallback');
+  assert.equal(describe('<!<!-- x -->--\n\nHi', 'fallback'), 'Hi');
+  assert.equal(describe('<!-- a\n\nb -->\n\nReal text', 'fallback'), 'Real text');
   const long = describe(`${'word '.repeat(60)}end`, 'fallback');
   assert.ok(long.length <= 160 && long.endsWith('…'));
 });
