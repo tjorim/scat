@@ -6,7 +6,7 @@ publish = false
 license = "Apache-2.0"
 
 [dependencies]
-rusqlite = { version = "0.40", features = ["bundled-full"] }
+rusqlite = { version = "0.41", features = ["bundled-full"] }
 fastembed = "7"
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
