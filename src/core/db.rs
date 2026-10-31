@@ -698,11 +698,7 @@ pub fn fts_query_filtered(
     params.push(SqlValue::Integer(lim));
 
     let mut stmt = conn.prepare_cached(&sql)?;
-    let cols: Vec<String> = stmt
-        .column_names()
-        .iter()
-        .map(std::string::ToString::to_string)
-        .collect();
+    let cols: Vec<String> = stmt.column_names().map(str::to_string).collect();
     stmt.query_map(params_from_iter(params), |row| Ok(row_to_map(row, &cols)))?
         .map(|r| r.map_err(Error::from))
         .collect()
@@ -740,11 +736,7 @@ pub fn query_rows(
     params: &[&dyn rusqlite::ToSql],
 ) -> Result<Vec<JsonRow>> {
     let mut stmt = conn.prepare_cached(sql)?;
-    let cols: Vec<String> = stmt
-        .column_names()
-        .iter()
-        .map(std::string::ToString::to_string)
-        .collect();
+    let cols: Vec<String> = stmt.column_names().map(str::to_string).collect();
     let rows: Result<Vec<JsonRow>> = stmt
         .query_map(params, |row| Ok(row_to_map(row, &cols)))?
         .map(|r| r.map_err(Error::from))

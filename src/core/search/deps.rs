@@ -84,11 +84,7 @@ impl SearchApi {
                 chunk.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
 
             let mut stmt = self.conn.prepare_cached(&sql)?;
-            let cols: Vec<String> = stmt
-                .column_names()
-                .iter()
-                .map(std::string::ToString::to_string)
-                .collect();
+            let cols: Vec<String> = stmt.column_names().map(str::to_string).collect();
             let rows: std::result::Result<Vec<JsonRow>, _> = stmt
                 .query_map(params.as_slice(), |row| Ok(row_to_map(row, &cols)))?
                 .map(|r| r.map_err(Error::from))
