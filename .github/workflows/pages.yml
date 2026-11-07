@@ -14,7 +14,8 @@ on:
       - 'scripts/site-links.test.mjs'
       - 'scripts/check-site.py'
       - 'package.json'
-      - 'package-lock.json'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
       - '.nvmrc'
       - '.github/workflows/pages.yml'
   pull_request:
@@ -30,7 +31,8 @@ on:
       - 'scripts/site-links.test.mjs'
       - 'scripts/check-site.py'
       - 'package.json'
-      - 'package-lock.json'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
       - '.nvmrc'
       - '.github/workflows/pages.yml'
   workflow_dispatch:
@@ -47,19 +49,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc
-          cache: npm
-      - name: Install pinned npm
-        run: npm install --global npm@10.9.8
-      - run: npm ci
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
       - name: Build Astro site
-        run: npm run build
+        run: pnpm run build
       - name: Check routes, links, anchors and assets
         run: |
-          npm test
-          npm run check:site
+          pnpm test
+          pnpm run check:site
       - uses: actions/upload-pages-artifact@v5
         with:
           path: _site

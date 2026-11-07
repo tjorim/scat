@@ -8,15 +8,15 @@ implement scat's FTS, ranking or advanced search semantics.
 
 ## Local development
 
-From the repository root, use Node **24.14.0** (`nvm use`) and npm **10.9.8**.
+From the repository root, use Node **24.14.0** (`nvm use`) and pnpm **12.16.1**.
 Astro and the Markdown processor are pinned in `package.json`; commit changes to
-`package-lock.json` together with dependency changes. CI explicitly installs the
-pinned npm version before running `npm ci`.
+`pnpm-lock.yaml` together with dependency changes. CI explicitly installs the
+pinned pnpm version before running `pnpm install --frozen-lockfile`.
 
 ```sh
-npm install --global npm@10.9.8
-npm ci
-npm run dev
+npm install --global pnpm@12.16.1
+pnpm install --frozen-lockfile
+pnpm run dev
 ```
 
 Open <http://127.0.0.1:4321/scat/>. Markdown, layout and CSS edits refresh in
@@ -24,15 +24,15 @@ development. After adding assets, restart the command to copy them again. To
 inspect exactly what will be published:
 
 ```sh
-npm test
-npm run build
-npm run check:site
-npm run preview
+pnpm test
+pnpm run build
+pnpm run check:site
+pnpm run preview
 ```
 
-Preview uses the same URL and repository prefix. `npm test` runs focused routing
-tests and works immediately after `npm ci`, without a prior build. After
-`npm run build`, `npm run check:site` validates all output pages, internal links,
+Preview uses the same URL and repository prefix. `pnpm test` runs focused routing
+tests and works immediately after `pnpm install --frozen-lockfile`, without a prior build. After
+`pnpm run build`, `pnpm run check:site` validates all output pages, internal links,
 fragments, local assets and legacy redirect targets. The old
 `python3 scripts/build-site.py` entry point now delegates to the Astro build;
 install dependencies first.
@@ -68,7 +68,7 @@ Edit `assets/icon.svg` and regenerate raster derivatives with
 `/scat/docs/<name>/`, using a lowercase name with `_` replaced by `-` (for
 example `TUI_OPTIONS.md` becomes `/scat/docs/tui-options/`). The route discovers
 all Markdown in that directory automatically. Add every new page to the documentation
-navigation in `site/lib/nav.mjs`; `npm test` fails when a published page is missing.
+navigation in `site/lib/nav.mjs`; `pnpm test` fails when a published page is missing.
 
 Astro's Unified Markdown processor supplies GitHub-flavored tables, fenced code
 highlighting and heading IDs. A Remark transform resolves relative links from the
@@ -96,7 +96,7 @@ prefixes its generated CSS and script assets. Do not add a second prefix manuall
 ## CI and deployment
 
 In GitHub **Settings → Pages**, choose **GitHub Actions** as the source.
-The Website workflow installs the pinned Node and npm toolchain, runs `npm ci`,
+The Website workflow installs the pinned Node and pnpm toolchain, runs `pnpm install --frozen-lockfile`,
 builds all pages and validates the output for both pull requests and pushes to
 `main`. Its path filters include Markdown, site sources, assets, build scripts,
 dependency manifests and the Node pin. It uploads `_site/` with
