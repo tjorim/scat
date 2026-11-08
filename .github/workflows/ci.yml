@@ -81,8 +81,24 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Set up Rust 1.95.0
-        uses: dtolnay/rust-toolchain@1.95.0
+      # Cargo.toml owns the support floor; raising it is a deliberate policy change.
+      - name: Read minimum supported Rust version
+        id: msrv
+        run: |
+          python3 - <<'PYTHON'
+          import os
+          import tomllib
+
+          with open("Cargo.toml", "rb") as manifest:
+              version = tomllib.load(manifest)["package"]["rust-version"]
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"version={version}\n")
+          PYTHON
+
+      - name: Set up minimum supported Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2

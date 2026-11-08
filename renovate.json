@@ -1,0 +1,8 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "github>tjorim/renovate-config",
+    "github>tjorim/renovate-config:rust",
+    "github>tjorim/renovate-config:astro"
+  ]
+}
