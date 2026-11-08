@@ -4,19 +4,5 @@
     "github>tjorim/renovate-config",
     "github>tjorim/renovate-config:rust",
     "github>tjorim/renovate-config:astro"
-  ],
-  "packageRules": [
-    {
-      "description": [
-        "Keep the Rust toolchain version aligned with rust-version in Cargo.toml; preserve the Dependabot exclusion."
-      ],
-      "matchManagers": [
-        "github-actions"
-      ],
-      "matchPackageNames": [
-        "dtolnay/rust-toolchain"
-      ],
-      "enabled": false
-    }
   ]
 }
