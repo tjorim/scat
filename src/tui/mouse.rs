@@ -271,10 +271,7 @@ impl TuiApp {
             RegionKind::Revisions => {
                 let previous = self.revisions_selected;
                 self.move_revision(delta as isize);
-                if previous != self.revisions_selected {
-                    return Ok(true);
-                }
-                Ok(false)
+                Ok(previous != self.revisions_selected)
             }
             RegionKind::DetailBody => {
                 self.detail_scroll = scroll_by(self.detail_scroll, delta);
