@@ -229,7 +229,7 @@ fn load_detail(api: &SearchApi, path: &str) -> DetailPayload {
     let mut deps = Vec::new();
     if let Some(g) = graph {
         for item in g.uses {
-            let key = ("uses".to_string(), item.logical_path.clone());
+            let key = ("uses".to_string(), item.logical_path);
             if dep_seen.insert(key.clone()) {
                 deps.push(DependencyItem {
                     kind: key.0,
