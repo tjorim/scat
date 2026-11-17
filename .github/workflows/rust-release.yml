@@ -105,6 +105,16 @@ jobs:
           ./target/x86_64-unknown-linux-musl/release/scat --help
           ./target/x86_64-unknown-linux-musl/release/scat tui --help
 
+      - name: Test panic cleanup in aborting release binary
+        run: |
+          binary=target/x86_64-unknown-linux-musl/release/scat
+          cp "$binary" "$binary.default"
+          trap 'mv -f "$binary.default" "$binary"' EXIT
+          cargo build --release --locked --target x86_64-unknown-linux-musl --features terminal-panic-test
+          python3 tests/support/tui_pty.py "$binary" --panic-hook
+          mv -f "$binary.default" "$binary"
+          trap - EXIT
+
       - name: Create compatibility database
         run: |
           mkdir -p target/compat

@@ -53,6 +53,32 @@ with tempfile.TemporaryDirectory(prefix="scat-pty-") as directory:
         env.pop(key, None)
     subprocess.run([binary, "--db", str(db), "catalog", "build", "--scan-root", str(scripts), "-q"], env=env, check=True, capture_output=True)
 
+    if len(sys.argv) > 2 and sys.argv[2] == "--panic-hook":
+        master, slave = pty.openpty()
+        original = termios.tcgetattr(slave)
+        panic_env = dict(env, SCAT_TEST_PANIC_AFTER_TUI_SETUP="1")
+        process = subprocess.Popen([binary, "--db", str(db), "--no-cache", "tui"],
+                                   stdin=slave, stdout=slave, stderr=slave, env=panic_env)
+        try:
+            transcript = wait_for(master, b"\x1b[?2004h")
+            process.wait(timeout=5)
+            transcript += read_for(master, 0.3)
+            assert process.returncode != 0, "panic probe should terminate unsuccessfully"
+            assert b"intentional panic for terminal restoration PTY test" in transcript
+            assert b"\x1b[?1000l" in transcript, "mouse capture was not disabled"
+            assert b"\x1b[?2004l" in transcript, "bracketed paste was not disabled"
+            assert b"\x1b[?1049l" in transcript, "alternate screen was not left"
+            assert b"\x1b[?25h" in transcript, "cursor was not shown"
+            assert termios.tcgetattr(slave) == original, "terminal attributes not restored after panic"
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+            os.close(master)
+            os.close(slave)
+        print("PTY panic-hook regression passed")
+        sys.exit(0)
+
     # Diagnostics must work without a catalog; rejection must emit no escapes.
     info = subprocess.run([binary, "tui", "--terminal-info"], env=env, capture_output=True)
     assert info.returncode == 0 and b"Clipboard availability: unknown" in info.stdout
