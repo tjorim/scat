@@ -12,6 +12,10 @@ license = "Apache-2.0"
 [workspace]
 members = ["crates/scat-embed"]
 
+[features]
+# Enables the panic hook's PTY regression trigger in the release CI job only.
+terminal-panic-test = []
+
 [[bin]]
 name = "scat"
 path = "src/main.rs"
