@@ -1,8 +1,11 @@
 use std::io;
+use std::panic;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use crossterm::cursor::Show;
 use crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -72,6 +75,7 @@ use self::stats_worker::{StatsRequest, StatsResponse, StatsWorker};
 // (see `render::draw_results`), so this can be well beyond a single screen
 // without making rendering more expensive.
 const RESULT_LIMIT: usize = 2000;
+static TERMINAL_ACTIVE: AtomicBool = AtomicBool::new(false);
 const DEBOUNCE_MS: u64 = 150;
 /// Input-poll timeout while a worker reply is pending or a spinner animates.
 const POLL_TICK_MS: u64 = 50;
@@ -390,7 +394,13 @@ pub fn run(
             io::Error::last_os_error()
         );
     }
+    install_terminal_panic_hook();
     let mut terminal = TerminalGuard::enter()?;
+
+    #[cfg(feature = "terminal-panic-test")]
+    if std::env::var_os("SCAT_TEST_PANIC_AFTER_TUI_SETUP").is_some() {
+        panic!("intentional panic for terminal restoration PTY test");
+    }
 
     loop {
         app.advance(Instant::now())?;
@@ -560,6 +570,7 @@ impl TerminalGuard {
             mouse_capture: false,
         };
         enable_raw_mode()?;
+        TERMINAL_ACTIVE.store(true, Ordering::Release);
         // Construct the guard first so setup failures also restore the terminal.
         execute!(
             guard.terminal.backend_mut(),
@@ -628,11 +639,13 @@ impl TerminalGuard {
             LeaveAlternateScreen
         )?;
         self.terminal.show_cursor()?;
+        TERMINAL_ACTIVE.store(false, Ordering::Release);
         Ok(())
     }
 
     fn resume(&mut self) -> io::Result<()> {
         enable_raw_mode()?;
+        TERMINAL_ACTIVE.store(true, Ordering::Release);
         execute!(
             self.terminal.backend_mut(),
             EnterAlternateScreen,
@@ -648,15 +661,32 @@ impl TerminalGuard {
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        let _ = disable_raw_mode();
-        let _ = execute!(
-            self.terminal.backend_mut(),
-            DisableMouseCapture,
-            DisableBracketedPaste,
-            LeaveAlternateScreen
-        );
-        let _ = self.terminal.show_cursor();
+        if TERMINAL_ACTIVE.swap(false, Ordering::AcqRel) {
+            restore_terminal_modes();
+        }
     }
+}
+
+fn install_terminal_panic_hook() {
+    let previous = panic::take_hook();
+    panic::set_hook(Box::new(move |info| {
+        if TERMINAL_ACTIVE.swap(false, Ordering::AcqRel) {
+            restore_terminal_modes();
+        }
+        previous(info);
+    }));
+}
+
+fn restore_terminal_modes() {
+    let _ = disable_raw_mode();
+    let mut stdout = io::stdout();
+    let _ = execute!(
+        stdout,
+        DisableMouseCapture,
+        DisableBracketedPaste,
+        LeaveAlternateScreen,
+        Show
+    );
 }
 
 #[cfg(test)]
