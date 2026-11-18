@@ -152,51 +152,14 @@ jobs:
         with:
           workspaces: .
 
-      - name: Install cargo-audit
-        uses: taiki-e/install-action@f84dff0ad3f25ff0e5dc531e626734a4e7d11ac7 # cargo-audit
-
-      - name: Fail on high-severity advisories
-        run: |
-          # cargo audit exits non-zero when any advisory matches, regardless of
-          # severity; ignore its exit code and let the filter below decide.
-          cargo audit --json > audit.json || true
-          python - <<'PY'
-          import json
-          import sys
-
-          with open("audit.json", "r", encoding="utf-8") as fh:
-              report = json.load(fh)
-
-          high = []
-          for vuln in report.get("vulnerabilities", {}).get("list", []):
-              advisory = vuln.get("advisory", {})
-              severity = (advisory.get("severity") or "").lower()
-              if severity in {"high", "critical"}:
-                  high.append(
-                      {
-                          "id": advisory.get("id", "unknown"),
-                          "package": (vuln.get("package") or {}).get("name", "unknown"),
-                          "severity": severity,
-                          "title": advisory.get("title", ""),
-                      }
-                  )
-
-          if high:
-              print("High-severity advisories found:")
-              for advisory in high:
-                  print(
-                      f"- [{advisory['severity']}] {advisory['id']} "
-                      f"({advisory['package']}): {advisory['title']}"
-                  )
-              sys.exit(1)
-
-          print("No high-severity advisories found.")
-          PY
-
       - name: Install cargo-deny
         uses: taiki-e/install-action@98b24ef8830c90613ec3b57343df3abde2b66e56 # cargo-deny
 
-      - name: Check licenses and duplicate dependencies
+      - name: Check advisories, licenses and duplicate dependencies
         run: |
+          # Advisories (RustSec) are configured in deny.toml: vulnerabilities,
+          # yanked releases and unmaintained/unsound crates fail unless listed
+          # there with a reason. Both workspace members are checked.
+          cargo deny --workspace check advisories
           cargo deny check licenses bans
           cargo deny --workspace check licenses
