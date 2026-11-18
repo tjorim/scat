@@ -75,7 +75,6 @@ use self::stats_worker::{StatsRequest, StatsResponse, StatsWorker};
 // (see `render::draw_results`), so this can be well beyond a single screen
 // without making rendering more expensive.
 const RESULT_LIMIT: usize = 2000;
-static TERMINAL_ACTIVE: AtomicBool = AtomicBool::new(false);
 const DEBOUNCE_MS: u64 = 150;
 /// Input-poll timeout while a worker reply is pending or a spinner animates.
 const POLL_TICK_MS: u64 = 50;
@@ -557,6 +556,12 @@ impl TuiApp {
     }
 }
 
+/// True while the terminal is in fullscreen TUI mode (raw mode, alternate
+/// screen, mouse capture, bracketed paste). Shared by `TerminalGuard::drop` and
+/// the panic hook so exactly one of them restores the terminal, and neither
+/// emits fullscreen cleanup while a viewer or editor has the normal screen.
+static TERMINAL_ACTIVE: AtomicBool = AtomicBool::new(false);
+
 struct TerminalGuard {
     terminal: Terminal<CrosstermBackend<io::Stdout>>,
     mouse_capture: bool,
@@ -667,6 +672,14 @@ impl Drop for TerminalGuard {
     }
 }
 
+/// Release builds use `panic = "abort"`, which skips `TerminalGuard::drop`, so
+/// the terminal is restored here before the previous hook prints the message on
+/// the normal screen.
+///
+/// The hook is process-wide: with `panic = "unwind"` (dev and test builds) a
+/// panic on a worker thread also restores the terminal while the UI thread may
+/// keep running. Release builds abort right after the hook, so this only
+/// affects debugging.
 fn install_terminal_panic_hook() {
     let previous = panic::take_hook();
     panic::set_hook(Box::new(move |info| {

@@ -6,6 +6,10 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- A panic in the TUI now restores the terminal (raw mode, alternate screen, mouse
+  capture, bracketed paste, cursor) before the panic message is printed, including
+  in release builds that abort on panic. `SIGTERM`/`SIGHUP` handling is tracked
+  separately in #185.
 - Search queries containing `.`, `/` or `\` (IP addresses like `10.0.0.1`, dotted
   text, filenames) no longer skip content search: path matches are listed first,
   followed by full-text matches on the same query, in both the CLI and the TUI.
