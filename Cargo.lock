@@ -3654,7 +3654,6 @@ dependencies = [
  "ignore",
  "indicatif",
  "libc",
- "once_cell",
  "proptest",
  "ratatui",
  "rayon",

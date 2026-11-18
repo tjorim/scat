@@ -91,6 +91,18 @@ All notable changes to this project will be documented in this file.
   text, filenames) no longer skip content search: path matches are listed first,
   followed by full-text matches on the same query, in both the CLI and the TUI.
 
+### Changed
+
+- Small cleanups (#189): dropped the unused `once_cell` dependency and the redundant
+  dev-dependencies; the FTS trigger DDL is defined once and shared by the schema and the
+  bulk-build restore (a test pins that they match); the vc checkout-name regex uses
+  `LazyLock` like the rest; the cache's uid comes from `geteuid()` instead of `/proc/self`;
+  `scat tui` loads the config and detects the terminal once; a cancelled or finished
+  background process's group is killed before the leader is reaped, so a recycled pid can
+  never be signalled; the `owner:` and `brief:` header keywords must start the comment text
+  (`# Downowner: x` and `# debrief: x` no longer match). The direct `time` dependency
+  stays: ratatui's calendar widget takes `time::Date`.
+
 ### Distribution
 
 - License original project material (both crates, documentation, website and

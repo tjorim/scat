@@ -15,22 +15,18 @@ use crate::error::Result;
 // Constants
 // ---------------------------------------------------------------------------
 
-static CHECKOUT_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-
 /// Matches vc version filenames: `<script>_<timestamp>[_<user>]`.
 ///
 /// Observed timestamp precision varies (`YYYYMMDD`, `YYYYMMDD_HHMM`, or
 /// `YYYYMMDD_HHMMSS`), and only DEVELOP checkouts carry the trailing user —
 /// ARCHIVE entries and checked-in working-directory copies are
 /// `<script>_<timestamp>` with no user suffix. See docs/VC_CONTRACT.md.
-fn checkout_re() -> &'static regex::Regex {
-    CHECKOUT_RE.get_or_init(|| {
-        regex::Regex::new(
-            r"^(?P<script>.+)_(?P<timestamp>\d{8}(?:_\d{4}(?:\d{2})?)?)(?:_(?P<user>[^\\/]+))?$",
-        )
-        .unwrap()
-    })
-}
+static CHECKOUT_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(
+        r"^(?P<script>.+)_(?P<timestamp>\d{8}(?:_\d{4}(?:\d{2})?)?)(?:_(?P<user>[^\\/]+))?$",
+    )
+    .unwrap()
+});
 
 // ---------------------------------------------------------------------------
 // Config file schema
@@ -549,7 +545,7 @@ pub fn load_vc_config(config_file: Option<&Path>) -> Result<VcConfig> {
 /// minute, or second precision. `user` is an empty string when the filename
 /// has no user suffix.
 pub fn parse_checkout_filename(filename: &str) -> Option<(String, String, String)> {
-    let m = checkout_re().captures(filename)?;
+    let m = CHECKOUT_RE.captures(filename)?;
     Some((
         m["script"].to_string(),
         m["timestamp"].to_string(),

@@ -122,9 +122,7 @@ pub fn inspect_cache(source: &Path, options: &CacheOptions) -> serde_json::Value
         .root
         .as_deref()
         .unwrap_or(Path::new(DEFAULT_CACHE_ROOT));
-    let Some(uid) = current_uid() else {
-        return serde_json::json!({"state": "unknown", "reason": "uid unavailable"});
-    };
+    let uid = current_uid();
     let dir = root.join(format!("scat-cache-{uid}"));
     let entry = CacheEntry::new(&dir, &cache_key(source));
     let dir_meta = fs::symlink_metadata(&dir);
@@ -460,13 +458,9 @@ fn cache_dir(options: &CacheOptions) -> Result<Option<PathBuf>> {
         return Ok(None);
     }
 
-    let Some(uid) = current_uid() else {
-        debug!("could not determine the current uid; caching disabled");
-        return Ok(None);
-    };
-
     // Per-uid so that hosts shared between users cache once per user rather
     // than fighting over one directory nobody else may enter.
+    let uid = current_uid();
     let dir = root.join(format!("scat-cache-{uid}"));
     DirBuilder::new()
         .recursive(true)
@@ -502,9 +496,11 @@ fn cache_dir(options: &CacheOptions) -> Result<Option<PathBuf>> {
     Ok(Some(dir))
 }
 
-/// The calling process's real uid, via `/proc/self`'s owner.
-fn current_uid() -> Option<u32> {
-    fs::metadata("/proc/self").ok().map(|meta| meta.uid())
+/// The calling process's effective uid: the one file-ownership checks (and new
+/// files) use, and available without `/proc`.
+fn current_uid() -> u32 {
+    // SAFETY: `geteuid` has no preconditions and cannot fail.
+    unsafe { libc::geteuid() }
 }
 
 /// A stable, filesystem-safe name for `source`.
@@ -745,9 +741,7 @@ mod tests {
         // …but the entry is re-stamped, so the next call takes the fast path.
         let stamp = SourceStamp::of(&source).unwrap();
         let entry = CacheEntry::new(
-            &root
-                .path()
-                .join(format!("scat-cache-{}", current_uid().unwrap())),
+            &root.path().join(format!("scat-cache-{}", current_uid())),
             &cache_key(&source),
         );
         assert!(entry.is_current(&stamp));
@@ -796,9 +790,7 @@ mod tests {
 
         // Pre-create the per-uid directory with permissions that would let
         // another user on a shared host swap the cached catalog out.
-        let cache = root
-            .path()
-            .join(format!("scat-cache-{}", current_uid().unwrap()));
+        let cache = root.path().join(format!("scat-cache-{}", current_uid()));
         fs::create_dir_all(&cache).unwrap();
         fs::set_permissions(&cache, fs::Permissions::from_mode(0o777)).unwrap();
 

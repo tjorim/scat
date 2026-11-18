@@ -46,7 +46,6 @@ tree-sitter-highlight = "0.27"
 walkdir = "2"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 regex = "1"
-once_cell = "1"
 tempfile = "3"
 ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
 crossterm = "0.29"
@@ -64,13 +63,12 @@ shell-words = "1"
 clap_complete = "4.6.7"
 sha2 = "0.11"
 hex = "0.4"
+# ratatui's calendar widget takes `time::Date` in its public API, so the TUI
+# stats view needs the type by name (everything else uses chrono).
 time = "0.3"
 clap_mangen = "0.3.3"
 
 [dev-dependencies]
-rusqlite = { version = "0.42", features = ["bundled-full"] }
-tempfile = "3"
-chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 proptest = "1.11.0"
 criterion = { version = "0.8.2", features = ["html_reports"] }
 
