@@ -11,12 +11,13 @@ use tracing::{debug, warn};
 use crate::core::db::SCHEMA_VERSION;
 use crate::core::vc::{
     ProcessedScript, VcConfig, infer_manifest_warnings, infer_warnings, load_vc_manifest,
-    manifest_fingerprint, scan_checkouts,
+    scan_checkouts,
 };
 use crate::error::{Error, Result};
 use crate::indexer::ast_deps::AstDependencies;
 use crate::indexer::checkpoint::{Checkpoint, write_checkpoint};
 use crate::indexer::extractor::{ExtractedMetadata, extract};
+use crate::indexer::fingerprint::BuildFingerprint;
 use crate::indexer::scan_tree::ScanTreeView;
 use crate::indexer::scanner::{ScriptRecord, scan_paths_with_revisions_and_tree};
 use crate::indexer::treesitter_deps::TreeSitterExtractor;
@@ -62,6 +63,7 @@ pub(super) fn populate(
     vc_config: &VcConfig,
     db_path: &Path,
     resume_checkpoint: Option<Checkpoint>,
+    fingerprint: &BuildFingerprint,
     shutdown: &AtomicBool,
     use_progress: bool,
     dry_run: bool,
@@ -219,7 +221,7 @@ pub(super) fn populate(
         // Check for Ctrl-C interrupt before starting the next batch's
         // (parallel, not itself interruptible mid-flight) extraction.
         if shutdown.load(Ordering::SeqCst) {
-            checkpoint_for_resume(tx, db_path, newly_indexed, dry_run)?;
+            checkpoint_for_resume(tx, db_path, newly_indexed, fingerprint, dry_run)?;
             return Err(Error::Interrupted);
         }
 
@@ -240,7 +242,7 @@ pub(super) fn populate(
         for (record, extraction) in extracted {
             // Check for Ctrl-C interrupt.
             if shutdown.load(Ordering::SeqCst) {
-                checkpoint_for_resume(tx, db_path, newly_indexed, dry_run)?;
+                checkpoint_for_resume(tx, db_path, newly_indexed, fingerprint, dry_run)?;
                 return Err(Error::Interrupted);
             }
 
@@ -301,7 +303,7 @@ pub(super) fn populate(
     // instead of waiting for phase 3 (which has no per-record progress of
     // its own) to run to completion first.
     if shutdown.load(Ordering::SeqCst) {
-        checkpoint_for_resume(tx, db_path, newly_indexed, dry_run)?;
+        checkpoint_for_resume(tx, db_path, newly_indexed, fingerprint, dry_run)?;
         return Err(Error::Interrupted);
     }
 
@@ -463,11 +465,7 @@ pub(super) fn populate(
         "INSERT OR REPLACE INTO index_metadata
          (id, build_timestamp, schema_version, manifest_fingerprint)
          VALUES (1, ?1, ?2, ?3)",
-        rusqlite::params![
-            build_ts,
-            SCHEMA_VERSION,
-            manifest_fingerprint(vc_config.manifest_path.as_deref()),
-        ],
+        rusqlite::params![build_ts, SCHEMA_VERSION, fingerprint.to_string(),],
     )?;
 
     if let Some(pb) = &finalize_pb {
@@ -490,12 +488,14 @@ fn checkpoint_for_resume(
     tx: rusqlite::Transaction<'_>,
     db_path: &Path,
     newly_indexed: HashSet<String>,
+    fingerprint: &BuildFingerprint,
     dry_run: bool,
 ) -> Result<()> {
     tx.commit()?;
     if !dry_run {
         let ckpt = Checkpoint {
             indexed: newly_indexed,
+            fingerprint: fingerprint.to_string(),
         };
         if let Err(e) = write_checkpoint(db_path, &ckpt) {
             warn!(error = %e, "failed to write resume checkpoint — progress cannot be resumed");

@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use scat_core::core::vc::manifest_fingerprint;
 use scat_core::indexer::builder::{BuildOptions, build_index};
+use scat_core::indexer::fingerprint::BuildFingerprint;
 use scat_core::indexer::scanner::max_mtime_in_roots_with_shutdown;
 use tracing::warn;
 
@@ -70,7 +70,7 @@ pub fn cmd_index(
     if !force
         && !dry_run
         && db_path.exists()
-        && let Some((indexed_at_secs, indexed_manifest_fingerprint)) = read_indexed_at(db_path)
+        && let Some((indexed_at_secs, indexed_fingerprint)) = read_indexed_at(db_path)
     {
         let checkout_dirs: Vec<&str> = config.all_checkout_dirs().collect();
         let max_mtime = max_mtime_in_roots_with_shutdown(
@@ -80,12 +80,22 @@ pub fn cmd_index(
             &shutdown,
         )
         .with_context(|| "Failed to check scan root modification times")?;
-        let current_manifest_fingerprint = manifest_fingerprint(config.manifest_path.as_deref());
+        // Files and directories only tell whether the *scanned tree* changed;
+        // the fingerprint covers everything else the catalog is built from
+        // (roots, ignore rules, checkout dirs, header lines, vc manifest, scat
+        // version), so a config change or an upgrade is not "up to date".
+        let current_fingerprint = BuildFingerprint::compute(
+            &effective_scan_roots,
+            head_lines,
+            &effective_ignore,
+            &config,
+        )
+        .to_string();
         if should_skip_catalog_rebuild(
             indexed_at_secs,
             max_mtime,
-            &indexed_manifest_fingerprint,
-            &current_manifest_fingerprint,
+            &indexed_fingerprint,
+            &current_fingerprint,
         ) {
             if json {
                 print_json(&serde_json::json!({
@@ -168,11 +178,11 @@ pub fn cmd_index(
 pub fn should_skip_catalog_rebuild(
     indexed_at_secs: f64,
     max_mtime: Option<f64>,
-    indexed_manifest_fingerprint: &str,
-    current_manifest_fingerprint: &str,
+    indexed_fingerprint: &str,
+    current_fingerprint: &str,
 ) -> bool {
     max_mtime.is_some_and(|mtime| mtime.floor() < indexed_at_secs)
-        && indexed_manifest_fingerprint == current_manifest_fingerprint
+        && indexed_fingerprint == current_fingerprint
 }
 
 /// Open the existing catalog database and return the `build_timestamp` as UNIX
@@ -182,7 +192,7 @@ fn read_indexed_at(db_path: &Path) -> Option<(f64, String)> {
     use scat_core::core::db::{SCHEMA_VERSION, open_readonly};
 
     let conn = open_readonly(db_path).ok()?;
-    let (ts, schema_ver, manifest_fingerprint): (Option<String>, i64, String) = conn
+    let (ts, schema_ver, fingerprint): (Option<String>, i64, String) = conn
         .query_row(
             "SELECT build_timestamp, schema_version, manifest_fingerprint
              FROM index_metadata WHERE id = 1",
@@ -199,5 +209,5 @@ fn read_indexed_at(db_path: &Path) -> Option<(f64, String)> {
     let ts = ts?;
     chrono::DateTime::parse_from_rfc3339(&ts)
         .ok()
-        .map(|dt| (dt.timestamp() as f64, manifest_fingerprint))
+        .map(|dt| (dt.timestamp() as f64, fingerprint))
 }
