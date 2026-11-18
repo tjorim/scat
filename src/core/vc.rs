@@ -1449,9 +1449,11 @@ mod tests {
             .unwrap()
             .with_ymd_and_hms(2024, 10, 27, 2, 30, 0)
             .unwrap();
-        // Clocks went back: the first occurrence (the earlier instant) wins.
+        // Clocks went back: the first occurrence (the earlier instant, which
+        // chrono lists first) wins.
+        assert!(b < a);
         assert_eq!(
-            resolve_local(LocalResult::Ambiguous(a, b)),
+            resolve_local(LocalResult::Ambiguous(b, a)),
             Some(b.with_timezone(&chrono::Utc))
         );
         // Clocks went forward: the time never existed.

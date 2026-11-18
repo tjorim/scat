@@ -1011,7 +1011,10 @@ fn timestamp_drift_compares_in_the_clock_the_filenames_use() {
     // checkout, but read as UTC (13:00Z) it looks like drift.
     let minus5 = TimestampZone::parse("-05:00").unwrap();
     let mtime_15_00_utc = MTIME_11_00_30_UTC + 4.0 * 3600.0 - 30.0;
-    assert_eq!(drift_warnings(mtime_15_00_utc, "20240921_130000", minus5), 0);
+    assert_eq!(
+        drift_warnings(mtime_15_00_utc, "20240921_130000", minus5),
+        0
+    );
     assert_eq!(
         drift_warnings(mtime_15_00_utc, "20240921_130000", TimestampZone::Utc),
         1
