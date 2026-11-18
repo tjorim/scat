@@ -6,6 +6,15 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Configuration mistakes are no longer ignored silently. A `--config` / `SCAT_CONFIG`
+  path that does not exist is an error (it used to run with defaults, losing `db_path`,
+  bookmarks and scan roots when a share was unmounted); unknown keys, at any level,
+  are rejected with the file and key named; a config file with an unusual extension is
+  read as JSON if it starts with `{` and as YAML otherwise; relative paths in the file
+  resolve against the config file's directory instead of the working directory;
+  `SCAT_SCAN_ROOTS` is `PATH`-style (`:`-separated, with the old `,` form still accepted
+  when there is no `:`). `completions` and `man` no longer read the config at all.
+  Fixes #184.
 - `catalog audit` no longer reports every standard-library and third-party import
   (`import os`, `import requests`) as a `broken-deps` error, which made any catalog
   with an import fail the audit with exit code 2. Unresolved Python imports are

@@ -6,9 +6,18 @@
 #   scat --config /path/to/scat.yaml ...
 #   export SCAT_CONFIG=/path/to/scat.yaml
 #
-# JSON is also accepted; the format is picked from the file extension
-# (.yml/.yaml -> YAML, anything else -> JSON). All fields are optional —
-# omit anything you don't need.
+# JSON is also accepted: `.json` files are read as JSON, `.yml`/`.yaml` as YAML,
+# and any other name is read as JSON when it starts with `{`, else as YAML.
+# All fields are optional — omit anything you don't need.
+#
+# Mistakes are errors, not silently ignored: a --config/SCAT_CONFIG path that
+# does not exist, and any key not listed in this file (a typo such as
+# `scan_rootz`), stop scat with a message naming the file and key.
+#
+# Relative paths in this file (db_path, cache_dir, embeddings_path, scan_roots,
+# vc.manifest_path, and vc.executable when it contains a `/`) are taken relative
+# to the directory of the config file, not the working directory, so the file
+# behaves the same under cron as in a shell.
 
 # Path to the catalog SQLite database, as published on the shared drive.
 # Overridden by --db / SCAT_DB.
@@ -28,7 +37,9 @@ db_path: /catalog/scat/scripts.sqlite
 # embeddings_path: /catalog/scat/embeddings.sqlite
 
 # Root directories scanned recursively by `scat catalog build` when
-# --scan-root is not passed on the command line. Each root's *parent*
+# --scan-root is not passed on the command line. SCAT_SCAN_ROOTS overrides this
+# list: PATH-style, roots separated by `:` (a value with no `:` is split on `,`,
+# as earlier versions required). Each root's *parent*
 # directory name becomes the vc "os_flavor" for any DEVELOP/ARCHIVE
 # checkouts found under it (e.g. "linux" from /catalog/linux/scripts) —
 # so the OS-specific directory must be the parent, not a child, of the

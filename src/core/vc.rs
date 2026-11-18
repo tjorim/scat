@@ -51,6 +51,7 @@ fn default_archive_dirs() -> Vec<String> {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct VcConfigSection {
     executable: Option<String>,
     /// Directory names treated as DEVELOP-type checkout containers (default: `["DEVELOP"]`).
@@ -80,12 +81,17 @@ impl Default for VcConfigSection {
 /// Optional `tui:` section: defaults for the terminal modes, below
 /// `--glyphs`/`--colors` and `SCAT_TUI_GLYPHS`/`SCAT_TUI_COLORS` in priority.
 #[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct TuiConfigSection {
     glyphs: Option<String>,
     colors: Option<String>,
 }
 
+// Unknown keys are rejected (here and in the sections above): a typo such as
+// `scan_rootz` would otherwise be dropped silently, and for the nightly build
+// that quietly changes what gets indexed.
 #[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct VcConfigFile {
     db_path: Option<String>,
     cache_dir: Option<String>,
@@ -322,36 +328,98 @@ fn revision_type_rank(revision_type: &str) -> u8 {
 // Config loading
 // ---------------------------------------------------------------------------
 
-/// Load vc configuration from optional file and environment overrides.
-pub fn load_vc_config(config_file: Option<&Path>) -> Result<VcConfig> {
-    let file_data = if let Some(path) = config_file
-        && path.exists()
-    {
-        let text = std::fs::read_to_string(path)?;
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        if matches!(ext.to_lowercase().as_str(), "yml" | "yaml") {
-            yaml_serde::from_str(&text)?
-        } else {
-            serde_json::from_str(&text).map_err(crate::error::Error::Json)?
-        }
-    } else {
-        VcConfigFile::default()
+/// Parse the text of a config file. The format follows the extension
+/// (`.json` → JSON, `.yml`/`.yaml` → YAML); for any other name it is sniffed
+/// from the content, since JSON documents start with `{`.
+fn parse_config_text(path: &Path, text: &str) -> Result<VcConfigFile> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let is_json = match ext.as_str() {
+        "json" => true,
+        "yml" | "yaml" => false,
+        _ => text.trim_start().starts_with('{'),
     };
+    let parsed = if is_json {
+        serde_json::from_str(text).map_err(|e| e.to_string())
+    } else {
+        yaml_serde::from_str(text).map_err(|e| e.to_string())
+    };
+    parsed.map_err(|e| {
+        crate::error::Error::Validation(format!("invalid config file {}: {e}", path.display()))
+    })
+}
 
-    let db_path = file_data.db_path.map(PathBuf::from);
-    let cache_dir = file_data.cache_dir.map(PathBuf::from);
-    let embeddings_path = file_data.embeddings_path.map(PathBuf::from);
+/// Resolve a path from the config file against the directory the file lives
+/// in, so the same config behaves identically from any working directory
+/// (cron, a service, an interactive shell). Absolute paths are untouched.
+fn resolve_config_path(base: &Path, value: String) -> PathBuf {
+    let path = PathBuf::from(value);
+    if path.is_absolute() || base.as_os_str().is_empty() {
+        path
+    } else {
+        base.join(path)
+    }
+}
+
+/// Split a `SCAT_SCAN_ROOTS` value into roots.
+///
+/// The format is `PATH`-style: roots are separated by `:`. A value without
+/// any `:` is split on `,` instead, which is what earlier versions required;
+/// a single root whose name contains a comma can therefore be written with a
+/// trailing `:`.
+fn split_scan_roots_env(value: &str) -> Vec<PathBuf> {
+    let separator = if value.contains(':') { ':' } else { ',' };
+    value
+        .split(separator)
+        .map(|p| PathBuf::from(p.trim()))
+        .filter(|p| !p.as_os_str().is_empty())
+        .collect()
+}
+
+/// Load vc configuration from optional file and environment overrides.
+///
+/// A config path that was given explicitly (`--config`, `SCAT_CONFIG`) must
+/// exist: running on with defaults would silently lose `db_path`, bookmarks
+/// and scan roots when, say, a network share is not mounted. Unknown keys are
+/// errors too. Relative paths in the file are taken relative to the file's
+/// own directory.
+pub fn load_vc_config(config_file: Option<&Path>) -> Result<VcConfig> {
+    let (file_data, base) = if let Some(path) = config_file {
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(crate::error::Error::Validation(format!(
+                    "config file not found: {}",
+                    path.display()
+                )));
+            }
+            Err(e) => {
+                return Err(crate::error::Error::Validation(format!(
+                    "cannot read config file {}: {e}",
+                    path.display()
+                )));
+            }
+        };
+        let base = path.parent().unwrap_or(Path::new("")).to_path_buf();
+        (parse_config_text(path, &text)?, base)
+    } else {
+        (VcConfigFile::default(), PathBuf::new())
+    };
+    let rel = |value: String| resolve_config_path(&base, value);
+
+    let db_path = file_data.db_path.map(rel);
+    let cache_dir = file_data.cache_dir.map(rel);
+    let embeddings_path = file_data.embeddings_path.map(rel);
     let scan_roots = match std::env::var("SCAT_SCAN_ROOTS").ok() {
-        Some(s) => s
-            .split(',')
-            .map(|p| PathBuf::from(p.trim()))
-            .filter(|p| !p.as_os_str().is_empty())
-            .collect(),
+        Some(s) => split_scan_roots_env(&s),
         None => file_data
             .scan_roots
             .unwrap_or_default()
             .into_iter()
-            .map(PathBuf::from)
+            .map(rel)
             .collect(),
     };
     let ignore_patterns = file_data.ignore_patterns.unwrap_or_default();
@@ -364,10 +432,17 @@ pub fn load_vc_config(config_file: Option<&Path>) -> Result<VcConfig> {
         embeddings_path,
         scan_roots,
         ignore_patterns,
-        vc_executable: vc.executable.map(PathBuf::from),
+        // A bare program name (`vc`) is a PATH lookup, not a relative path.
+        vc_executable: vc.executable.map(|exe| {
+            if exe.contains('/') {
+                rel(exe)
+            } else {
+                PathBuf::from(exe)
+            }
+        }),
         develop_dirs: vc.develop_dirs,
         archive_dirs: vc.archive_dirs,
-        manifest_path: vc.manifest_path.map(PathBuf::from),
+        manifest_path: vc.manifest_path.map(rel),
         bookmarks: file_data.bookmarks.unwrap_or_default(),
         tui_glyphs: tui.glyphs,
         tui_colors: tui.colors,
@@ -992,6 +1067,94 @@ fn normalize_scripttype(value: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -----------------------------------------------------------------------
+    // Config loading
+    // -----------------------------------------------------------------------
+
+    fn write_config(dir: &Path, name: &str, body: &str) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    #[test]
+    fn explicit_missing_config_is_an_error_but_no_config_is_fine() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = load_vc_config(Some(&dir.path().join("nope.yaml")))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("config file not found"), "{err}");
+        assert!(err.contains("nope.yaml"), "{err}");
+        assert!(load_vc_config(None).is_ok());
+    }
+
+    #[test]
+    fn unknown_keys_are_rejected_at_every_level() {
+        let dir = tempfile::tempdir().unwrap();
+        for (body, key) in [
+            ("scan_rootz: [/a]\n", "scan_rootz"),
+            ("vc:\n  develop_dir: [X]\n", "develop_dir"),
+            ("tui:\n  glyph: ascii\n", "glyph"),
+        ] {
+            let path = write_config(dir.path(), "c.yaml", body);
+            let err = load_vc_config(Some(&path)).unwrap_err().to_string();
+            assert!(err.contains(key), "{err}");
+            assert!(err.contains("c.yaml"), "{err}");
+        }
+    }
+
+    #[test]
+    fn format_follows_extension_and_falls_back_to_the_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let yaml = "db_path: /x/c.sqlite\n";
+        let json = "{\"db_path\": \"/x/c.sqlite\"}";
+        for (name, body) in [
+            ("a.yaml", yaml),
+            ("a.yml", yaml),
+            ("a.json", json),
+            ("scat.conf", yaml),
+            ("scat.conf", json),
+            ("scat", yaml),
+        ] {
+            let path = write_config(dir.path(), name, body);
+            let cfg = load_vc_config(Some(&path)).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(cfg.db_path, Some(PathBuf::from("/x/c.sqlite")), "{name}");
+        }
+    }
+
+    #[test]
+    fn relative_paths_resolve_against_the_config_files_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config(
+            dir.path(),
+            "c.yaml",
+            "db_path: cat/c.sqlite\ncache_dir: /abs/cache\nscan_roots: [scripts, /abs/root]\n\
+             vc:\n  executable: vc\n  manifest_path: m.lst\n",
+        );
+        let cfg = load_vc_config(Some(&path)).unwrap();
+        assert_eq!(cfg.db_path, Some(dir.path().join("cat/c.sqlite")));
+        assert_eq!(cfg.cache_dir, Some(PathBuf::from("/abs/cache")));
+        assert_eq!(
+            cfg.scan_roots,
+            [dir.path().join("scripts"), PathBuf::from("/abs/root")]
+        );
+        assert_eq!(cfg.vc_executable, Some(PathBuf::from("vc")));
+        assert_eq!(cfg.manifest_path, Some(dir.path().join("m.lst")));
+    }
+
+    #[test]
+    fn scan_roots_env_is_path_style_with_a_comma_fallback() {
+        let roots = |s: &str| split_scan_roots_env(s);
+        assert_eq!(roots("/a:/b"), [PathBuf::from("/a"), PathBuf::from("/b")]);
+        assert_eq!(roots("/a/x,y:"), [PathBuf::from("/a/x,y")]);
+        assert_eq!(roots("/a,/b"), [PathBuf::from("/a"), PathBuf::from("/b")]);
+        assert_eq!(
+            roots(" /a : ::/b "),
+            [PathBuf::from("/a"), PathBuf::from("/b")]
+        );
+        assert!(roots("").is_empty());
+    }
 
     #[test]
     fn load_vc_manifest_parses_one_path_per_line() {

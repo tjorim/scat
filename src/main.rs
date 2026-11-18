@@ -111,10 +111,6 @@ fn run(cli: Cli) -> Result<()> {
         );
     }
 
-    // Load config early; provides db_path fallback and index settings.
-    let scat_config =
-        load_vc_config(cli.config.as_deref()).with_context(|| "Failed to load config")?;
-
     // --old/--new diff needs no catalog at all.
     if let Commands::Diff {
         path: None,
@@ -130,12 +126,8 @@ fn run(cli: Cli) -> Result<()> {
         return cmd_script_diff_explicit(old_path, new_path, json);
     }
 
-    // vc pass-through needs no catalog either.
-    if let Commands::Vc { ref args, json } = cli.command {
-        return cmd_vc(args, json, scat_config.vc_executable);
-    }
-
-    // Shell completions need no catalog.
+    // Shell completions and man pages need neither catalog nor config, so a
+    // broken `SCAT_CONFIG` must not block them.
     if let Commands::Completions { shell } = cli.command {
         use clap::CommandFactory;
         let mut command = Cli::command();
@@ -145,6 +137,15 @@ fn run(cli: Cli) -> Result<()> {
 
     if let Commands::Man { dir } = &cli.command {
         return runtime::cmd_man(dir.as_deref());
+    }
+
+    // Load config early; provides db_path fallback and index settings.
+    let scat_config =
+        load_vc_config(cli.config.as_deref()).with_context(|| "Failed to load config")?;
+
+    // vc pass-through needs no catalog either.
+    if let Commands::Vc { ref args, json } = cli.command {
+        return cmd_vc(args, json, scat_config.vc_executable);
     }
 
     // Resolve database path: CLI flag / env var takes precedence over config file.
