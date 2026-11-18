@@ -617,7 +617,7 @@ fn extract_for_insert<'a>(
     record: &'a ScriptRecord,
     ts: &mut TreeSitterExtractor,
 ) -> Result<ExtractedRow<'a>> {
-    let meta = extract(record);
+    let meta = extract(record)?;
     let ast_result = if record.language == "python" {
         let module_name = super::resolve::module_name_from_logical_path(&record.logical_path);
         Some(ts.extract_python_ast(&meta.content, Some(&module_name)))

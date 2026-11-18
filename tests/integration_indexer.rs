@@ -1833,3 +1833,111 @@ fn build_with_only_cli_scan_roots_records_checkout_revisions() {
     assert_eq!(user, "jdoe");
     assert_eq!(revision_type, "DEVELOP");
 }
+
+// ---------------------------------------------------------------------------
+// Unreadable files
+// ---------------------------------------------------------------------------
+
+/// `chmod 000` doesn't stop root from reading, so such environments can't
+/// exercise these paths.
+fn make_unreadable(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    std::fs::read(path).is_err()
+}
+
+fn make_readable(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).unwrap();
+}
+
+fn build_quiet(
+    root: &std::path::Path,
+    db_path: &std::path::Path,
+) -> scat_core::indexer::builder::IndexResult {
+    build_index(
+        std::slice::from_ref(&root.to_path_buf()),
+        db_path,
+        BuildOptions {
+            head_lines: 10,
+            keep_copies: 0,
+            quiet: true,
+            vc_config: Some(VcConfig::default()),
+            ..Default::default()
+        },
+    )
+    .unwrap()
+}
+
+fn content_of(conn: &Connection, name: &str) -> Option<String> {
+    conn.query_row(
+        "SELECT content FROM scripts WHERE logical_path LIKE ?1",
+        [format!("%{name}")],
+        |r| r.get(0),
+    )
+    .ok()
+}
+
+#[test]
+fn unreadable_file_is_reported_and_picked_up_once_readable() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path().join("root");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("a.sh"), "#!/bin/bash\n# @purpose secretword\n").unwrap();
+    std::fs::write(root.join("b.sh"), "#!/bin/bash\necho b\n").unwrap();
+    if !make_unreadable(&root.join("a.sh")) {
+        return;
+    }
+    let db_path = dir.path().join("catalog.sqlite");
+
+    let first = build_quiet(&root, &db_path);
+    assert_eq!(
+        first.errors.len(),
+        1,
+        "the unreadable file must be reported"
+    );
+    assert!(first.errors[0].0.ends_with("a.sh"));
+    assert_eq!(first.scripts_indexed, 1);
+    assert!(content_of(&open_ro(&db_path), "a.sh").is_none());
+
+    // Once readable it must be indexed, not reused as an empty "unchanged" row.
+    make_readable(&root.join("a.sh"));
+    let second = build_quiet(&root, &db_path);
+    assert!(second.errors.is_empty());
+    assert_eq!(second.scripts_indexed, 2);
+    let content = content_of(&open_ro(&db_path), "a.sh").unwrap();
+    assert!(content.contains("secretword"));
+}
+
+#[test]
+fn changed_file_that_becomes_unreadable_keeps_its_previous_row_and_retries() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path().join("root");
+    std::fs::create_dir(&root).unwrap();
+    let a = root.join("a.sh");
+    std::fs::write(&a, "#!/bin/bash\necho old\n").unwrap();
+    let db_path = dir.path().join("catalog.sqlite");
+    build_quiet(&root, &db_path);
+
+    std::fs::write(&a, "#!/bin/bash\necho a much newer and longer body\n").unwrap();
+    if !make_unreadable(&a) {
+        return;
+    }
+    let second = build_quiet(&root, &db_path);
+    assert_eq!(second.errors.len(), 1);
+    assert!(
+        content_of(&open_ro(&db_path), "a.sh")
+            .unwrap()
+            .contains("echo old"),
+        "the previous build's row stays until the file can be read"
+    );
+
+    make_readable(&a);
+    let third = build_quiet(&root, &db_path);
+    assert!(third.errors.is_empty());
+    assert!(
+        content_of(&open_ro(&db_path), "a.sh")
+            .unwrap()
+            .contains("much newer")
+    );
+}

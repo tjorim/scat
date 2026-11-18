@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use regex::Regex;
-use tracing::{trace, warn};
+use tracing::trace;
 
 use crate::indexer::scanner::ScriptRecord;
 
@@ -143,9 +143,16 @@ pub struct ExtractedMetadata {
 // ---------------------------------------------------------------------------
 
 /// Extract structured metadata from a scanned script record.
-pub fn extract(record: &ScriptRecord) -> ExtractedMetadata {
+///
+/// # Errors
+///
+/// Fails when the file cannot be read (permission denied, NFS error, removed
+/// after the scan). Callers must not persist a row for it: an empty row
+/// carrying the scan-time size and mtime would be reused as "unchanged" by
+/// later incremental builds, even once the file is readable again.
+pub fn extract(record: &ScriptRecord) -> std::io::Result<ExtractedMetadata> {
     let mut meta = ExtractedMetadata::default();
-    let (content, content_hash) = read_file(Path::new(&record.physical_path));
+    let (content, content_hash) = read_file(Path::new(&record.physical_path))?;
 
     parse_header_comments(&content, &mut meta);
 
@@ -161,7 +168,7 @@ pub fn extract(record: &ScriptRecord) -> ExtractedMetadata {
         content
     };
     meta.content_hash = content_hash;
-    meta
+    Ok(meta)
 }
 
 /// The first `max_lines` lines of `content`, newline-terminated like the
@@ -182,21 +189,10 @@ fn sample_leading_lines(content: &str, max_lines: usize) -> String {
 /// Read a file's raw bytes, returning its lossy-UTF-8 text alongside a
 /// SHA-256 hex digest of the *raw* bytes (computed before the lossy
 /// conversion, so it reflects the file's actual on-disk content).
-fn read_file(path: &Path) -> (String, String) {
-    match std::fs::read(path) {
-        Ok(bytes) => {
-            let hash = hash_bytes(&bytes);
-            (String::from_utf8_lossy(&bytes).into_owned(), hash)
-        }
-        Err(err) => {
-            warn!(
-                path = %path.display(),
-                error = %err,
-                "failed to read file for metadata extraction"
-            );
-            (String::new(), hash_bytes(&[]))
-        }
-    }
+fn read_file(path: &Path) -> std::io::Result<(String, String)> {
+    let bytes = std::fs::read(path)?;
+    let hash = hash_bytes(&bytes);
+    Ok((String::from_utf8_lossy(&bytes).into_owned(), hash))
 }
 
 /// SHA-256 hex digest of `bytes`.
