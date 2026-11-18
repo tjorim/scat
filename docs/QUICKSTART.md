@@ -23,6 +23,11 @@ automatically after each nightly rebuild — nothing to set up. Use
 `--cache-dir` / `SCAT_CACHE_DIR` to put the copy elsewhere, or `--no-cache` /
 `SCAT_NO_CACHE=1` to query the shared drive directly.
 
+The copy is cleaned up automatically (entries unused for 14 days are dropped,
+and nothing is copied that would not fit in the free space of `/dev/shm`). To
+look at it or tidy it by hand: `scat cache status`, `scat cache prune`,
+`scat cache clear`; set `cache_max_bytes` in the config file to cap its size.
+
 ### Optional: config file
 
 Instead of (or in addition to) `SCAT_DB`, you can point scat at a config

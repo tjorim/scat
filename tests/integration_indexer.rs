@@ -538,6 +538,7 @@ fn a_built_catalog_round_trips_through_the_host_local_cache() {
     let options = CacheOptions {
         enabled: true,
         root: Some(cache_root.path().to_path_buf()),
+        ..CacheOptions::default()
     };
 
     let build = |db_path: &std::path::Path| {

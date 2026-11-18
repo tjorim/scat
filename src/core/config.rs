@@ -30,6 +30,8 @@ pub struct CatalogConfig {
     /// Falls back to [`crate::core::embeddings::sidecar_path`] (next to
     /// `db_path`) when unset.
     pub embeddings_path: Option<PathBuf>,
+    /// Upper bound on the bytes the host-local cache may hold (`cache_max_bytes`).
+    pub cache_max_bytes: Option<u64>,
 }
 
 /// What `scat catalog build` scans.
@@ -104,6 +106,43 @@ struct TuiSection {
     colors: Option<String>,
 }
 
+/// A size in the config file: a number of bytes, or text such as `512M`, `2G`
+/// (powers of 1024; a trailing `B`/`iB` is allowed).
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum ByteSize {
+    Bytes(u64),
+    Text(String),
+}
+
+impl ByteSize {
+    fn bytes(&self) -> std::result::Result<u64, String> {
+        match self {
+            Self::Bytes(n) => Ok(*n),
+            Self::Text(text) => parse_byte_size(text),
+        }
+    }
+}
+
+fn parse_byte_size(text: &str) -> std::result::Result<u64, String> {
+    let bad = || format!("invalid size {text:?}: expected bytes or a number with K, M, G or T");
+    let lower = text.trim().to_ascii_lowercase();
+    let lower = lower
+        .strip_suffix("ib")
+        .or_else(|| lower.strip_suffix('b'))
+        .unwrap_or(&lower)
+        .trim_end();
+    let (digits, multiplier) = match lower.chars().last() {
+        Some('k') => (&lower[..lower.len() - 1], 1u64 << 10),
+        Some('m') => (&lower[..lower.len() - 1], 1 << 20),
+        Some('g') => (&lower[..lower.len() - 1], 1 << 30),
+        Some('t') => (&lower[..lower.len() - 1], 1 << 40),
+        _ => (lower, 1),
+    };
+    let number: u64 = digits.trim().parse().map_err(|_| bad())?;
+    number.checked_mul(multiplier).ok_or_else(bad)
+}
+
 // Unknown keys are rejected (here and in the sections above): a typo such as
 // `scan_rootz` would otherwise be dropped silently, and for the nightly build
 // that quietly changes what gets indexed.
@@ -113,6 +152,7 @@ struct ConfigFile {
     db_path: Option<String>,
     cache_dir: Option<String>,
     embeddings_path: Option<String>,
+    cache_max_bytes: Option<ByteSize>,
     scan_roots: Option<Vec<String>>,
     ignore_patterns: Option<Vec<String>>,
     vc: Option<VcSection>,
@@ -209,6 +249,10 @@ pub fn load_config(config_file: Option<&Path>) -> Result<Config> {
     let db_path = file_data.db_path.map(rel);
     let cache_dir = file_data.cache_dir.map(rel);
     let embeddings_path = file_data.embeddings_path.map(rel);
+    let cache_max_bytes = file_data
+        .cache_max_bytes
+        .map(|size| size.bytes().map_err(crate::error::Error::Validation))
+        .transpose()?;
     let scan_roots = match std::env::var("SCAT_SCAN_ROOTS").ok() {
         Some(s) => split_scan_roots_env(&s),
         None => file_data
@@ -232,6 +276,7 @@ pub fn load_config(config_file: Option<&Path>) -> Result<Config> {
             db_path,
             cache_dir,
             embeddings_path,
+            cache_max_bytes,
         },
         index: IndexConfig {
             scan_roots,
@@ -393,5 +438,30 @@ mod tests {
             ..Config::default()
         };
         assert!(config.vc_configured());
+    }
+
+    #[test]
+    fn cache_max_bytes_accepts_numbers_and_suffixed_sizes() {
+        let dir = tempfile::tempdir().unwrap();
+        for (value, expected) in [
+            ("1048576", 1_048_576u64),
+            ("512M", 512 << 20),
+            ("\"2G\"", 2 << 30),
+            ("\"64 KiB\"", 64 << 10),
+            ("\"1tb\"", 1 << 40),
+        ] {
+            let path = write_config(dir.path(), "c.yaml", &format!("cache_max_bytes: {value}\n"));
+            let cfg = load_config(Some(&path)).unwrap();
+            assert_eq!(cfg.catalog.cache_max_bytes, Some(expected), "{value}");
+        }
+        assert_eq!(load_config(None).unwrap().catalog.cache_max_bytes, None);
+        for bad in ["lots", "\"-1M\"", "\"1.5G\"", "\"G\""] {
+            let path = write_config(dir.path(), "bad.yaml", &format!("cache_max_bytes: {bad}\n"));
+            let err = load_config(Some(&path)).unwrap_err().to_string();
+            assert!(
+                err.contains("invalid size") || err.contains("cache_max_bytes"),
+                "{bad}: {err}"
+            );
+        }
     }
 }

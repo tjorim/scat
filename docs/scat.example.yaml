@@ -30,6 +30,13 @@ db_path: /catalog/scat/scripts.sqlite
 # Pass --no-cache (or SCAT_NO_CACHE=1) to read the shared drive directly.
 # cache_dir: /dev/shm
 
+# Upper bound on the bytes the host-local cache may hold (a number, or K/M/G/T
+# suffixed: 512M, 2G). A copy that would exceed it evicts the least recently
+# used other entries first; if it still does not fit, the published catalog is
+# read in place. Unset: only the free space of cache_dir limits it. Inspect and
+# tidy the cache with `scat cache status|prune|clear`.
+# cache_max_bytes: 2G
+
 # Path to the embeddings.sqlite sidecar published by scat-embed
 # (crates/scat-embed), used by `scat similar`. Cached to the local drive the
 # same way db_path is. Defaults to embeddings.sqlite next to db_path;

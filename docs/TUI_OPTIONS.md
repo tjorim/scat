@@ -60,6 +60,7 @@ Global overrides inside editors are rejected to retain the active source paths.
 | `tui --terminal-info` | CLI-only session/mode report; opens no catalog or fullscreen UI |
 | `--no-color`, `NO_COLOR` | Disable CLI colors and force monochrome TUI rendering; captured output disables color for display |
 | `-v/--verbose/--debug`, `-vv`, `RUST_LOG` | Startup logging; child operations retain default CLI logging and environment; not editable globals |
+| `cache status\|prune\|clear` | CLI-only management of the host cache (`prune --max-age-days`, `--json`) |
 | `completions SHELL` | CLI-only stdout utility for generating shell scripts |
 | `man [--dir DIR]` | CLI-only utility that renders man pages from the command definitions (the RPM installs them) |
 | `--help/-h`, `--version/-V` | CLI-only launch information; F1 and the matrix document TUI controls |

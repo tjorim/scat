@@ -99,6 +99,34 @@ via SQLite's Online Backup API, under an `flock` so concurrent starters
 produce one copy — and normal browsing commands open that copy.
 `--no-cache` deliberately bypasses it.
 
+The cache is bounded and cleans up after itself, because on a shared login
+host it costs (users) × (catalog + sidecar) of tmpfs:
+
+- **Never starves the host.** Before copying, the free space of the cache root
+  must cover the copy plus headroom (the larger of 64 MiB and a tenth of the
+  copy), and the optional `cache_max_bytes` limit must hold after evicting the
+  least recently used other entries. Otherwise nothing is copied and the
+  published catalog is read in place.
+- **Does not hang.** A refresh waits at most ten seconds for another scat's
+  copy of the same entry, then reads the published catalog in place.
+- **Cleans up.** Entries record their last use (renewed at most hourly, so
+  reading is not a write per command) and the published path they cache; a
+  refresh drops entries unused for 14 days and abandoned scratch files. The older
+  copy kept while the published catalog is in a schema this scat cannot read is
+  not served, stays available for a publisher rollback (see COMPATIBILITY.md) and
+  ages out like any other unused entry.
+- **Is visible.** `scat cache status|prune|clear` list, prune (also entries
+  whose published catalog is gone) and empty it; `scat doctor` reports the
+  entry count and total size. A copy of 32 MiB or more announces itself on an
+  interactive stderr, since it runs before any output.
+
+For a fleet of login hosts that would otherwise each hold a copy per user, a
+shared, read-only location populated once by a privileged job (for example a
+tmpfs or a read-only bind mount that every client points `--cache-dir` at) is a
+supported deployment: the per-user directory and ownership checks apply to
+the directory scat itself creates, so a pre-populated location has to be
+laid out by that job. It is not automated by scat.
+
 Rationale:
 - SQLite's own documentation flags network filesystems as a known source of
   locking bugs; this takes the share out of the query hot path entirely.
