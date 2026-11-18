@@ -25,8 +25,10 @@ pub struct Cli {
 
     /// Read the catalog directly instead of through the host-local cache.
     ///
-    /// `SCAT_NO_CACHE` is resolved by [`resolve_no_cache`] rather than clap's
-    /// `env`, which on a `bool` would reject everything but `true`/`false`.
+    /// Setting the `SCAT_NO_CACHE` environment variable to anything except
+    /// empty, `0`, `false`, `no` or `off` has the same effect.
+    // `SCAT_NO_CACHE` is resolved by `resolve_no_cache` rather than clap's
+    // `env`, which on a `bool` would reject everything but `true`/`false`.
     #[arg(long, global = true)]
     pub(crate) no_cache: bool,
 

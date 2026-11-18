@@ -371,6 +371,15 @@ scat search "deploy" | grep -F ".sh"
 | `catalog schema is version N, expected M` | Run `scat catalog info`; the message says whether to upgrade this client or have the publisher upgrade and rebuild — see [COMPATIBILITY.md](COMPATIBILITY.md) |
 | `note: embeddings sidecar … was built from catalog build …` | The sidecar was built from a different catalog build; rerun `scat-embed` against the current catalog and republish it |
 
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | Success |
+| `1` | The command failed; the reason is on stderr as `error: …` (always shown, regardless of `RUST_LOG`). Also: `scat vc` when no `vc` executable is found, and `scat catalog audit --strict` when it found warnings but no errors |
+| `2` | Usage error (bad arguments), or `scat catalog audit` found errors |
+| other | `scat vc` passes through the exit status of `vc`; a `vc` killed by a signal reports `128 + signal` |
+
 ---
 
 Use `scat doctor` without a working catalog for read-only host diagnostics.

@@ -130,6 +130,7 @@ pub fn cmd_index(
             "scripts_indexed": result.scripts_indexed,
             "scripts_reused": result.scripts_reused,
             "dependencies_indexed": result.dependencies_indexed,
+            "dependencies_total": result.dependencies_total,
             "db_path": result.db_path.display().to_string(),
             "dry_run": result.dry_run,
             "errors": result.errors.iter().map(|(p, e)| serde_json::json!({"path": p, "error": e})).collect::<Vec<_>>(),
@@ -145,7 +146,7 @@ pub fn cmd_index(
             "Indexed {} scripts in total{} ({} dependencies) → {}{}",
             result.scripts_indexed,
             reused_suffix,
-            result.dependencies_indexed,
+            result.dependencies_total,
             result.db_path.display(),
             if dry_run {
                 " (dry run, nothing written)"

@@ -7,6 +7,15 @@ use scat_core::error::Error;
 
 use crate::output::print_json;
 
+/// A metadata value for display: strings unquoted, `null` as a dash.
+fn display_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Null => "—".to_string(),
+        other => other.to_string(),
+    }
+}
+
 /// Report catalog metadata and whether this scat can read the catalog.
 ///
 /// Unlike every other catalog command this does not require a compatible
@@ -20,8 +29,14 @@ pub fn cmd_info(published_path: &Path, read_path: &Path, json: bool) -> Result<(
     if json {
         print_json(&meta);
     } else {
-        println!("Last indexed       : {}", meta.build_timestamp);
-        println!("Schema version (DB): {}", meta.schema_version);
+        println!(
+            "Last indexed       : {}",
+            display_value(&meta.build_timestamp)
+        );
+        println!(
+            "Schema version (DB): {}",
+            display_value(&meta.schema_version)
+        );
         println!("Schema version (app): {}", meta.current_schema_version);
         println!("Catalog            : {}", published_path.display());
         // Only worth a line when the two differ: it tells the user this query

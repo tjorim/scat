@@ -6,6 +6,16 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- CLI error reporting and output polish (#182). Failures print `error: <message>: <cause>`
+  to stderr directly instead of through the logger, so `RUST_LOG=off` no longer turns
+  them into a silent exit 1. `scat vc` exits 1 when no `vc` is installed (text and `--json`
+  agree) and reports `128 + signal` for a `vc` killed by a signal. `scat catalog info`
+  prints the timestamp unquoted. `scat --help` no longer shows an internal note under
+  `--no-cache`. The build summary reports the catalog's total dependency count (JSON adds
+  `dependencies_total`; `dependencies_indexed` stays the newly extracted count) instead of
+  `(0 dependencies)` after an incremental run. vc warnings logged during a build are one
+  `info` line per kind; the individual warnings moved to `debug`. Exit codes are
+  documented in the quickstart.
 - `scat catalog build` no longer reports "catalog is up to date" while the catalog is
   stale. The check now notices deleted scripts, files moved in with an old mtime
   (directory mtimes count), added or removed DEVELOP/ARCHIVE checkouts, and changes to
