@@ -13,6 +13,10 @@ All notable changes to this project will be documented in this file.
   (and their vc warnings) for the roots it scanned; before, the checkout scan only
   looked at `scan_roots` from the config file, so command-line roots recorded
   none. Fixes #178.
+- A script that cannot be read during indexing (permission denied, NFS error, removed
+  after the scan) is now reported in the build's `errors` instead of being stored as an
+  empty row. No row is written for it, so a later build picks it up as soon as it is
+  readable again; an existing row from the previous build is kept until then. Fixes #179.
 - The TUI now restores the terminal (raw mode, alternate screen, mouse capture,
   bracketed paste, cursor) when it is terminated by a panic, `SIGTERM` or `SIGHUP`
   (for example a closed SSH session). Panics restore it before the message is
