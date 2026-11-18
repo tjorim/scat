@@ -1,3 +1,19 @@
+# Advisory gate (RustSec). Run by CI as `cargo deny check advisories`.
+#
+# Security vulnerabilities and yanked releases always fail. Unmaintained
+# crates fail too, so a newly unmaintained dependency is noticed rather than
+# scrolling past as a warning; the ones already accepted are listed below with
+# the reason, and each entry is the place to record when it can go.
+[advisories]
+version = 2
+yanked = "deny"
+unmaintained = "all"
+unsound = "all"
+ignore = [
+  { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained with no fixed release; it is used throughout (indexing, vc timestamps, TUI). Replace with jiff/time in a dedicated change." },
+  { id = "RUSTSEC-2024-0436", reason = "paste is unmaintained and is only a transitive dependency of ratatui; it is a proc macro with no runtime footprint. Goes away with a ratatui release that drops it." },
+]
+
 [licenses]
 version = 2
 confidence-threshold = 0.8
