@@ -10,7 +10,7 @@ use tracing::{debug, warn};
 
 use crate::core::db::SCHEMA_VERSION;
 use crate::core::vc::{
-    ProcessedScript, VcConfig, infer_manifest_warnings, infer_warnings, load_vc_manifest,
+    ProcessedScript, VcConfig, infer_manifest_warnings, infer_warnings_in, load_vc_manifest,
     scan_checkouts,
 };
 use crate::error::{Error, Result};
@@ -390,7 +390,7 @@ pub(super) fn populate(
 
     set_finalize_msg("Inferring warnings…");
     debug!(phase = "infer_warnings", "starting infer_warnings phase");
-    let mut warnings = infer_warnings(&tx)?;
+    let mut warnings = infer_warnings_in(&tx, vc_config.timestamp_zone)?;
     if let Some(manifest_path) = &vc_config.manifest_path {
         let manifest = load_vc_manifest(manifest_path);
         let manifest_warnings = infer_manifest_warnings(&tx, &manifest)?;

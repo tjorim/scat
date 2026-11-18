@@ -10,8 +10,8 @@
 /// kinds from indexed revision rows.
 use scat_core::core::db::create_db;
 use scat_core::core::vc::{
-    REVISION_TYPE_ARCHIVE, REVISION_TYPE_DEVELOP, REVISION_TYPE_ROLLBACK, VcConfig, infer_warnings,
-    parse_checkout_filename, scan_checkouts,
+    REVISION_TYPE_ARCHIVE, REVISION_TYPE_DEVELOP, REVISION_TYPE_ROLLBACK, TimestampZone, VcConfig,
+    infer_warnings, infer_warnings_in, parse_checkout_filename, scan_checkouts,
 };
 use tempfile::NamedTempFile;
 
@@ -967,4 +967,69 @@ fn infer_manifest_warnings_empty_manifest_produces_no_warnings() {
         warnings.is_empty(),
         "an unconfigured/unreadable manifest must produce no warnings, not false positives"
     );
+}
+
+// ---------------------------------------------------------------------------
+// infer_warnings – timestamp_drift across time zones
+// ---------------------------------------------------------------------------
+
+/// 2024-09-21T11:00:30Z.
+const MTIME_11_00_30_UTC: f64 = 1_726_916_430.0;
+
+fn drift_warnings(mtime: f64, checkout_timestamp: &str, zone: TimestampZone) -> usize {
+    let (conn, _db) = make_warning_db();
+    insert_script(&conn, "/catalog/scripts/tool.py", mtime, None);
+    insert_revision(
+        &conn,
+        "/catalog/scripts/tool.py",
+        REVISION_TYPE_DEVELOP,
+        "/catalog/linux/scripts/DEVELOP/tool.py_x",
+        checkout_timestamp,
+    );
+    infer_warnings_in(&conn, zone)
+        .unwrap()
+        .iter()
+        .filter(|w| w.kind == "timestamp_drift")
+        .count()
+}
+
+#[test]
+fn timestamp_drift_compares_in_the_clock_the_filenames_use() {
+    let plus2 = TimestampZone::parse("+02:00").unwrap();
+    // The checkout name says 13:00:00. Read as UTC it is two hours *after* the
+    // 11:00:30Z edit: no drift. Read as +02:00 it is 11:00:00Z, *before* it: drift.
+    assert_eq!(
+        drift_warnings(MTIME_11_00_30_UTC, "20240921_130000", TimestampZone::Utc),
+        0
+    );
+    assert_eq!(
+        drift_warnings(MTIME_11_00_30_UTC, "20240921_130000", plus2),
+        1
+    );
+    // West of UTC the mistake is the opposite one, a false positive: the name
+    // says 13:00 at -05:00 (= 18:00Z), so an edit at 15:00Z predates the
+    // checkout, but read as UTC (13:00Z) it looks like drift.
+    let minus5 = TimestampZone::parse("-05:00").unwrap();
+    let mtime_15_00_utc = MTIME_11_00_30_UTC + 4.0 * 3600.0 - 30.0;
+    assert_eq!(
+        drift_warnings(mtime_15_00_utc, "20240921_130000", minus5),
+        0
+    );
+    assert_eq!(
+        drift_warnings(mtime_15_00_utc, "20240921_130000", TimestampZone::Utc),
+        1
+    );
+}
+
+#[test]
+fn timestamp_drift_handles_pre_epoch_mtimes() {
+    // A negative mtime used to lose its fractional part (and could wrap); it
+    // is simply "older than every checkout".
+    for mtime in [-1.5, -86_400.25, 0.0] {
+        assert_eq!(
+            drift_warnings(mtime, "20240921_130000", TimestampZone::Utc),
+            0,
+            "{mtime}"
+        );
+    }
 }

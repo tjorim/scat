@@ -72,6 +72,11 @@ vc:
   # Directory names treated as ARCHIVE-type checkout containers.
   archive_dirs:
     - ARCHIVE
+  # Clock of the YYYYMMDD_HHMMSS timestamps in checkout filenames, used by the
+  # `timestamp_drift` warning: utc (default), local (the host that runs
+  # `scat catalog build`), or a fixed offset such as +02:00. See
+  # docs/VC_CONTRACT.md.
+  # timestamp_timezone: utc
   # Optional: path to vc's own manifest of every file path it manages (one
   # absolute path per line; name and location are environment-specific).
   # When set, the catalog build cross-references it against what was

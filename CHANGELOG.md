@@ -6,6 +6,11 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- `timestamp_drift` no longer assumes the timestamp in a checkout filename is UTC.
+  The clock is now configurable with `vc.timestamp_timezone` (`utc`, the default,
+  `local`, or a fixed offset like `+02:00`) and documented in `docs/VC_CONTRACT.md`;
+  the default is unchanged until vc's clock is confirmed. Pre-epoch mtimes no longer
+  lose their fractional part, and a stale `#[allow(deprecated)]` is gone. Fixes #186.
 - CLI error reporting and output polish (#182). Failures print `error: <message>: <cause>`
   to stderr directly instead of through the logger, so `RUST_LOG=off` no longer turns
   them into a silent exit 1. `scat vc` exits 1 when no `vc` is installed (text and `--json`

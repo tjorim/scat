@@ -101,6 +101,15 @@ Where:
   occasionally date-only `YYYYMMDD`
 - `<USER>` is the username performing the checkout
 
+The `<TIMESTAMP>` carries no zone. scat compares it with a script's file
+mtime (the `timestamp_drift` warning), so it needs to know which clock vc
+writes. The default is UTC; set `vc.timestamp_timezone` in the scat config to
+`local` (the wall clock of the host running `scat catalog build`) or to a fixed
+offset such as `+02:00` when vc writes local time. Until it is set correctly,
+`timestamp_drift` is wrong by the offset: false positives west of UTC, missed
+drift east of it. (A wall-clock time repeated by a DST change is read as its
+first occurrence; one skipped by it is not compared.)
+
 ### Invariants relied upon
 
 - Checked‑out files exist **only** under DEVELOP

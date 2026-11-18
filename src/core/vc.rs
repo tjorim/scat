@@ -65,6 +65,9 @@ struct VcConfigSection {
     /// when unset, no manifest cross-reference warnings are produced. See
     /// [`infer_manifest_warnings`] and docs/VC_CONTRACT.md.
     manifest_path: Option<String>,
+    /// Clock of the timestamps in checkout filenames: `utc` (default),
+    /// `local` (this host's zone) or a fixed offset such as `+02:00`.
+    timestamp_timezone: Option<String>,
 }
 
 impl Default for VcConfigSection {
@@ -74,6 +77,7 @@ impl Default for VcConfigSection {
             develop_dirs: default_develop_dirs(),
             archive_dirs: default_archive_dirs(),
             manifest_path: None,
+            timestamp_timezone: None,
         }
     }
 }
@@ -115,6 +119,81 @@ pub const DEFAULT_DEVELOP_DIRS: &[&str] = &["DEVELOP"];
 /// Default directory names used as ARCHIVE-type checkout containers.
 pub const DEFAULT_ARCHIVE_DIRS: &[&str] = &["ARCHIVE"];
 
+/// Which clock the `YYYYMMDD_HHMMSS` timestamp in a vc checkout filename is
+/// written in. vc's contract does not say, so it is configurable
+/// (`vc.timestamp_timezone`); the default is UTC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TimestampZone {
+    /// UTC wall-clock time (the default).
+    #[default]
+    Utc,
+    /// The wall-clock time of the host that builds the catalog.
+    Local,
+    /// A fixed offset from UTC, for hosts whose zone differs from where the
+    /// checkouts are made.
+    Fixed(chrono::FixedOffset),
+}
+
+impl TimestampZone {
+    /// Parse a `vc.timestamp_timezone` value: `utc`, `local`, or an offset
+    /// such as `+02:00`, `-0500` or `+01`.
+    pub fn parse(value: &str) -> std::result::Result<Self, String> {
+        let trimmed = value.trim();
+        match trimmed.to_ascii_lowercase().as_str() {
+            "utc" | "z" => return Ok(Self::Utc),
+            "local" => return Ok(Self::Local),
+            _ => {}
+        }
+        let bad = || {
+            format!(
+                "invalid vc.timestamp_timezone {value:?}: expected `utc`, `local` or an offset like `+02:00`"
+            )
+        };
+        let (sign, rest) = match trimmed.as_bytes().first() {
+            Some(b'+') => (1, &trimmed[1..]),
+            Some(b'-') => (-1, &trimmed[1..]),
+            _ => return Err(bad()),
+        };
+        let digits: String = rest.chars().filter(|c| *c != ':').collect();
+        if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
+            return Err(bad());
+        }
+        let (hours, minutes) = match digits.len() {
+            1 | 2 => (digits.parse::<i32>().map_err(|_| bad())?, 0),
+            4 => (
+                digits[..2].parse::<i32>().map_err(|_| bad())?,
+                digits[2..].parse::<i32>().map_err(|_| bad())?,
+            ),
+            _ => return Err(bad()),
+        };
+        if minutes >= 60 {
+            return Err(bad());
+        }
+        chrono::FixedOffset::east_opt(sign * (hours * 3600 + minutes * 60))
+            .map(Self::Fixed)
+            .ok_or_else(bad)
+    }
+
+    /// Interpret a naive wall-clock time in this zone.
+    fn to_utc(self, naive: chrono::NaiveDateTime) -> Option<chrono::DateTime<chrono::Utc>> {
+        use chrono::TimeZone;
+        match self {
+            Self::Utc => Some(naive.and_utc()),
+            Self::Local => resolve_local(chrono::Local.from_local_datetime(&naive)),
+            Self::Fixed(offset) => resolve_local(offset.from_local_datetime(&naive)),
+        }
+    }
+}
+
+/// Pick an instant for a local wall-clock time. A time that occurred twice
+/// (the clocks went back) takes its first occurrence; one that never existed
+/// (the clocks went forward) has no instant and yields `None`.
+fn resolve_local<Tz: chrono::TimeZone>(
+    local: chrono::LocalResult<chrono::DateTime<Tz>>,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    local.earliest().map(|dt| dt.with_timezone(&chrono::Utc))
+}
+
 #[derive(Debug, Clone)]
 /// Runtime configuration for catalog indexing and vc checkout/archive discovery.
 pub struct VcConfig {
@@ -137,6 +216,8 @@ pub struct VcConfig {
     pub develop_dirs: Vec<String>,
     /// Directory names treated as ARCHIVE-type checkout containers.
     pub archive_dirs: Vec<String>,
+    /// Clock of the timestamps in checkout filenames (`vc.timestamp_timezone`).
+    pub timestamp_zone: TimestampZone,
     /// Path to vc's own manifest of every file path it manages, one absolute
     /// path per line. Name and location are environment-specific. `None`
     /// disables the manifest cross-reference warnings entirely.
@@ -167,6 +248,7 @@ impl Default for VcConfig {
                 .iter()
                 .map(std::string::ToString::to_string)
                 .collect(),
+            timestamp_zone: TimestampZone::default(),
             manifest_path: None,
             bookmarks: std::collections::HashMap::new(),
             tui_glyphs: None,
@@ -425,6 +507,10 @@ pub fn load_vc_config(config_file: Option<&Path>) -> Result<VcConfig> {
     let ignore_patterns = file_data.ignore_patterns.unwrap_or_default();
     let vc = file_data.vc.unwrap_or_default();
     let tui = file_data.tui.unwrap_or_default();
+    let timestamp_zone = match vc.timestamp_timezone.as_deref() {
+        Some(value) => TimestampZone::parse(value).map_err(crate::error::Error::Validation)?,
+        None => TimestampZone::default(),
+    };
 
     Ok(VcConfig {
         db_path,
@@ -443,6 +529,7 @@ pub fn load_vc_config(config_file: Option<&Path>) -> Result<VcConfig> {
         develop_dirs: vc.develop_dirs,
         archive_dirs: vc.archive_dirs,
         manifest_path: vc.manifest_path.map(rel),
+        timestamp_zone,
         bookmarks: file_data.bookmarks.unwrap_or_default(),
         tui_glyphs: tui.glyphs,
         tui_colors: tui.colors,
@@ -712,6 +799,12 @@ fn scan_revision_dir(
 
 /// Infer consistency warnings from indexed scripts and revisions already stored in the DB.
 pub fn infer_warnings(conn: &Connection) -> Result<Vec<VcWarning>> {
+    infer_warnings_in(conn, TimestampZone::default())
+}
+
+/// [`infer_warnings`] with the clock that checkout-filename timestamps are
+/// written in, which `timestamp_drift` compares file mtimes against.
+pub fn infer_warnings_in(conn: &Connection, zone: TimestampZone) -> Result<Vec<VcWarning>> {
     let mut warnings = Vec::new();
 
     let mut orphan_stmt = conn.prepare(
@@ -758,13 +851,14 @@ pub fn infer_warnings(conn: &Connection) -> Result<Vec<VcWarning>> {
     })?;
     for row in drift_rows {
         let (logical_path, mtime, timestamp) = row?;
-        let Some(checkout_dt) = parse_checkout_timestamp(&timestamp) else {
+        let Some(checkout_dt) = parse_checkout_timestamp(&timestamp, zone) else {
             continue;
         };
-        #[allow(deprecated)]
+        // `floor`, not truncation: a pre-epoch mtime has a negative `fract()`.
+        let whole = mtime.floor();
         let script_dt = chrono::DateTime::<chrono::Utc>::from_timestamp(
-            mtime as i64,
-            ((mtime.fract()) * 1_000_000_000.0) as u32,
+            whole as i64,
+            ((mtime - whole) * 1_000_000_000.0) as u32,
         )
         .unwrap_or(chrono::DateTime::UNIX_EPOCH);
         if script_dt > checkout_dt {
@@ -1009,8 +1103,12 @@ pub fn infer_manifest_warnings(
 // ---------------------------------------------------------------------------
 
 /// Parse a revision timestamp at any of the observed precisions: `YYYYMMDD`
-/// (treated as midnight), `YYYYMMDD_HHMM`, or `YYYYMMDD_HHMMSS`.
-fn parse_checkout_timestamp(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+/// (treated as midnight), `YYYYMMDD_HHMM`, or `YYYYMMDD_HHMMSS`, written in
+/// `zone`.
+fn parse_checkout_timestamp(
+    value: &str,
+    zone: TimestampZone,
+) -> Option<chrono::DateTime<chrono::Utc>> {
     let ndt = match value.len() {
         8 => chrono::NaiveDate::parse_from_str(value, "%Y%m%d")
             .ok()?
@@ -1019,7 +1117,7 @@ fn parse_checkout_timestamp(value: &str) -> Option<chrono::DateTime<chrono::Utc>
         15 => chrono::NaiveDateTime::parse_from_str(value, "%Y%m%d_%H%M%S").ok()?,
         _ => return None,
     };
-    Some(ndt.and_utc())
+    zone.to_utc(ndt)
 }
 
 fn target_name_matches(logical_path: &str, target: &str) -> bool {
@@ -1277,14 +1375,116 @@ mod tests {
 
     #[test]
     fn parse_checkout_timestamp_accepts_all_observed_precisions() {
-        let date_only = parse_checkout_timestamp("20240921").unwrap();
-        let minutes = parse_checkout_timestamp("20240921_1353").unwrap();
-        let seconds = parse_checkout_timestamp("20240921_135312").unwrap();
+        let utc = TimestampZone::Utc;
+        let date_only = parse_checkout_timestamp("20240921", utc).unwrap();
+        let minutes = parse_checkout_timestamp("20240921_1353", utc).unwrap();
+        let seconds = parse_checkout_timestamp("20240921_135312", utc).unwrap();
         assert_eq!(date_only.to_rfc3339(), "2024-09-21T00:00:00+00:00");
         assert_eq!(minutes.to_rfc3339(), "2024-09-21T13:53:00+00:00");
         assert_eq!(seconds.to_rfc3339(), "2024-09-21T13:53:12+00:00");
-        assert!(parse_checkout_timestamp("garbage").is_none());
-        assert!(parse_checkout_timestamp("20240921_13").is_none());
+        assert!(parse_checkout_timestamp("garbage", utc).is_none());
+        assert!(parse_checkout_timestamp("20240921_13", utc).is_none());
+    }
+
+    #[test]
+    fn checkout_timestamps_are_read_in_the_configured_zone() {
+        use chrono::TimeZone;
+        let plus2 = TimestampZone::parse("+02:00").unwrap();
+        let minus5 = TimestampZone::parse("-0500").unwrap();
+        let at = |zone| {
+            parse_checkout_timestamp("20240921_135312", zone)
+                .unwrap()
+                .to_rfc3339()
+        };
+        assert_eq!(at(TimestampZone::Utc), "2024-09-21T13:53:12+00:00");
+        assert_eq!(at(plus2), "2024-09-21T11:53:12+00:00");
+        assert_eq!(at(minus5), "2024-09-21T18:53:12+00:00");
+        // `local` is whatever this host is; it must at least parse and agree
+        // with chrono's own conversion.
+        let naive = chrono::NaiveDate::from_ymd_opt(2024, 9, 21)
+            .unwrap()
+            .and_hms_opt(13, 53, 12)
+            .unwrap();
+        assert_eq!(
+            parse_checkout_timestamp("20240921_135312", TimestampZone::Local),
+            chrono::Local
+                .from_local_datetime(&naive)
+                .earliest()
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+        );
+    }
+
+    #[test]
+    fn timestamp_zone_parses_names_and_offsets_and_rejects_the_rest() {
+        assert_eq!(TimestampZone::parse("UTC").unwrap(), TimestampZone::Utc);
+        assert_eq!(
+            TimestampZone::parse(" local ").unwrap(),
+            TimestampZone::Local
+        );
+        let fixed = |secs| TimestampZone::Fixed(chrono::FixedOffset::east_opt(secs).unwrap());
+        assert_eq!(TimestampZone::parse("+01").unwrap(), fixed(3600));
+        assert_eq!(TimestampZone::parse("+0530").unwrap(), fixed(19_800));
+        assert_eq!(TimestampZone::parse("-08:00").unwrap(), fixed(-28_800));
+        for bad in [
+            "",
+            "Europe/Brussels",
+            "+",
+            "+1:2:3",
+            "+02:75",
+            "02:00",
+            "+99",
+        ] {
+            assert!(TimestampZone::parse(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_wall_clock_time_that_repeats_or_never_happened_resolves_predictably() {
+        use chrono::{LocalResult, TimeZone};
+        let a = chrono::FixedOffset::east_opt(3600)
+            .unwrap()
+            .with_ymd_and_hms(2024, 10, 27, 2, 30, 0)
+            .unwrap();
+        let b = chrono::FixedOffset::east_opt(7200)
+            .unwrap()
+            .with_ymd_and_hms(2024, 10, 27, 2, 30, 0)
+            .unwrap();
+        // Clocks went back: the first occurrence (the earlier instant, which
+        // chrono lists first) wins.
+        assert!(b < a);
+        assert_eq!(
+            resolve_local(LocalResult::Ambiguous(b, a)),
+            Some(b.with_timezone(&chrono::Utc))
+        );
+        // Clocks went forward: the time never existed.
+        assert_eq!(
+            resolve_local::<chrono::FixedOffset>(LocalResult::None),
+            None
+        );
+    }
+
+    #[test]
+    fn timestamp_timezone_comes_from_the_vc_section_of_the_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config(
+            dir.path(),
+            "c.yaml",
+            "vc:\n  timestamp_timezone: \"+02:00\"\n",
+        );
+        let cfg = load_vc_config(Some(&path)).unwrap();
+        assert_eq!(cfg.timestamp_zone, TimestampZone::parse("+02:00").unwrap());
+        assert_eq!(
+            load_vc_config(None).unwrap().timestamp_zone,
+            TimestampZone::Utc
+        );
+
+        let bad = write_config(
+            dir.path(),
+            "bad.yaml",
+            "vc:\n  timestamp_timezone: Europe/Brussels\n",
+        );
+        let err = load_vc_config(Some(&bad)).unwrap_err().to_string();
+        assert!(err.contains("timestamp_timezone"), "{err}");
     }
 
     #[test]
