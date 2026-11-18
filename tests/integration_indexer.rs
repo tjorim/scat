@@ -1794,3 +1794,42 @@ fn build_flags_indexed_script_not_in_manifest() {
         "unregistered.sh was indexed but is absent from the manifest: {vc_warnings}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Checkout scan uses the roots the build scanned
+// ---------------------------------------------------------------------------
+
+#[test]
+fn build_with_only_cli_scan_roots_records_checkout_revisions() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path().join("root");
+    let develop = root.join("DEVELOP");
+    std::fs::create_dir_all(&develop).unwrap();
+    std::fs::write(root.join("a.sh"), "#!/bin/bash\necho a\n").unwrap();
+    std::fs::write(develop.join("a.sh_20260101_101010_jdoe"), "#!/bin/bash\n").unwrap();
+
+    let db_path = dir.path().join("catalog.sqlite");
+    build_index(
+        std::slice::from_ref(&root),
+        &db_path,
+        BuildOptions {
+            head_lines: 10,
+            keep_copies: 0,
+            // Roots come from `--scan-root` only: the config lists none.
+            vc_config: Some(VcConfig::default()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let conn = open_ro(&db_path);
+    let (user, revision_type): (String, String) = conn
+        .query_row(
+            "SELECT user, revision_type FROM revisions WHERE logical_path LIKE '%a.sh'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("the DEVELOP checkout must be recorded");
+    assert_eq!(user, "jdoe");
+    assert_eq!(revision_type, "DEVELOP");
+}

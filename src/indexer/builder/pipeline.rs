@@ -313,7 +313,13 @@ pub(super) fn populate(
 
     set_finalize_msg("Recording checkouts…");
     debug!(phase = "scan_checkouts", "starting scan_checkouts phase");
-    let checkouts = scan_checkouts(vc_config);
+    // The roots this build actually scanned, not whatever the config file
+    // lists: `--scan-root` builds have an empty `vc_config.scan_roots`.
+    let checkout_config = VcConfig {
+        scan_roots: scan_roots.to_vec(),
+        ..vc_config.clone()
+    };
+    let checkouts = scan_checkouts(&checkout_config);
     debug!(
         phase = "scan_checkouts",
         checkout_count = checkouts.len(),
