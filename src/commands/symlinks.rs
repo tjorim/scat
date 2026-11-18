@@ -36,25 +36,25 @@ pub fn cmd_symlinks(
     let has_inbound = !inbound.is_empty();
 
     if !has_outbound && !has_inbound {
-        println!("No symlink relationships for {path}.");
+        outln!("No symlink relationships for {path}.");
         return Ok(());
     }
 
     if let Some(ref target) = outbound_target {
         if let Some(ref row) = outbound_row {
-            println!("{path} points to:");
+            outln!("{path} points to:");
             print_script_table(std::slice::from_ref(row), no_color);
         } else {
-            println!("{path} points to: {target} (not indexed)");
+            outln!("{path} points to: {target} (not indexed)");
         }
     }
 
     if has_outbound && has_inbound {
-        println!();
+        outln!();
     }
 
     if has_inbound {
-        println!("Symlinks pointing to {path}:");
+        outln!("Symlinks pointing to {path}:");
         print_script_table(&inbound, no_color);
     }
 

@@ -25,7 +25,7 @@ pub fn cmd_similar(
     }
 
     if results.is_empty() {
-        println!("No similar scripts found.");
+        outln!("No similar scripts found.");
         return Ok(());
     }
 
@@ -33,7 +33,7 @@ pub fn cmd_similar(
         .iter()
         .map(|r| vec![r.logical_path.clone(), format!("{:.3}", r.score)])
         .collect();
-    println!("{}", render_table(&["Path", "Score"], &rows, false));
+    outln!("{}", render_table(&["Path", "Score"], &rows, false));
     Ok(())
 }
 

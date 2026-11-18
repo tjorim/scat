@@ -2,6 +2,7 @@ use comfy_table::{
     Attribute, Cell, Color, ContentArrangement, Table, presets::UTF8_FULL_CONDENSED,
 };
 use scat_core::core::db::row_str;
+use scat_core::core::display::{display_safe, display_safe_inline};
 use scat_core::core::script_view::{ListField, ScriptView};
 use tracing::warn;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -11,6 +12,34 @@ const TABLE_OVERHEAD_PER_COLUMN: usize = 3;
 const TABLE_BORDER_END_WIDTH: usize = 1;
 const DEFAULT_TERMINAL_WIDTH: usize = 120;
 const DEFAULT_SEARCH_FIELDS: &[&str] = &["path", "language", "owner", "purpose"];
+
+/// `print!` for text that may come from indexed files: control characters are
+/// replaced by visible placeholders (see [`scat_core::core::display`]). Every
+/// plain-text print of catalog data goes through this and [`outln!`]; JSON and
+/// CSV (byte-exact on purpose) use `print_json` and `render_script_csv`.
+macro_rules! out {
+    ($($arg:tt)*) => {
+        $crate::output::emit(&format!($($arg)*))
+    };
+}
+
+/// `println!` counterpart of [`out!`].
+macro_rules! outln {
+    () => {
+        println!()
+    };
+    ($($arg:tt)*) => {
+        $crate::output::emit_line(&format!($($arg)*))
+    };
+}
+
+pub fn emit(text: &str) {
+    print!("{}", display_safe(text));
+}
+
+pub fn emit_line(text: &str) {
+    println!("{}", display_safe(text));
+}
 
 pub fn print_json<T: serde::Serialize>(value: &T) {
     match serde_json::to_string_pretty(value) {
@@ -31,7 +60,7 @@ pub fn print_script_table_with_fields(
     let (headers, rows, truncate_left) = script_table_rows(scripts, fields);
     let header_refs = headers.iter().map(String::as_str).collect::<Vec<_>>();
     let width = terminal_width();
-    println!(
+    outln!(
         "{}",
         render_table_with_width(&header_refs, &rows, no_color, width, &truncate_left,)
     );
@@ -220,6 +249,18 @@ fn render_table_with_width(
     width: usize,
     truncate_left: &[bool],
 ) -> String {
+    // Cells come from indexed files and are one line each: control characters
+    // *and* line breaks become visible placeholders, so a value can neither
+    // drive the terminal nor forge extra rows. (`emit` escapes the rest.)
+    let rows: Vec<Vec<String>> = rows
+        .iter()
+        .map(|row| {
+            row.iter()
+                .map(|cell| display_safe_inline(cell).into_owned())
+                .collect()
+        })
+        .collect();
+    let rows = rows.as_slice();
     let mut table = Table::new();
     table.load_style(UTF8_FULL_CONDENSED);
     table.set_content_arrangement(ContentArrangement::Dynamic);

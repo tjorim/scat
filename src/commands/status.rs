@@ -27,7 +27,7 @@ pub fn cmd_status(
     }
 
     if rows.is_empty() {
-        println!("No vc checkout state found.");
+        outln!("No vc checkout state found.");
         return Ok(());
     }
 
@@ -43,7 +43,7 @@ pub fn cmd_status(
             ]
         })
         .collect::<Vec<_>>();
-    println!(
+    outln!(
         "{}",
         render_table(
             &["Path", "Checkout", "OS", "Warnings"],

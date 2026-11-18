@@ -103,7 +103,7 @@ pub fn cmd_index(
                     "db_path": db_path.display().to_string(),
                 }));
             } else {
-                println!("catalog is up to date — skipping rebuild");
+                outln!("catalog is up to date — skipping rebuild");
             }
             return Ok(());
         }
@@ -142,7 +142,7 @@ pub fn cmd_index(
         } else {
             String::new()
         };
-        println!(
+        outln!(
             "Indexed {} scripts in total{} ({} dependencies) → {}{}",
             result.scripts_indexed,
             reused_suffix,

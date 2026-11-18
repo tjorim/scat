@@ -9,10 +9,11 @@ use scat_core::core::search::open_search_api;
 use scat_core::core::vc::load_vc_config;
 use tracing::{debug, warn};
 
+#[macro_use]
+mod output;
 mod cli;
 mod commands;
 mod doctor;
-mod output;
 mod runtime;
 mod subprocess;
 mod tui;
