@@ -1891,7 +1891,11 @@ fn unreadable_file_is_reported_and_picked_up_once_readable() {
     let db_path = dir.path().join("catalog.sqlite");
 
     let first = build_quiet(&root, &db_path);
-    assert_eq!(first.errors.len(), 1, "the unreadable file must be reported");
+    assert_eq!(
+        first.errors.len(),
+        1,
+        "the unreadable file must be reported"
+    );
     assert!(first.errors[0].0.ends_with("a.sh"));
     assert_eq!(first.scripts_indexed, 1);
     assert!(content_of(&open_ro(&db_path), "a.sh").is_none());
