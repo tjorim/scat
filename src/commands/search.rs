@@ -79,22 +79,18 @@ pub fn collect_results(
             .with_context(|| format!("Regex search failed for pattern {pattern:?}"))?;
         (rows, false)
     } else if let Some(q) = text {
-        let use_fts = query_uses_fts(q);
-        let rows = if use_fts {
-            api.search_with_filters(q, limit, lang.as_deref(), owner.as_deref(), tag.as_deref())?
-        } else {
-            // The INSTR path search matches `/`-separated logical paths, so
-            // normalise Windows separators from the query first.
-            let path_query = q.replace('\\', "/");
-            api.search_by_path_with_filters(
-                &path_query,
+        (
+            search_text(
+                api,
+                q,
+                q,
                 limit,
                 lang.as_deref(),
                 owner.as_deref(),
                 tag.as_deref(),
-            )?
-        };
-        (rows, use_fts)
+            )?,
+            false,
+        )
     } else {
         (
             api.list_scripts(lang.as_deref(), owner.as_deref(), tag.as_deref(), limit, 0)?,
@@ -138,12 +134,56 @@ pub fn cmd_search(api: &scat_core::core::search::SearchApi, opts: SearchOpts<'_>
     Ok(())
 }
 
-/// Route a text query: FTS for plain words, INSTR-based path search when the
-/// query looks like a (partial) path, since `/` and `.` are FTS5 syntax.
-/// Backslashes count as path separators so Windows-style path fragments
-/// (`scripts\foo`) route to path search too.
-pub fn query_uses_fts(query: &str) -> bool {
-    !query.contains('/') && !query.contains('\\') && !query.contains('.')
+/// Whether `query` looks like a (partial) path or filename — it contains a
+/// path separator (`/`, or `\` for Windows-style fragments) or a dot.
+/// Such queries get the INSTR path search *in addition to* full-text search;
+/// they are never FTS-exempt, because dotted text (`10.0.0.1`, `config.yaml`
+/// mentioned inside a script) is just as likely to be a content search.
+pub fn query_looks_like_path(query: &str) -> bool {
+    query.contains('/') || query.contains('\\') || query.contains('.')
+}
+
+/// Run a free-text query. Plain words use FTS (re-ranked so name matches come
+/// first). Path-like queries (see [`query_looks_like_path`]) run the INSTR
+/// path search first, then append FTS hits on the same text — FTS5's
+/// tokenizer splits on punctuation, so `"10.0.0.1"` is matched as the phrase
+/// `10 0 0 1` — skipping scripts already found by path, up to `limit`.
+///
+/// `fts_query` is the text handed to FTS; the TUI passes a live-typing
+/// variant with a trailing prefix `*`, the CLI passes the query unchanged.
+pub fn search_text(
+    api: &scat_core::core::search::SearchApi,
+    query: &str,
+    fts_query: &str,
+    limit: usize,
+    lang: Option<&str>,
+    owner: Option<&str>,
+    tag: Option<&str>,
+) -> Result<Vec<scat_core::core::db::JsonRow>> {
+    if !query_looks_like_path(query) {
+        let rows = api.search_with_filters(fts_query, limit, lang, owner, tag)?;
+        // Raw BM25 order buries the script actually named like the query
+        // under its own retained versions and near-namesakes.
+        return Ok(sort_by_name_relevance(rows, query));
+    }
+    // The INSTR path search matches `/`-separated logical paths, so
+    // normalise Windows separators from the query first.
+    let path_query = query.replace('\\', "/");
+    let mut rows = api.search_by_path_with_filters(&path_query, limit, lang, owner, tag)?;
+    if rows.len() < limit {
+        let seen: std::collections::HashSet<String> = rows
+            .iter()
+            .map(|r| ScriptView::new(r).logical_path().to_owned())
+            .collect();
+        let content_rows = api.search_with_filters(fts_query, limit, lang, owner, tag)?;
+        rows.extend(
+            content_rows
+                .into_iter()
+                .filter(|r| !seen.contains(ScriptView::new(r).logical_path()))
+                .take(limit - rows.len()),
+        );
+    }
+    Ok(rows)
 }
 
 /// Re-sort results so exact and prefix filename matches appear first.

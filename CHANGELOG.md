@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Search queries containing `.`, `/` or `\` (IP addresses like `10.0.0.1`, dotted
+  text, filenames) no longer skip content search: path matches are listed first,
+  followed by full-text matches on the same query, in both the CLI and the TUI.
+
 ### Distribution
 
 - License original project material (both crates, documentation, website and

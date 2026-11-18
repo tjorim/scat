@@ -262,22 +262,9 @@ fn run_search_with_options(
             .list_scripts(lang, owner, tag, limit, 0)
             .context("failed to list scripts");
     }
-    if crate::commands::query_uses_fts(text) {
-        let live = auto_prefix_last_term(text);
-        let rows = api
-            .search_with_filters(&live, limit, lang, owner, tag)
-            .context("failed to run search query")?;
-        // Same re-ranking the CLI applies to FTS hits: raw BM25 order buries
-        // the script actually named like the query under its own retained
-        // versions and near-namesakes.
-        Ok(crate::commands::sort_by_name_relevance(rows, text))
-    } else {
-        // The INSTR path search matches `/`-separated logical paths, so
-        // normalise Windows separators from the query first.
-        let path_query = text.replace('\\', "/");
-        api.search_by_path_with_filters(&path_query, limit, lang, owner, tag)
-            .context("failed to run path search query")
-    }
+    let live = auto_prefix_last_term(text);
+    crate::commands::search_text(api, text, &live, limit, lang, owner, tag)
+        .context("failed to run search query")
 }
 
 /// Append `*` to the last (still-being-typed) term so live search matches
