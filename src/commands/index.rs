@@ -137,7 +137,11 @@ pub fn cmd_index(
             reused_suffix,
             result.dependencies_indexed,
             result.db_path.display(),
-            if dry_run { " (dry run)" } else { "" }
+            if dry_run {
+                " (dry run, nothing written)"
+            } else {
+                ""
+            }
         );
         if !result.errors.is_empty() {
             warn!(

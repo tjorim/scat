@@ -4,14 +4,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use indicatif::{ProgressBar, ProgressStyle};
 use rusqlite::Connection;
-use tempfile::NamedTempFile;
 use tracing::{debug, warn};
 
 use crate::core::db::create_build_db;
 use crate::core::vc::{VcConfig, load_vc_config};
 use crate::error::{Error, Result};
 use crate::indexer::atomic::{atomic_swap, rotate_copies};
-use crate::indexer::checkpoint::{Checkpoint, delete_wip_pair, read_checkpoint, wip_path};
+use crate::indexer::checkpoint::{
+    Checkpoint, ckpt_path, delete_checkpoint, delete_wip_pair, read_checkpoint, wip_path,
+};
+use crate::indexer::scratch::{
+    BuildLock, DRY_RUN_DIR_PREFIX, ScratchGuard, remove_sqlite_files, sweep_abandoned,
+};
 
 mod pipeline;
 mod resolve;
@@ -33,7 +37,8 @@ pub struct IndexResult {
     pub scripts_reused: usize,
     /// Number of dependency edges recorded.
     pub dependencies_indexed: usize,
-    /// Output database path (tmp path for dry-run).
+    /// Output database path (the would-be target for a dry run, which
+    /// publishes nothing and deletes its scratch database).
     pub db_path: PathBuf,
     /// Whether indexing was executed in dry-run mode.
     pub dry_run: bool,
@@ -125,56 +130,69 @@ pub fn build_index(
     let use_progress = !opts.quiet && stderr_is_tty();
 
     // -----------------------------------------------------------------------
+    // Exclusive build, scratch ownership.
+    // -----------------------------------------------------------------------
+    // One build at a time per catalog: overlapping runs would share the
+    // `.wip`/`.ckpt` names and rotate copies concurrently. A dry run builds
+    // in a private directory of its own and publishes nothing, so it neither
+    // takes the lock nor touches a real build's resume state.
+    let _lock = if opts.dry_run {
+        None
+    } else {
+        let lock = BuildLock::acquire(db_path)?;
+        sweep_abandoned(parent);
+        Some(lock)
+    };
+    let dry_run_dir = if opts.dry_run {
+        Some(
+            tempfile::Builder::new()
+                .prefix(DRY_RUN_DIR_PREFIX)
+                .tempdir_in(parent)?,
+        )
+    } else {
+        None
+    };
+    // The real build works directly at `<db>.wip` and is never renamed, so
+    // no SQLite sidecar can end up under a different name than its database.
+    // Armed until the build is published or deliberately left to resume.
+    let mut scratch = dry_run_dir.is_none().then(|| ScratchGuard::new(db_path));
+    let wip = dry_run_dir
+        .as_ref()
+        .map_or_else(|| wip_path(db_path), |d| d.path().join("build.sqlite"));
+
+    // -----------------------------------------------------------------------
     // Resume logic: look for a .wip + .ckpt pair from a previous interrupted run.
     // -----------------------------------------------------------------------
-    let wip = wip_path(db_path);
-    let resume_checkpoint: Option<Checkpoint> = if opts.no_resume || opts.dry_run {
-        // User asked for a fresh run, or dry-run never uses checkpoints.
+    let resume_checkpoint: Option<Checkpoint> = if opts.dry_run {
+        None
+    } else if opts.no_resume {
         delete_wip_pair(db_path);
         None
-    } else if wip.exists() {
-        match read_checkpoint(db_path) {
-            Ok(Some(ckpt)) => {
-                // Validate the WIP DB before trusting the checkpoint.
-                if validate(&wip).is_ok() {
-                    debug!(
-                        wip = %wip.display(),
-                        already_indexed = ckpt.indexed.len(),
-                        "resuming from checkpoint"
-                    );
-                    Some(ckpt)
-                } else {
-                    // Corrupt WIP DB — start fresh.
-                    debug!(wip = %wip.display(), "corrupt wip db, starting fresh");
-                    delete_wip_pair(db_path);
+    } else {
+        // A WIP of a fresh build has no `index_metadata` row yet (that is
+        // written when a build completes), so only its integrity is checked.
+        let resumable = match read_checkpoint(db_path) {
+            Ok(Some(ckpt)) if wip.exists() => match validate_integrity(&wip) {
+                Ok(()) => Some(ckpt),
+                Err(e) => {
+                    debug!(wip = %wip.display(), error = %e, "wip db failed validation, starting fresh");
                     None
                 }
-            }
-            Ok(None) => {
-                // WIP exists but no checkpoint: delete and start fresh.
-                delete_wip_pair(db_path);
-                None
-            }
-            Err(_) => {
-                delete_wip_pair(db_path);
-                None
-            }
+            },
+            _ => None,
+        };
+        match &resumable {
+            Some(ckpt) => debug!(
+                wip = %wip.display(),
+                already_indexed = ckpt.indexed.len(),
+                "resuming from checkpoint"
+            ),
+            // No usable pair: whatever is left is abandoned.
+            None => delete_wip_pair(db_path),
         }
-    } else {
-        None
+        resumable
     };
-
-    // The tmp_path: either the existing WIP (resume) or a fresh temp file.
-    let tmp_path = if resume_checkpoint.is_some() {
-        wip
-    } else {
-        let temp_file = NamedTempFile::new_in(parent)?;
-        let tmp_path = temp_file.path().to_path_buf();
-        // Don't drop temp_file here; keep it alive to prevent path reuse
-        // Explicitly persist to prevent automatic deletion on drop
-        std::mem::forget(temp_file);
-        tmp_path
-    };
+    let tmp_path = wip;
 
     // -----------------------------------------------------------------------
     // Incremental seeding: on a fresh (non-resume) attempt, start from a copy
@@ -249,6 +267,8 @@ pub fn build_index(
                         error = %e,
                         "failed to seed incremental build from previous database, falling back to a full rebuild"
                     );
+                    // The failed seed may have left a partial copy behind.
+                    remove_sqlite_files(&tmp_path);
                     (create_build_db(&tmp_path)?, false)
                 }
             }
@@ -297,21 +317,26 @@ pub fn build_index(
     };
 
     if let Err(e) = build_result {
-        // If shutdown was requested we wrote a checkpoint before returning;
-        // keep the WIP file so the user can resume.
-        if !shutdown.load(Ordering::SeqCst) {
-            let _ = std::fs::remove_file(&tmp_path);
+        // An interrupted build that managed to write its checkpoint keeps the
+        // WIP so the next run can resume; everything else is cleaned up by
+        // the guard (including the WIP's `-wal`/`-journal` sidecars).
+        if matches!(e, Error::Interrupted)
+            && !opts.dry_run
+            && ckpt_path(db_path).exists()
+            && let Some(guard) = scratch.as_mut()
+        {
+            guard.keep();
         }
         return Err(e);
     }
 
-    // If interrupted, the checkpoint has already been written inside populate().
-    if shutdown.load(Ordering::SeqCst) {
-        return Err(Error::Interrupted);
+    // `populate` returned `Ok`, so the build is complete even if Ctrl-C
+    // arrived during the final phase (which has no interrupt points): publish
+    // it rather than throw a finished catalog away. Nothing to resume now.
+    // (A dry run never owned the checkpoint, so it must not delete it.)
+    if !opts.dry_run {
+        delete_checkpoint(db_path);
     }
-
-    // Clean up checkpoint files now that we have a complete DB.
-    delete_wip_pair(db_path);
 
     finalize_journal_mode(&tmp_path)?;
     validate(&tmp_path)?;
@@ -324,7 +349,9 @@ pub fn build_index(
     );
 
     if opts.dry_run {
-        result.db_path = tmp_path;
+        // The scratch database is deleted with `dry_run_dir`; report where a
+        // real run would publish instead of a path that no longer exists.
+        result.db_path = db_path.to_path_buf();
         debug!(path = %result.db_path.display(), "completed dry-run index build");
         return Ok(result);
     }
@@ -462,9 +489,9 @@ fn finalize_journal_mode(db_path: &Path) -> Result<()> {
 // Validation
 // ---------------------------------------------------------------------------
 
-fn validate(db_path: &Path) -> Result<()> {
-    use rusqlite::OptionalExtension;
-
+/// `PRAGMA integrity_check` only. All a work-in-progress database can be held
+/// to: its `index_metadata` row is written by the last step of a build.
+fn validate_integrity(db_path: &Path) -> Result<()> {
     let conn = Connection::open(db_path)?;
     let check: String = conn.query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
     if check != "ok" {
@@ -472,6 +499,15 @@ fn validate(db_path: &Path) -> Result<()> {
             "integrity_check failed: {check}"
         )));
     }
+    Ok(())
+}
+
+/// Validate a *finished* build: integrity plus its `index_metadata` row.
+fn validate(db_path: &Path) -> Result<()> {
+    use rusqlite::OptionalExtension;
+
+    validate_integrity(db_path)?;
+    let conn = Connection::open(db_path)?;
     let meta: Option<i64> = conn
         .query_row("SELECT id FROM index_metadata WHERE id = 1", [], |r| {
             r.get(0)
@@ -986,5 +1022,205 @@ mod tests {
             "an unreadable/corrupt source must return an error, not panic, \
              so build_index's caller can fall back to a full rebuild"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Interrupt / resume, scratch ownership
+    // -----------------------------------------------------------------------
+
+    fn names_in(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn scripts_tree(dir: &Path, count: usize) -> PathBuf {
+        let root = dir.join("scripts");
+        std::fs::create_dir(&root).unwrap();
+        for i in 0..count {
+            std::fs::write(root.join(format!("s{i:02}.sh")), format!("echo {i}\n")).unwrap();
+        }
+        root
+    }
+
+    fn quiet_opts() -> BuildOptions {
+        BuildOptions {
+            head_lines: 10,
+            keep_copies: 0,
+            quiet: true,
+            vc_config: Some(VcConfig::default()),
+            ..Default::default()
+        }
+    }
+
+    /// Run a build that is interrupted after `after` scripts were written.
+    fn interrupted_build(root: &Path, db: &Path, after: usize) -> Error {
+        let flag = Arc::new(AtomicBool::new(false));
+        pipeline::INTERRUPT_AFTER_SCRIPTS.set(Some(after));
+        let err = build_index(
+            std::slice::from_ref(&root.to_path_buf()),
+            db,
+            BuildOptions {
+                shutdown: Some(flag),
+                ..quiet_opts()
+            },
+        )
+        .unwrap_err();
+        pipeline::INTERRUPT_AFTER_SCRIPTS.set(None);
+        err
+    }
+
+    #[test]
+    fn interrupted_build_leaves_one_resumable_wip_and_the_next_run_resumes_it() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = scripts_tree(dir.path(), 10);
+        let db = dir.path().join("c.sqlite");
+
+        assert!(matches!(
+            interrupted_build(&root, &db, 3),
+            Error::Interrupted
+        ));
+        // Only the WIP, its checkpoint and the lock: no `.tmpXXXX`, no
+        // orphaned `-wal`, and nothing published.
+        assert_eq!(
+            names_in(dir.path()),
+            [
+                "c.sqlite.lock",
+                "c.sqlite.wip",
+                "c.sqlite.wip.ckpt",
+                "scripts"
+            ]
+        );
+
+        let result = build_index(std::slice::from_ref(&root), &db, quiet_opts()).unwrap();
+        assert_eq!(result.scripts_indexed, 10);
+        assert_eq!(result.scripts_reused, 3, "the checkpointed work is reused");
+        assert_eq!(
+            names_in(dir.path()),
+            ["c.sqlite", "c.sqlite.lock", "scripts"]
+        );
+        let conn = Connection::open(&db).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM scripts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 10);
+    }
+
+    #[test]
+    fn resume_reextracts_checkpointed_files_that_changed_in_between() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = scripts_tree(dir.path(), 6);
+        let db = dir.path().join("c.sqlite");
+        interrupted_build(&root, &db, 4);
+
+        // Whatever was checkpointed, rewrite every file with different content.
+        for i in 0..6 {
+            std::fs::write(
+                root.join(format!("s{i:02}.sh")),
+                format!("echo changed-{i}-with-a-different-length\n"),
+            )
+            .unwrap();
+        }
+        let result = build_index(std::slice::from_ref(&root), &db, quiet_opts()).unwrap();
+        assert_eq!(result.scripts_reused, 0);
+        let conn = Connection::open(&db).unwrap();
+        let stale: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM scripts WHERE content NOT LIKE '%changed-%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stale, 0);
+    }
+
+    #[test]
+    fn interrupted_incremental_build_resumes_without_losing_the_old_catalog() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = scripts_tree(dir.path(), 8);
+        let db = dir.path().join("c.sqlite");
+        build_index(std::slice::from_ref(&root), &db, quiet_opts()).unwrap();
+        let published = std::fs::read(&db).unwrap();
+
+        std::fs::write(root.join("s00.sh"), "echo rewritten body\n").unwrap();
+        std::fs::write(root.join("s01.sh"), "echo rewritten body two\n").unwrap();
+        assert!(matches!(
+            interrupted_build(&root, &db, 1),
+            Error::Interrupted
+        ));
+        assert_eq!(
+            std::fs::read(&db).unwrap(),
+            published,
+            "an interrupted build never touches the published catalog"
+        );
+
+        let result = build_index(std::slice::from_ref(&root), &db, quiet_opts()).unwrap();
+        assert_eq!(result.scripts_indexed, 8);
+        let conn = Connection::open(&db).unwrap();
+        let rewritten: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM scripts WHERE content LIKE '%rewritten body%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(rewritten, 2);
+    }
+
+    #[test]
+    fn dry_run_leaves_nothing_behind_and_keeps_a_real_builds_resume_state() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = scripts_tree(dir.path(), 4);
+        let db = dir.path().join("c.sqlite");
+        interrupted_build(&root, &db, 2);
+        let before = names_in(dir.path());
+
+        let result = build_index(
+            std::slice::from_ref(&root),
+            &db,
+            BuildOptions {
+                dry_run: true,
+                ..quiet_opts()
+            },
+        )
+        .unwrap();
+        assert!(result.dry_run);
+        assert_eq!(result.db_path, db);
+        assert_eq!(names_in(dir.path()), before);
+    }
+
+    #[test]
+    fn a_second_build_of_the_same_catalog_fails_fast_while_one_is_running() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = scripts_tree(dir.path(), 2);
+        let db = dir.path().join("c.sqlite");
+        let _held = BuildLock::acquire(&db).unwrap();
+
+        let err = build_index(std::slice::from_ref(&root), &db, quiet_opts()).unwrap_err();
+        assert!(err.to_string().contains("already running"), "{err}");
+        assert!(!db.exists());
+        assert!(!wip_path(&db).exists(), "the loser must not touch the WIP");
+    }
+
+    #[test]
+    fn leftovers_of_earlier_versions_are_swept_before_a_build() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = scripts_tree(dir.path(), 2);
+        let db = dir.path().join("c.sqlite");
+        let leftover = dir.path().join(".tmpAbC123");
+        std::fs::write(&leftover, b"x").unwrap();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_hours(72);
+        std::fs::File::options()
+            .write(true)
+            .open(&leftover)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+
+        build_index(std::slice::from_ref(&root), &db, quiet_opts()).unwrap();
+        assert!(!leftover.exists());
     }
 }

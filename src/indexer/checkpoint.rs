@@ -86,14 +86,19 @@ pub fn read_checkpoint(db_path: &Path) -> Result<Option<Checkpoint>> {
     Ok(Some(ckpt))
 }
 
-/// Delete both the WIP database and the checkpoint file.
-pub fn delete_wip_pair(db_path: &Path) {
-    for p in &[wip_path(db_path), ckpt_path(db_path)] {
-        if p.exists() {
-            let _ = std::fs::remove_file(p);
-            debug!(path = %p.display(), "deleted wip/ckpt file");
-        }
+/// Delete the checkpoint file only (the build finished, so nothing to resume).
+pub fn delete_checkpoint(db_path: &Path) {
+    let p = ckpt_path(db_path);
+    if p.exists() {
+        let _ = std::fs::remove_file(&p);
+        debug!(path = %p.display(), "deleted checkpoint file");
     }
+}
+
+/// Delete the WIP database (with its SQLite sidecars) and the checkpoint file.
+pub fn delete_wip_pair(db_path: &Path) {
+    crate::indexer::scratch::remove_sqlite_files(&wip_path(db_path));
+    delete_checkpoint(db_path);
 }
 
 // ---------------------------------------------------------------------------
