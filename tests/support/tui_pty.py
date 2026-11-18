@@ -8,6 +8,7 @@ import pty
 import re
 import select
 import shlex
+import signal
 import sqlite3
 import struct
 import subprocess
@@ -132,6 +133,32 @@ with tempfile.TemporaryDirectory(prefix="scat-pty-") as directory:
             os.close(slave)
         assert mismatched.read_bytes() == before
         assert sorted(p.name for p in root.glob(f"{label}.sqlite*")) == [f"{label}.sqlite"]
+
+    # SIGTERM and SIGHUP skip Drop and the panic hook; the handler must still
+    # leave fullscreen mode, restore the terminal and die by the same signal.
+    for signum in (signal.SIGTERM, signal.SIGHUP):
+        master, slave = pty.openpty()
+        original = termios.tcgetattr(slave)
+        process = subprocess.Popen([binary, "--db", str(db), "--no-cache", "tui"],
+                                   stdin=slave, stdout=slave, stderr=slave, env=env)
+        try:
+            transcript = wait_for(master, b"\x1b[?2004h")
+            transcript += read_for(master, 0.3)
+            assert termios.tcgetattr(slave) != original, "raw mode was not enabled"
+            process.send_signal(signum)
+            process.wait(timeout=5)
+            transcript += read_for(master, 0.3)
+            assert process.returncode == -signum, (signum, process.returncode)
+            for sequence, what in ((b"\x1b[?1000l", "mouse capture"), (b"\x1b[?2004l", "bracketed paste"),
+                                   (b"\x1b[?1049l", "alternate screen"), (b"\x1b[?25h", "cursor")):
+                assert sequence in transcript[-300:], (signum, what, "not restored")
+            assert termios.tcgetattr(slave) == original, (signum, "terminal attributes not restored")
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+            os.close(master)
+            os.close(slave)
 
     for viewer_exit in (0, 1):
         viewer = root / "viewer.py"
