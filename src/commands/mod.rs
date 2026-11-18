@@ -1,4 +1,5 @@
 mod audit;
+mod cache;
 mod deps;
 mod diff;
 mod index;
@@ -11,6 +12,7 @@ mod status;
 mod symlinks;
 
 pub use audit::{AuditOpts, cmd_audit};
+pub use cache::{cmd_cache_clear, cmd_cache_prune, cmd_cache_status};
 pub use deps::cmd_deps;
 pub use diff::{ScriptDiffOpts, cmd_diff, cmd_script_diff_catalog, cmd_script_diff_explicit};
 pub use index::{IndexOpts, cmd_index};

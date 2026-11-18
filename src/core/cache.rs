@@ -28,10 +28,12 @@
 //!   tmpfs, a cache directory owned by somebody else — falls back to reading
 //!   the published catalog in place, which is exactly the old behavior.
 
-use std::fs::{self, DirBuilder, File};
+use std::fs::{self, DirBuilder, File, TryLockError};
+use std::io::IsTerminal;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
@@ -49,6 +51,27 @@ pub const DEFAULT_CACHE_ROOT: &str = "/dev/shm";
 /// otherwise let one user hand another a catalog of their choosing.
 const CACHE_DIR_MODE: u32 = 0o700;
 
+/// An entry nobody has read for this long is dropped when the cache next
+/// refreshes (and by `scat cache prune`).
+pub const DEFAULT_MAX_AGE: Duration = Duration::from_hours(14 * 24);
+
+/// How long a refresh waits for another process's copy of the same entry
+/// before giving up and reading the published catalog in place instead.
+pub const DEFAULT_LOCK_WAIT: Duration = Duration::from_secs(10);
+
+/// Free space kept in the cache root beyond the copy itself: the larger of
+/// this and a tenth of the copy, so one catalog cannot take the last of a
+/// shared tmpfs from other users.
+const MIN_FREE_HEADROOM: u64 = 64 * 1024 * 1024;
+
+/// Copies at least this large announce themselves on an interactive stderr,
+/// since the copy runs before any output (and before the TUI starts).
+const NOTICE_MIN_BYTES: u64 = 32 * 1024 * 1024;
+
+/// A hit refreshes an entry's last-use time only when it is older than this,
+/// so reading the catalog does not become a write per command.
+const TOUCH_INTERVAL: Duration = Duration::from_hours(1);
+
 /// Where and whether to cache the published catalog locally.
 #[derive(Debug, Clone)]
 pub struct CacheOptions {
@@ -56,6 +79,13 @@ pub struct CacheOptions {
     pub enabled: bool,
     /// Cache root; defaults to [`DEFAULT_CACHE_ROOT`] when `None`.
     pub root: Option<PathBuf>,
+    /// Upper bound on the bytes this user's cache may hold. A copy that would
+    /// exceed it first evicts the least recently used other entries; if it
+    /// still does not fit, the published catalog is read in place. `None`
+    /// bounds nothing but the free space of the cache root.
+    pub max_bytes: Option<u64>,
+    /// How long to wait for a refresh already running in another process.
+    pub lock_wait: Duration,
 }
 
 impl Default for CacheOptions {
@@ -63,6 +93,8 @@ impl Default for CacheOptions {
         Self {
             enabled: true,
             root: None,
+            max_bytes: None,
+            lock_wait: DEFAULT_LOCK_WAIT,
         }
     }
 }
@@ -150,8 +182,16 @@ pub fn inspect_cache(source: &Path, options: &CacheOptions) -> serde_json::Value
     } else {
         "stale"
     };
+    let (entries, total_bytes) = if trusted {
+        let entries = list_entries(&dir);
+        let total = entries.iter().map(|e| e.bytes).sum::<u64>();
+        (entries.len(), total)
+    } else {
+        (0, 0)
+    };
     serde_json::json!({
         "state": state, "root": root, "directory": dir, "path": entry.db,
+        "entries": entries, "total_bytes": total_bytes,
         "active_read_path": if options.enabled && trusted && current { &entry.db } else { source },
         "fallback": !(options.enabled && trusted && current),
         "note": "Read path predicted without refreshing; normal reads may refresh a stale cache. Unavailable source never activates a stale copy."
@@ -177,6 +217,7 @@ fn refresh(source: &Path, options: &CacheOptions) -> Result<Option<PathBuf>> {
     // Fast path: one `stat` of the network file plus one small local read.
     // No SQLite connection to the share at all.
     if entry.is_current(&stamp) {
+        entry.touch_if_old();
         return Ok(Some(entry.db));
     }
 
@@ -186,17 +227,49 @@ fn refresh(source: &Path, options: &CacheOptions) -> Result<Option<PathBuf>> {
         .truncate(false)
         .mode(0o600)
         .open(&entry.lock)?;
-    lock.lock()?;
+    // Bounded: a copy stuck on a hung mount must not hang every later scat.
+    if !lock_within(&lock, options.lock_wait)? {
+        warn!(
+            source = %source.display(),
+            waited = ?options.lock_wait,
+            "another scat is still copying the catalog to the local cache; reading the published catalog in place"
+        );
+        return Ok(None);
+    }
     // Another process may have refreshed the entry while we waited on the
     // lock; re-check before paying for a second copy of the same build.
     if entry.is_current(&stamp) {
+        entry.touch_if_old();
         return Ok(Some(entry.db));
     }
 
-    if !entry.populate(source, &stamp)? {
-        return Ok(None);
+    let populated = entry.populate(source, &stamp, options)?;
+    // Housekeeping while the lock is held. When the source was refused, this
+    // very entry is unused too, so it is not exempt from the age limit.
+    prune_old_entries(
+        &dir,
+        if populated { &entry.key } else { "" },
+        DEFAULT_MAX_AGE,
+    );
+    Ok(populated.then_some(entry.db))
+}
+
+/// Take the exclusive lock, retrying until `wait` has elapsed. `Ok(false)`
+/// when someone else still holds it.
+fn lock_within(lock: &File, wait: Duration) -> std::io::Result<bool> {
+    let start = std::time::Instant::now();
+    loop {
+        match lock.try_lock() {
+            Ok(()) => return Ok(true),
+            Err(TryLockError::WouldBlock) => {
+                if start.elapsed() >= wait {
+                    return Ok(false);
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(TryLockError::Error(err)) => return Err(err),
+        }
     }
-    Ok(Some(entry.db))
 }
 
 // ---------------------------------------------------------------------------
@@ -258,7 +331,7 @@ impl CacheEntry {
     /// published file in place and reports the mismatch from there. Caching it
     /// would only park an unopenable catalog in RAM — and a stale entry for an
     /// older, readable build must not be served in its place either.
-    fn populate(&self, source: &Path, stamp: &SourceStamp) -> Result<bool> {
+    fn populate(&self, source: &Path, stamp: &SourceStamp, options: &CacheOptions) -> Result<bool> {
         let src = open_readonly(source)?;
         let schema = schema_version(&src);
         if schema.is_some_and(|v| schema_compatibility(v) != SchemaCompatibility::Compatible) {
@@ -267,6 +340,10 @@ impl CacheEntry {
                 schema_version = ?schema,
                 "published catalog schema is not readable by this scat; not caching it"
             );
+            // The older entry we may hold stays: a rollback of the publisher
+            // restores that very build and reuses it instead of recopying (see
+            // docs/COMPATIBILITY.md). Nothing reads it meanwhile, so the age
+            // pruning in `refresh` reclaims it if the upgrade sticks.
             return Ok(false);
         }
         // Only the catalog carries `index_metadata`; other SQLite files this
@@ -288,7 +365,7 @@ impl CacheEntry {
             && cached_build_timestamp(&self.db).as_deref() == Some(&*build_timestamp)
             && cached_schema_version(&self.db) == schema
         {
-            self.write_meta(stamp, build_timestamp)?;
+            self.write_meta(stamp, build_timestamp, source)?;
             return Ok(true);
         }
 
@@ -297,6 +374,18 @@ impl CacheEntry {
         // no other refresh of this entry is in flight and every leftover is
         // by definition abandoned.
         self.sweep_scratch_files();
+
+        // Make room, or decline: a copy that does not fit must not eat the
+        // rest of a shared tmpfs (the published catalog is read in place).
+        if !self.make_room(stamp.len, options) {
+            return Ok(false);
+        }
+        if stamp.len >= NOTICE_MIN_BYTES && std::io::stderr().is_terminal() {
+            eprintln!(
+                "scat: copying the catalog ({} MiB) to the local cache; this happens once per rebuild…",
+                stamp.len / (1024 * 1024)
+            );
+        }
 
         let tmp = self.scratch("sqlite");
         if let Err(err) = copy_catalog(&src, &tmp) {
@@ -314,15 +403,84 @@ impl CacheEntry {
         // between the two leaves an entry that simply looks stale and gets
         // rebuilt, never one that looks fresh while holding the wrong build.
         fs::rename(&tmp, &self.db)?;
-        self.write_meta(stamp, build_timestamp)?;
+        self.write_meta(stamp, build_timestamp, source)?;
         Ok(true)
     }
 
+    /// Whether a copy of `needed` bytes fits: within `max_bytes` (evicting the
+    /// least recently used *other* entries to get there) and with headroom to
+    /// spare in the cache root's filesystem.
+    fn make_room(&self, needed: u64, options: &CacheOptions) -> bool {
+        if let Some(max) = options.max_bytes {
+            let mut entries: Vec<_> = list_entries(&self.dir)
+                .into_iter()
+                .filter(|e| e.key != self.key)
+                .collect();
+            let mut held: u64 = entries.iter().map(|e| e.bytes).sum();
+            // Oldest use first.
+            entries.sort_by_key(|e| e.last_used);
+            for victim in &entries {
+                if held + needed <= max {
+                    break;
+                }
+                debug!(key = %victim.key, bytes = victim.bytes, "evicting the least recently used cache entry");
+                Self::new(&self.dir, &victim.key).remove_files();
+                held = held.saturating_sub(victim.bytes);
+            }
+            if held + needed > max {
+                warn!(
+                    needed,
+                    max,
+                    "the catalog does not fit in the local cache limit; reading the published catalog in place"
+                );
+                return false;
+            }
+        }
+        if let Some(free) = free_bytes(&self.dir) {
+            let headroom = MIN_FREE_HEADROOM.max(needed / 10);
+            if free < needed.saturating_add(headroom) {
+                warn!(
+                    free,
+                    needed,
+                    "not enough free space in the cache root for the catalog; reading the published catalog in place"
+                );
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Remove this entry's database and metadata (the lock file stays: it is
+    /// what serialises the next refresh).
+    fn remove_files(&self) {
+        let _ = fs::remove_file(&self.db);
+        let _ = fs::remove_file(&self.meta);
+    }
+
+    /// Mark the entry as used now, if its last use is more than
+    /// [`TOUCH_INTERVAL`] ago. Best effort: pruning merely sees an older time.
+    fn touch_if_old(&self) {
+        let stale = fs::metadata(&self.meta)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > TOUCH_INTERVAL);
+        if stale && let Ok(file) = File::options().write(true).open(&self.meta) {
+            let _ = file.set_modified(SystemTime::now());
+        }
+    }
+
     /// Record what the cached copy now holds, atomically.
-    fn write_meta(&self, stamp: &SourceStamp, build_timestamp: String) -> Result<()> {
+    fn write_meta(
+        &self,
+        stamp: &SourceStamp,
+        build_timestamp: String,
+        source: &Path,
+    ) -> Result<()> {
         let meta = CacheMeta {
             source: stamp.clone(),
             build_timestamp,
+            source_path: Some(source.to_string_lossy().into_owned()),
         };
         let tmp = self.scratch("json");
         fs::write(&tmp, serde_json::to_vec(&meta)?)?;
@@ -403,6 +561,10 @@ struct CacheMeta {
     /// `index_metadata.build_timestamp` of the cached copy — the catalog's
     /// own notion of "which build is this", independent of file identity.
     build_timestamp: String,
+    /// The published path this entry caches, for listing and pruning. Absent
+    /// in entries written by earlier versions.
+    #[serde(default)]
+    source_path: Option<String>,
 }
 
 fn read_meta(path: &Path) -> Option<CacheMeta> {
@@ -440,6 +602,214 @@ fn schema_version(conn: &Connection) -> Option<i64> {
 
 fn cached_schema_version(path: &Path) -> Option<i64> {
     schema_version(&open_readonly(path).ok()?)
+}
+
+// ---------------------------------------------------------------------------
+// Inventory, eviction and the `scat cache` commands
+// ---------------------------------------------------------------------------
+
+/// One cached file, as the inventory sees it.
+#[derive(Debug, Clone)]
+pub struct EntryInfo {
+    /// The entry's name: a digest of the published path it caches.
+    pub key: String,
+    /// The published path it caches (unknown for entries made by an older scat).
+    pub source: Option<PathBuf>,
+    /// Bytes of tmpfs the cached database takes.
+    pub bytes: u64,
+    /// When it was last read (the metadata sidecar's mtime; see [`TOUCH_INTERVAL`]).
+    pub last_used: Option<SystemTime>,
+    /// `index_metadata.build_timestamp` of the cached build, when it is a catalog.
+    pub build_timestamp: Option<String>,
+}
+
+/// What `scat cache status` reports.
+#[derive(Debug, Clone)]
+pub struct CacheStatus {
+    /// This user's cache directory, or `None` when it does not exist (or is
+    /// not trustworthy, see [`cache_dir`]).
+    pub directory: Option<PathBuf>,
+    /// Every entry in it.
+    pub entries: Vec<EntryInfo>,
+    /// Sum of the entries' bytes.
+    pub total_bytes: u64,
+}
+
+/// What a clear or prune removed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Removed {
+    /// Entries removed.
+    pub entries: usize,
+    /// Bytes of tmpfs freed.
+    pub bytes: u64,
+}
+
+fn is_entry_key(name: &str) -> bool {
+    name.len() == 16
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// Every entry in `dir`, by key.
+fn list_entries(dir: &Path) -> Vec<EntryInfo> {
+    let Ok(read) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut keys = std::collections::BTreeSet::new();
+    for entry in read.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if let Some(key) = name
+            .strip_suffix(".sqlite")
+            .or_else(|| name.strip_suffix(".json"))
+            && is_entry_key(key)
+        {
+            keys.insert(key.to_string());
+        }
+    }
+    keys.into_iter()
+        .map(|key| {
+            let entry = CacheEntry::new(dir, &key);
+            let meta = read_meta(&entry.meta);
+            let db_meta = fs::metadata(&entry.db).ok();
+            EntryInfo {
+                bytes: db_meta.as_ref().map_or(0, fs::Metadata::len),
+                last_used: fs::metadata(&entry.meta)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .or_else(|| db_meta.and_then(|m| m.modified().ok())),
+                source: meta
+                    .as_ref()
+                    .and_then(|m| m.source_path.as_deref())
+                    .map(PathBuf::from),
+                build_timestamp: meta.map(|m| m.build_timestamp).filter(|t| !t.is_empty()),
+                key,
+            }
+        })
+        .collect()
+}
+
+/// Remove an entry's files, lock file included. Safe while readers have the
+/// database open: they keep their inode until they close it.
+fn remove_entry(dir: &Path, info: &EntryInfo) {
+    let entry = CacheEntry::new(dir, &info.key);
+    entry.remove_files();
+    let _ = fs::remove_file(&entry.lock);
+}
+
+/// Drop entries other than `keep_key` that were last read more than `max_age`
+/// ago, and scratch files abandoned by a killed refresh of any entry. Runs
+/// after a refresh, so a long-lived host does not accumulate copies of
+/// catalogs that moved or were retired. Age only: a "does the source still
+/// exist" check would `stat` a network path and could hang here.
+fn prune_old_entries(dir: &Path, keep_key: &str, max_age: Duration) {
+    let now = SystemTime::now();
+    let older = |time: Option<SystemTime>| {
+        time.and_then(|t| now.duration_since(t).ok())
+            .is_some_and(|age| age > max_age)
+    };
+    for info in list_entries(dir) {
+        if info.key != keep_key && older(info.last_used) {
+            debug!(key = %info.key, source = ?info.source, "pruning unused cache entry");
+            remove_entry(dir, &info);
+        }
+    }
+    if let Ok(read) = fs::read_dir(dir) {
+        for file in read.flatten() {
+            let name = file.file_name();
+            if name.to_string_lossy().contains(SCRATCH_INFIX)
+                && older(file.metadata().and_then(|m| m.modified()).ok())
+            {
+                let _ = fs::remove_file(file.path());
+            }
+        }
+    }
+}
+
+/// Free bytes (for unprivileged users) on the filesystem holding `dir`.
+fn free_bytes(dir: &Path) -> Option<u64> {
+    let path = std::ffi::CString::new(dir.as_os_str().as_bytes()).ok()?;
+    // SAFETY: `statvfs` is plain data, valid when zeroed; the call only writes it.
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    // SAFETY: `path` is a valid NUL-terminated string and `stat` a valid out pointer.
+    if unsafe { libc::statvfs(path.as_ptr(), &raw mut stat) } != 0 {
+        return None;
+    }
+    Some(stat.f_bavail.saturating_mul(stat.f_frsize))
+}
+
+/// This user's cache directory if it exists and is trustworthy, without
+/// creating anything (the read-only twin of [`cache_dir`]).
+fn existing_cache_dir(options: &CacheOptions) -> Option<PathBuf> {
+    let root = options
+        .root
+        .as_deref()
+        .unwrap_or(Path::new(DEFAULT_CACHE_ROOT));
+    let uid = current_uid();
+    let dir = root.join(format!("scat-cache-{uid}"));
+    let meta = fs::symlink_metadata(&dir).ok()?;
+    (meta.is_dir() && meta.uid() == uid && meta.mode() & 0o077 == 0).then_some(dir)
+}
+
+/// List what this user's cache holds. Read-only.
+pub fn cache_status(options: &CacheOptions) -> CacheStatus {
+    let directory = existing_cache_dir(options);
+    let entries = directory.as_deref().map(list_entries).unwrap_or_default();
+    CacheStatus {
+        total_bytes: entries.iter().map(|e| e.bytes).sum(),
+        directory,
+        entries,
+    }
+}
+
+/// Remove every entry of this user's cache.
+pub fn cache_clear(options: &CacheOptions) -> Removed {
+    let Some(dir) = existing_cache_dir(options) else {
+        return Removed::default();
+    };
+    let mut removed = Removed::default();
+    for info in list_entries(&dir) {
+        remove_entry(&dir, &info);
+        removed.entries += 1;
+        removed.bytes += info.bytes;
+    }
+    // Abandoned scratch files of killed refreshes go with them.
+    if let Ok(read) = fs::read_dir(&dir) {
+        for file in read.flatten() {
+            if file.file_name().to_string_lossy().contains(SCRATCH_INFIX) {
+                removed.bytes += file.metadata().map_or(0, |m| m.len());
+                let _ = fs::remove_file(file.path());
+            }
+        }
+    }
+    removed
+}
+
+/// Remove entries not read for `max_age`, and — with `check_sources` — those
+/// whose published catalog no longer exists. The source check `stat`s the
+/// published path, which can block on a hung mount, so only an explicit
+/// `scat cache prune` does it.
+pub fn cache_prune(options: &CacheOptions, max_age: Duration, check_sources: bool) -> Removed {
+    let Some(dir) = existing_cache_dir(options) else {
+        return Removed::default();
+    };
+    let now = SystemTime::now();
+    let mut removed = Removed::default();
+    for info in list_entries(&dir) {
+        let unused = info
+            .last_used
+            .and_then(|t| now.duration_since(t).ok())
+            .is_some_and(|age| age > max_age);
+        let orphaned = check_sources && info.source.as_ref().is_some_and(|p| !p.exists());
+        if unused || orphaned {
+            remove_entry(&dir, &info);
+            removed.entries += 1;
+            removed.bytes += info.bytes;
+        }
+    }
+    prune_old_entries(&dir, "", max_age);
+    removed
 }
 
 // ---------------------------------------------------------------------------
@@ -534,6 +904,7 @@ mod tests {
         let options = CacheOptions {
             enabled: true,
             root: Some(root.clone()),
+            ..CacheOptions::default()
         };
         assert_eq!(inspect_cache(&source, &options)["state"], "absent");
         assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
@@ -591,6 +962,7 @@ mod tests {
         CacheOptions {
             enabled: true,
             root: Some(root.path().to_path_buf()),
+            ..CacheOptions::default()
         }
     }
 
@@ -607,6 +979,7 @@ mod tests {
         let options = CacheOptions {
             enabled: false,
             root: Some(dir.path().to_path_buf()),
+            ..CacheOptions::default()
         };
         assert_eq!(catalog_read_path(&source, &options), source);
     }
@@ -620,6 +993,7 @@ mod tests {
         let options = CacheOptions {
             enabled: true,
             root: Some(dir.path().join("no-such-tmpfs")),
+            ..CacheOptions::default()
         };
         assert_eq!(catalog_read_path(&source, &options), source);
     }
@@ -924,5 +1298,243 @@ mod tests {
         // Every racer ends up on the same entry, and it is a valid catalog.
         assert!(paths.windows(2).all(|pair| pair[0] == pair[1]));
         assert!(crate::core::db::open_db(&paths[0]).is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // Bounds and cleanup
+    // -----------------------------------------------------------------------
+
+    fn age_entry(entry_dir: &Path, key_of: &Path, secs_ago: u64) {
+        let entry = CacheEntry::new(entry_dir, &cache_key(key_of));
+        let when = SystemTime::now() - Duration::from_secs(secs_ago);
+        File::options()
+            .write(true)
+            .open(&entry.meta)
+            .unwrap()
+            .set_modified(when)
+            .unwrap();
+    }
+
+    fn cache_dir_of(root: &TempDir) -> PathBuf {
+        root.path().join(format!("scat-cache-{}", current_uid()))
+    }
+
+    #[test]
+    fn a_refused_catalog_keeps_the_older_entry_for_a_rollback_but_ages_it_out() {
+        let dir = TempDir::new().unwrap();
+        let root = TempDir::new().unwrap();
+        let source = dir.path().join("scripts.sqlite");
+        publish(&source, "2026-07-30T02:00:00");
+        let cached = catalog_read_path(&source, &options(&root));
+        assert_ne!(cached, source);
+
+        let newer = dir.path().join("newer.sqlite");
+        publish(&newer, "2026-07-31T02:00:00");
+        rusqlite::Connection::open(&newer)
+            .unwrap()
+            .execute(
+                "UPDATE index_metadata SET schema_version = schema_version + 1",
+                [],
+            )
+            .unwrap();
+        fs::rename(&newer, &source).unwrap();
+
+        // Refused, read in place; the previous build's copy is not served but
+        // survives, so a rollback can reuse it.
+        assert_eq!(catalog_read_path(&source, &options(&root)), source);
+        assert!(cached.exists());
+
+        // If the upgrade sticks, nothing reads that copy and it is reclaimed.
+        age_entry(&cache_dir_of(&root), &source, 30 * 24 * 3600);
+        assert_eq!(catalog_read_path(&source, &options(&root)), source);
+        assert!(
+            !cached.exists(),
+            "an unused superseded copy must not hold RAM forever"
+        );
+    }
+
+    #[test]
+    fn refreshing_prunes_entries_nobody_has_read_for_a_long_time() {
+        let dir = TempDir::new().unwrap();
+        let root = TempDir::new().unwrap();
+        let old = dir.path().join("old.sqlite");
+        let recent = dir.path().join("recent.sqlite");
+        let current = dir.path().join("current.sqlite");
+        for (path, ts) in [(&old, "a"), (&recent, "b"), (&current, "c")] {
+            publish(path, ts);
+        }
+        let old_copy = catalog_read_path(&old, &options(&root));
+        let recent_copy = catalog_read_path(&recent, &options(&root));
+        let cache = cache_dir_of(&root);
+        age_entry(&cache, &old, 30 * 24 * 3600);
+        age_entry(&cache, &recent, 2 * 24 * 3600);
+
+        // Caching another catalog sweeps the long-unused entry only.
+        let current_copy = catalog_read_path(&current, &options(&root));
+        assert!(current_copy.exists() && recent_copy.exists());
+        assert!(!old_copy.exists());
+        assert!(!cache.join(format!("{}.json", cache_key(&old))).exists());
+        assert!(!cache.join(format!("{}.lock", cache_key(&old))).exists());
+    }
+
+    #[test]
+    fn a_cache_hit_refreshes_the_last_use_time_only_when_it_is_old() {
+        let dir = TempDir::new().unwrap();
+        let root = TempDir::new().unwrap();
+        let source = dir.path().join("scripts.sqlite");
+        publish(&source, "2026-07-30T02:00:00");
+        let _ = catalog_read_path(&source, &options(&root));
+        let cache = cache_dir_of(&root);
+        let meta = cache.join(format!("{}.json", cache_key(&source)));
+        let mtime = || fs::metadata(&meta).unwrap().modified().unwrap();
+
+        age_entry(&cache, &source, 3 * 3600);
+        let aged = mtime();
+        let _ = catalog_read_path(&source, &options(&root));
+        assert!(mtime() > aged, "an old last-use time is renewed on a hit");
+
+        let fresh = mtime();
+        let _ = catalog_read_path(&source, &options(&root));
+        assert_eq!(
+            mtime(),
+            fresh,
+            "a recent one is left alone (no write per command)"
+        );
+    }
+
+    #[test]
+    fn the_size_limit_evicts_the_least_recently_used_entry_or_declines() {
+        let dir = TempDir::new().unwrap();
+        let root = TempDir::new().unwrap();
+        let first = dir.path().join("first.sqlite");
+        let second = dir.path().join("second.sqlite");
+        let third = dir.path().join("third.sqlite");
+        for (path, ts) in [(&first, "a"), (&second, "b"), (&third, "c")] {
+            publish(path, ts);
+        }
+        let size = fs::metadata(&first).unwrap().len();
+        // Room for two copies, not three.
+        let limited = CacheOptions {
+            max_bytes: Some(size * 2 + size / 2),
+            ..options(&root)
+        };
+        let first_copy = catalog_read_path(&first, &limited);
+        let second_copy = catalog_read_path(&second, &limited);
+        let cache = cache_dir_of(&root);
+        age_entry(&cache, &first, 3600 * 5);
+
+        let third_copy = catalog_read_path(&third, &limited);
+        assert_ne!(third_copy, third, "it was cached");
+        assert!(
+            !first_copy.exists(),
+            "the least recently used entry made room"
+        );
+        assert!(second_copy.exists());
+
+        // A limit smaller than one copy declines to cache at all.
+        let tiny = CacheOptions {
+            max_bytes: Some(size / 2),
+            ..options(&root)
+        };
+        let fourth = dir.path().join("fourth.sqlite");
+        publish(&fourth, "d");
+        assert_eq!(catalog_read_path(&fourth, &tiny), fourth);
+    }
+
+    #[test]
+    fn a_refresh_that_cannot_get_the_lock_reads_the_published_catalog() {
+        let dir = TempDir::new().unwrap();
+        let root = TempDir::new().unwrap();
+        let source = dir.path().join("scripts.sqlite");
+        publish(&source, "2026-07-30T02:00:00");
+        let cache = cache_dir_of(&root);
+        DirBuilder::new().mode(0o700).create(&cache).unwrap();
+        // Another scat stuck mid-copy: it holds the entry's lock.
+        let holder = File::options()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(cache.join(format!("{}.lock", cache_key(&source))))
+            .unwrap();
+        holder.lock().unwrap();
+
+        let started = std::time::Instant::now();
+        let impatient = CacheOptions {
+            lock_wait: Duration::from_millis(150),
+            ..options(&root)
+        };
+        assert_eq!(catalog_read_path(&source, &impatient), source);
+        assert!(started.elapsed() < Duration::from_secs(5), "bounded wait");
+
+        drop(holder);
+        assert_ne!(catalog_read_path(&source, &options(&root)), source);
+    }
+
+    #[test]
+    fn free_space_is_measurable_for_a_real_directory() {
+        let dir = TempDir::new().unwrap();
+        assert!(free_bytes(dir.path()).is_some_and(|free| free > 0));
+        assert!(free_bytes(&dir.path().join("missing")).is_none());
+    }
+
+    #[test]
+    fn status_clear_and_prune_manage_this_users_entries() {
+        let dir = TempDir::new().unwrap();
+        let root = TempDir::new().unwrap();
+        let opts = options(&root);
+        assert!(
+            cache_status(&opts).directory.is_none(),
+            "nothing created yet"
+        );
+        assert_eq!(cache_clear(&opts), Removed::default());
+
+        let kept = dir.path().join("kept.sqlite");
+        let gone = dir.path().join("gone.sqlite");
+        let stale = dir.path().join("stale.sqlite");
+        for (path, ts) in [(&kept, "a"), (&gone, "b"), (&stale, "c")] {
+            publish(path, ts);
+            let _ = catalog_read_path(path, &opts);
+        }
+        let status = cache_status(&opts);
+        assert_eq!(status.entries.len(), 3);
+        assert!(status.total_bytes > 0);
+        let kept_info = status
+            .entries
+            .iter()
+            .find(|e| e.source.as_deref() == Some(kept.as_path()))
+            .unwrap();
+        assert_eq!(kept_info.build_timestamp.as_deref(), Some("a"));
+
+        // `prune` drops what nobody reads any more, and — checking sources —
+        // what was retired from the share.
+        age_entry(&cache_dir_of(&root), &stale, 40 * 24 * 3600);
+        fs::remove_file(&gone).unwrap();
+        let removed = cache_prune(&opts, DEFAULT_MAX_AGE, true);
+        assert_eq!(removed.entries, 2);
+        assert!(removed.bytes > 0);
+        let remaining = cache_status(&opts).entries;
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].source.as_deref(), Some(kept.as_path()));
+
+        // Without the source check a retired catalog is only pruned by age.
+        fs::remove_file(&kept).unwrap();
+        assert_eq!(cache_prune(&opts, DEFAULT_MAX_AGE, false).entries, 0);
+
+        let cleared = cache_clear(&opts);
+        assert_eq!(cleared.entries, 1);
+        assert!(cache_status(&opts).entries.is_empty());
+    }
+
+    #[test]
+    fn inspection_reports_how_much_the_cache_holds() {
+        let dir = TempDir::new().unwrap();
+        let root = TempDir::new().unwrap();
+        let source = dir.path().join("scripts.sqlite");
+        publish(&source, "2026-07-30T02:00:00");
+        let opts = options(&root);
+        let _ = catalog_read_path(&source, &opts);
+        let report = inspect_cache(&source, &opts);
+        assert_eq!(report["entries"], 1);
+        assert!(report["total_bytes"].as_u64().unwrap() > 0);
     }
 }

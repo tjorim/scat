@@ -19,11 +19,12 @@ mod runtime;
 mod subprocess;
 mod tui;
 
-use crate::cli::{CatalogCommands, Cli, Commands};
+use crate::cli::{CacheCommands, CatalogCommands, Cli, Commands};
 use crate::commands::{
-    AuditOpts, IndexOpts, ScriptDiffOpts, SearchOpts, cmd_audit, cmd_deps, cmd_diff, cmd_index,
-    cmd_info, cmd_script_diff_catalog, cmd_script_diff_explicit, cmd_search, cmd_show, cmd_similar,
-    cmd_stats, cmd_status, cmd_symlinks,
+    AuditOpts, IndexOpts, ScriptDiffOpts, SearchOpts, cmd_audit, cmd_cache_clear, cmd_cache_prune,
+    cmd_cache_status, cmd_deps, cmd_diff, cmd_index, cmd_info, cmd_script_diff_catalog,
+    cmd_script_diff_explicit, cmd_search, cmd_show, cmd_similar, cmd_stats, cmd_status,
+    cmd_symlinks,
 };
 use crate::runtime::{cmd_vc, init_tracing};
 
@@ -99,14 +100,7 @@ impl Session {
         // puts SQLite's locking on NFS for the whole life of the process. The
         // cache degrades to `db_path` itself whenever it can't be used, so the
         // read path is always valid to open (see `core::cache`).
-        let no_cache_env = std::env::var_os("SCAT_NO_CACHE");
-        let cache = CacheOptions {
-            enabled: !cli::resolve_no_cache(cli.no_cache, no_cache_env.as_deref()),
-            root: cli
-                .cache_dir
-                .clone()
-                .or_else(|| config.catalog.cache_dir.clone()),
-        };
+        let cache = cache_options(cli, &config);
         Ok(Self {
             config,
             db_path,
@@ -194,6 +188,8 @@ fn run(cli: Cli) -> Result<()> {
             mapping.as_deref(),
             no_color,
         ),
+
+        Commands::Cache { command } => run_cache(&cli, command),
 
         // ---- Needs the catalog.
         Commands::Catalog { command } => run_catalog(&cli, command, no_color),
@@ -389,6 +385,34 @@ fn run_tui(
             terminal_modes: terminal,
         },
     )
+}
+
+/// The host-local cache policy: flags and environment, then the config file.
+fn cache_options(cli: &Cli, config: &Config) -> CacheOptions {
+    let no_cache_env = std::env::var_os("SCAT_NO_CACHE");
+    CacheOptions {
+        enabled: !cli::resolve_no_cache(cli.no_cache, no_cache_env.as_deref()),
+        root: cli
+            .cache_dir
+            .clone()
+            .or_else(|| config.catalog.cache_dir.clone()),
+        max_bytes: config.catalog.cache_max_bytes,
+        ..CacheOptions::default()
+    }
+}
+
+/// `scat cache …`: needs the cache location (flag, env or config), not a catalog.
+fn run_cache(cli: &Cli, command: &CacheCommands) -> Result<()> {
+    let config = load_config(cli.config.as_deref()).with_context(|| "Failed to load config")?;
+    let options = cache_options(cli, &config);
+    match command {
+        CacheCommands::Status { json } => cmd_cache_status(&options, *json),
+        CacheCommands::Clear { json } => cmd_cache_clear(&options, *json),
+        CacheCommands::Prune { max_age_days, json } => {
+            cmd_cache_prune(&options, *max_age_days, *json);
+        }
+    }
+    Ok(())
 }
 
 /// `scat catalog …`.

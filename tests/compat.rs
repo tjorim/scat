@@ -132,6 +132,7 @@ fn cache_options(root: &TempDir) -> CacheOptions {
     CacheOptions {
         enabled: true,
         root: Some(root.path().to_path_buf()),
+        ..CacheOptions::default()
     }
 }
 

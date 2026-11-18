@@ -313,6 +313,16 @@ pub enum Commands {
         command: CatalogCommands,
     },
 
+    /// Inspect and manage the host-local catalog cache (tmpfs copies of the
+    /// published catalog and the embeddings sidecar).
+    ///
+    /// The cache is per user and rebuilt on demand; clearing it is always safe
+    /// (the next command copies the catalog again).
+    Cache {
+        #[command(subcommand)]
+        command: CacheCommands,
+    },
+
     /// Generate shell completion script on stdout.
     ///
     /// Example: scat completions bash > /etc/bash_completion.d/scat
@@ -331,6 +341,36 @@ pub enum Commands {
         /// Directory to write every page into (created if missing).
         #[arg(long)]
         dir: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum CacheCommands {
+    /// List the cached catalogs, their sizes and when they were last used.
+    Status {
+        /// Emit machine-readable JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove every cached copy.
+    Clear {
+        /// Emit machine-readable JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove copies nobody has read for a while, and those whose published
+    /// catalog no longer exists.
+    ///
+    /// The source check looks at the published path, so on a hung mount it can
+    /// block; copies are also pruned automatically (by age only) whenever the
+    /// cache refreshes.
+    Prune {
+        /// Remove entries last used more than this many days ago.
+        #[arg(long, default_value = "14")]
+        max_age_days: u64,
+        /// Emit machine-readable JSON output.
+        #[arg(long)]
+        json: bool,
     },
 }
 

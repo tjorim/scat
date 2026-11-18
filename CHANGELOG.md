@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- The host-local catalog cache is bounded and manageable (#191). `scat cache status`,
+  `prune` and `clear` list, tidy and empty it; entries record their last use and
+  published path, and a refresh drops entries unused for 14 days and abandoned scratch
+  files. A copy is only made if the free space of the cache root covers it plus
+  headroom, and within the new `cache_max_bytes` config limit (evicting the least
+  recently used other entries first); otherwise the published catalog is read in place.
+  The older copy kept for a catalog this scat cannot read (so a rollback of the publisher
+  reuses it) is reclaimed by the age limit instead of lingering until reboot. A
+  refresh waits at most ten seconds for another scat's copy instead of hanging, and a
+  copy of 32 MiB or more announces itself on an interactive stderr. `scat doctor`
+  reports the entry count and total size.
+
 ### Fixed
 
 - Plain-text output no longer passes control characters from indexed files to the

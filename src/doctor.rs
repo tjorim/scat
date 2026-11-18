@@ -267,6 +267,8 @@ fn catalog(cli: &Cli) -> Value {
             std::env::var_os("SCAT_NO_CACHE").as_deref(),
         ),
         root: cli.cache_dir.clone().or(config.catalog.cache_dir),
+        max_bytes: config.catalog.cache_max_bytes,
+        ..CacheOptions::default()
     };
     let cache = inspect_cache(db, &options);
     let read_path = cache["active_read_path"]
