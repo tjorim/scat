@@ -9,6 +9,10 @@ All notable changes to this project will be documented in this file.
 - Piping scat into a command that closes the pipe early (`scat search … | head`,
   `| less` then `q`) no longer panics, or aborts with `SIGABRT` in release builds;
   scat now ends quietly like other Unix filters. Fixes #181.
+- `scat catalog build --scan-root <dir>` now records DEVELOP/ARCHIVE checkouts
+  (and their vc warnings) for the roots it scanned; before, the checkout scan only
+  looked at `scan_roots` from the config file, so command-line roots recorded
+  none. Fixes #178.
 - The TUI now restores the terminal (raw mode, alternate screen, mouse capture,
   bracketed paste, cursor) when it is terminated by a panic, `SIGTERM` or `SIGHUP`
   (for example a closed SSH session). Panics restore it before the message is
