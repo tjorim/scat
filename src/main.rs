@@ -66,8 +66,10 @@ fn run(cli: Cli) -> Result<()> {
     let no_color_env = std::env::var_os("NO_COLOR");
     let no_color = cli::resolve_no_color(cli.no_color, no_color_env.as_deref());
 
+    // The TUI's config and terminal modes are resolved once, up front, and
+    // reused below instead of being loaded and detected a second time.
     // Diagnose terminal suitability before catalog/config access or fullscreen setup.
-    if let Commands::Tui {
+    let (preloaded_config, tui_terminal) = if let Commands::Tui {
         glyphs,
         colors,
         terminal_info,
@@ -95,7 +97,10 @@ fn run(cli: Cli) -> Result<()> {
             return Ok(());
         }
         terminal.validate()?;
-    }
+        (Some(configured), Some(terminal))
+    } else {
+        (None, None)
+    };
 
     if let Commands::Doctor {
         json,
@@ -145,8 +150,10 @@ fn run(cli: Cli) -> Result<()> {
     }
 
     // Load config early; provides db_path fallback and index settings.
-    let scat_config =
-        load_vc_config(cli.config.as_deref()).with_context(|| "Failed to load config")?;
+    let scat_config = match preloaded_config {
+        Some(config) => config,
+        None => load_vc_config(cli.config.as_deref()).with_context(|| "Failed to load config")?,
+    };
 
     // vc pass-through needs no catalog either.
     if let Commands::Vc { ref args, json } = cli.command {
@@ -191,23 +198,12 @@ fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Commands::Tui {
             mapping,
-            glyphs,
-            colors,
+            glyphs: _,
+            colors: _,
             terminal_info: _,
         } => {
-            let terminal = tui::capabilities::Capabilities::detect(
-                tui::capabilities::resolve_mode(
-                    glyphs,
-                    scat_config.tui_glyphs.as_deref(),
-                    "glyphs",
-                )?,
-                tui::capabilities::resolve_mode(
-                    colors,
-                    scat_config.tui_colors.as_deref(),
-                    "colors",
-                )?,
-                no_color,
-            );
+            let terminal = tui_terminal
+                .context("internal error: terminal modes were not detected for the TUI")?;
             let resolver = match mapping.as_deref() {
                 Some(path) => PathResolver::from_file(path)
                     .with_context(|| format!("Failed to load mapping file: {}", path.display()))?,

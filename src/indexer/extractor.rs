@@ -225,7 +225,10 @@ struct HeaderPattern {
 static HEADER_PATTERNS: std::sync::LazyLock<Vec<HeaderPattern>> = std::sync::LazyLock::new(|| {
     vec![
         HeaderPattern {
-            re: Regex::new(r"(?i)(?:@brief|brief\s*:)\s*(.+)").unwrap(),
+            // Anchored at the start of the comment text (past any decoration
+            // such as `#`, `*`, `-`): unanchored, `brief:` matched inside
+            // `debrief: …` and mid-sentence.
+            re: Regex::new(r"(?i)^[^\w@]*(?:@brief|brief\s*:)\s*(.+)").unwrap(),
             field_name: "purpose",
             metadata_key: "brief",
         },
@@ -260,7 +263,8 @@ static HEADER_PATTERNS: std::sync::LazyLock<Vec<HeaderPattern>> = std::sync::Laz
             metadata_key: "scripttype",
         },
         HeaderPattern {
-            re: Regex::new(r"(?i)owner\s*:\s*(.+)").unwrap(),
+            // Anchored for the same reason as `brief:` (`Downowner: x`).
+            re: Regex::new(r"(?i)^[^\w@]*owner\s*:\s*(.+)").unwrap(),
             field_name: "owner",
             metadata_key: "owner",
         },
@@ -1013,5 +1017,29 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0]["raw"].as_str().unwrap(), "!!!");
         assert_eq!(entries[1]["raw"].as_str().unwrap(), "2024-13-99 bad date");
+    }
+
+    fn parsed(content: &str) -> ExtractedMetadata {
+        let mut meta = ExtractedMetadata::default();
+        parse_header_comments(content, &mut meta);
+        meta
+    }
+
+    #[test]
+    fn owner_and_brief_keywords_must_start_the_comment_text() {
+        for (line, owner, purpose) in [
+            ("# Owner: jdoe", "jdoe", ""),
+            ("## owner : jdoe", "jdoe", ""),
+            ("#   brief: tidy up", "", "tidy up"),
+            ("// @brief tidy up", "", "tidy up"),
+            ("# Downowner: x", "", ""),
+            ("# debrief: x", "", ""),
+            ("# the previous owner: x", "", ""),
+            ("# this is a brief: x", "", ""),
+        ] {
+            let meta = parsed(&format!("#!/bin/sh\n{line}\n"));
+            assert_eq!(meta.owner, owner, "{line}");
+            assert_eq!(meta.purpose, purpose, "{line}");
+        }
     }
 }

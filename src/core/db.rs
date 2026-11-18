@@ -152,11 +152,38 @@ pub fn append_script_filters(
     }
 }
 
+/// The three triggers that keep `script_fts` in step with `scripts`, as one
+/// string literal. Defined once and spliced into both [`DDL`] and
+/// [`REBUILD_FTS_AND_RESTORE_TRIGGERS_SQL`] (which re-creates them after a bulk
+/// build), so the two can no longer drift apart.
+macro_rules! fts_triggers_sql {
+    () => {
+        r"CREATE TRIGGER IF NOT EXISTS scripts_ai AFTER INSERT ON scripts BEGIN
+    INSERT INTO script_fts(rowid, logical_path, content, owner, purpose, tags)
+    VALUES (new.id, new.logical_path, new.content, new.owner, new.purpose, new.tags);
+END;
+
+CREATE TRIGGER IF NOT EXISTS scripts_ad AFTER DELETE ON scripts BEGIN
+    INSERT INTO script_fts(script_fts, rowid, logical_path, content, owner, purpose, tags)
+    VALUES ('delete', old.id, old.logical_path, old.content, old.owner, old.purpose, old.tags);
+END;
+
+CREATE TRIGGER IF NOT EXISTS scripts_au AFTER UPDATE ON scripts BEGIN
+    INSERT INTO script_fts(script_fts, rowid, logical_path, content, owner, purpose, tags)
+    VALUES ('delete', old.id, old.logical_path, old.content, old.owner, old.purpose, old.tags);
+    INSERT INTO script_fts(rowid, logical_path, content, owner, purpose, tags)
+    VALUES (new.id, new.logical_path, new.content, new.owner, new.purpose, new.tags);
+END;
+"
+    };
+}
+
 // ---------------------------------------------------------------------------
 // DDL (see SCHEMA_VERSION)
 // ---------------------------------------------------------------------------
 
-pub(crate) const DDL: &str = r"
+pub(crate) const DDL: &str = concat!(
+    r"
 PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS scripts (
@@ -211,23 +238,9 @@ CREATE VIRTUAL TABLE IF NOT EXISTS script_fts USING fts5(
     content_rowid='id'
 );
 
-CREATE TRIGGER IF NOT EXISTS scripts_ai AFTER INSERT ON scripts BEGIN
-    INSERT INTO script_fts(rowid, logical_path, content, owner, purpose, tags)
-    VALUES (new.id, new.logical_path, new.content, new.owner, new.purpose, new.tags);
-END;
-
-CREATE TRIGGER IF NOT EXISTS scripts_ad AFTER DELETE ON scripts BEGIN
-    INSERT INTO script_fts(script_fts, rowid, logical_path, content, owner, purpose, tags)
-    VALUES ('delete', old.id, old.logical_path, old.content, old.owner, old.purpose, old.tags);
-END;
-
-CREATE TRIGGER IF NOT EXISTS scripts_au AFTER UPDATE ON scripts BEGIN
-    INSERT INTO script_fts(script_fts, rowid, logical_path, content, owner, purpose, tags)
-    VALUES ('delete', old.id, old.logical_path, old.content, old.owner, old.purpose, old.tags);
-    INSERT INTO script_fts(rowid, logical_path, content, owner, purpose, tags)
-    VALUES (new.id, new.logical_path, new.content, new.owner, new.purpose, new.tags);
-END;
-
+",
+    fts_triggers_sql!(),
+    r"
 CREATE TABLE IF NOT EXISTS dependencies (
     id                 INTEGER PRIMARY KEY AUTOINCREMENT,
     script_id          INTEGER NOT NULL REFERENCES scripts(id) ON DELETE CASCADE,
@@ -314,15 +327,16 @@ CREATE TABLE IF NOT EXISTS index_metadata (
     -- manifest's fingerprint; it keeps its name so the schema is unchanged.
     manifest_fingerprint TEXT NOT NULL DEFAULT ''
 );
-";
+"
+);
 
 // ---------------------------------------------------------------------------
 // Bulk-build FTS trigger management
 // ---------------------------------------------------------------------------
 //
-// The FTS-sync triggers below mirror `scripts_ai`/`scripts_ad`/`scripts_au`
-// in `DDL` above and must be kept in sync with them. They exist as a
-// separate pair of statements (rather than being derived from `DDL`) so a
+// The FTS-sync triggers (`scripts_ai`/`scripts_ad`/`scripts_au`) are defined
+// once, by `fts_triggers_sql!` above, and spliced into both `DDL` and the
+// restore statement below. They exist as a separate pair of statements so a
 // bulk build can drop them for the duration of the insert-heavy phase —
 // firing one FTS write per row during a full catalog rebuild is far slower
 // than a single bulk `INSERT INTO script_fts(script_fts) VALUES('rebuild')`
@@ -338,26 +352,10 @@ DROP TRIGGER IF EXISTS scripts_au;
 
 /// Bulk-rebuilds the FTS index from current `scripts` content, then restores
 /// the triggers dropped by [`DROP_FTS_TRIGGERS_SQL`].
-pub const REBUILD_FTS_AND_RESTORE_TRIGGERS_SQL: &str = "
-INSERT INTO script_fts(script_fts) VALUES('rebuild');
-
-CREATE TRIGGER IF NOT EXISTS scripts_ai AFTER INSERT ON scripts BEGIN
-    INSERT INTO script_fts(rowid, logical_path, content, owner, purpose, tags)
-    VALUES (new.id, new.logical_path, new.content, new.owner, new.purpose, new.tags);
-END;
-
-CREATE TRIGGER IF NOT EXISTS scripts_ad AFTER DELETE ON scripts BEGIN
-    INSERT INTO script_fts(script_fts, rowid, logical_path, content, owner, purpose, tags)
-    VALUES ('delete', old.id, old.logical_path, old.content, old.owner, old.purpose, old.tags);
-END;
-
-CREATE TRIGGER IF NOT EXISTS scripts_au AFTER UPDATE ON scripts BEGIN
-    INSERT INTO script_fts(script_fts, rowid, logical_path, content, owner, purpose, tags)
-    VALUES ('delete', old.id, old.logical_path, old.content, old.owner, old.purpose, old.tags);
-    INSERT INTO script_fts(rowid, logical_path, content, owner, purpose, tags)
-    VALUES (new.id, new.logical_path, new.content, new.owner, new.purpose, new.tags);
-END;
-";
+pub const REBUILD_FTS_AND_RESTORE_TRIGGERS_SQL: &str = concat!(
+    "\nINSERT INTO script_fts(script_fts) VALUES('rebuild');\n\n",
+    fts_triggers_sql!()
+);
 
 // ---------------------------------------------------------------------------
 // Public helpers
@@ -1115,5 +1113,27 @@ mod tests {
             // round-trips as a single quoted term.
             prop_assert_eq!(sanitize_fts_query(&s), format!("\"{s}\""));
         }
+    }
+
+    #[test]
+    fn restoring_the_fts_triggers_recreates_exactly_the_schema_triggers() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let conn = create_db(file.path()).unwrap();
+        let triggers = |conn: &Connection| -> Vec<(String, String)> {
+            conn.prepare("SELECT name, sql FROM sqlite_master WHERE type = 'trigger' ORDER BY name")
+                .unwrap()
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .collect::<std::result::Result<_, _>>()
+                .unwrap()
+        };
+        let original = triggers(&conn);
+        assert_eq!(original.len(), 3);
+
+        conn.execute_batch(DROP_FTS_TRIGGERS_SQL).unwrap();
+        assert!(triggers(&conn).is_empty());
+        conn.execute_batch(REBUILD_FTS_AND_RESTORE_TRIGGERS_SQL)
+            .unwrap();
+        assert_eq!(triggers(&conn), original);
     }
 }
