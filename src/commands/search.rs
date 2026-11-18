@@ -120,12 +120,13 @@ pub fn cmd_search(api: &scat_core::core::search::SearchApi, opts: SearchOpts<'_>
     }
 
     if output == SearchOutput::Csv {
+        // CSV is for machines: byte-exact, unlike the human-facing output.
         print!("{}", render_script_csv(&ranked, fields));
         return Ok(());
     }
 
     if ranked.is_empty() {
-        println!("No results found.");
+        outln!("No results found.");
         return Ok(());
     }
 

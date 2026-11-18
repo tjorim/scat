@@ -29,23 +29,23 @@ pub fn cmd_info(published_path: &Path, read_path: &Path, json: bool) -> Result<(
     if json {
         print_json(&meta);
     } else {
-        println!(
+        outln!(
             "Last indexed       : {}",
             display_value(&meta.build_timestamp)
         );
-        println!(
+        outln!(
             "Schema version (DB): {}",
             display_value(&meta.schema_version)
         );
-        println!("Schema version (app): {}", meta.current_schema_version);
-        println!("Catalog            : {}", published_path.display());
+        outln!("Schema version (app): {}", meta.current_schema_version);
+        outln!("Catalog            : {}", published_path.display());
         // Only worth a line when the two differ: it tells the user this query
         // never touched the network share, and where to look if it went stale.
         if read_path != published_path {
-            println!("Local cache        : {}", read_path.display());
+            outln!("Local cache        : {}", read_path.display());
         }
         if let Some(compat) = meta.compatibility {
-            println!(
+            outln!(
                 "Compatibility      : {}",
                 match compat {
                     SchemaCompatibility::Compatible => "compatible",

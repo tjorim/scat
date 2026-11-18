@@ -1594,6 +1594,61 @@ fn esc_exits_fullscreen_before_quitting() {
     assert!(should_quit, "second Esc should quit");
 }
 
+/// Text from indexed files must not reach the terminal as control sequences
+/// through the TUI either. ratatui drops control characters when it writes
+/// cells; this pins that behaviour, which scat otherwise only relies on by
+/// accident.
+#[test]
+fn control_sequences_in_indexed_text_are_not_rendered() {
+    use ratatui::{Terminal, backend::TestBackend};
+
+    const OSC: &str = "\x1b]0;pwned\x07";
+    let db = super::make_test_db();
+    let mut app = make_app(db.path());
+
+    let hostile = |path: &str| {
+        let mut row = detail_row(path);
+        for field in ["owner", "purpose", "language", "tags", "docstring"] {
+            row.insert(
+                field.to_string(),
+                Value::String(format!("{field}{OSC}x\r\x1b[2J")),
+            );
+        }
+        row
+    };
+    app.results = vec![
+        hostile(&format!("/catalog/scripts/a{OSC}.sh")),
+        hostile("/catalog/scripts/b.sh"),
+    ];
+    app.selected = 0;
+    app.results_state.select(Some(0));
+    app.detail = Some(hostile(&format!("/catalog/scripts/a{OSC}.sh")));
+    app.checkouts = vec![revision_row(
+        "DEVELOP",
+        "20260910_091500",
+        &format!("/dev/t{OSC}"),
+    )];
+
+    for (width, height) in [(80, 24), (160, 50)] {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| super::render::draw(frame, &mut app))
+            .unwrap();
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect();
+        assert!(rendered.contains("owner"), "the hostile rows were drawn");
+        assert!(
+            !rendered.chars().any(char::is_control),
+            "a control character reached the buffer: {rendered:?}"
+        );
+    }
+}
+
 #[test]
 fn results_list_only_renders_the_visible_window() {
     use ratatui::{Terminal, backend::TestBackend};

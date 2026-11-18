@@ -6,6 +6,16 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Plain-text output no longer passes control characters from indexed files to the
+  terminal. A script header such as `# @purpose …<ESC>]0;…` (or a file name) could
+  retitle the window, rewrite earlier lines or write to the clipboard on the terminal of
+  everyone who listed it. `search`, `show`, `deps`, `status`, `symlinks`, `similar`,
+  `diff`, `catalog stats/audit/info/build` and tables now show C0/C1 controls and
+  bidirectional overrides as visible placeholders (`␛`, `\x9b`, `\u{202e}`); one-line
+  values and table cells also replace line breaks and tabs so a file name cannot forge
+  an output line. JSON and CSV stay byte-exact. A TUI test pins that control characters
+  never reach the rendered buffer. The external viewer still shows file content raw by
+  design. Fixes #193.
 - `timestamp_drift` no longer assumes the timestamp in a checkout filename is UTC.
   The clock is now configurable with `vc.timestamp_timezone` (`utc`, the default,
   `local`, or a fixed offset like `+02:00`) and documented in `docs/VC_CONTRACT.md`;

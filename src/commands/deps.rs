@@ -44,12 +44,12 @@ pub fn cmd_deps(
     let related = api.related_scripts(path)?;
     let graph = api.dependency_graph(path)?;
     if graph.uses.is_empty() && graph.used_by.is_empty() && related.is_empty() {
-        println!("No dependencies found for {path}.");
+        outln!("No dependencies found for {path}.");
         return Ok(());
     }
 
     if !graph.uses.is_empty() {
-        println!("Uses:");
+        outln!("Uses:");
         let rows = graph
             .uses
             .iter()
@@ -62,14 +62,14 @@ pub fn cmd_deps(
                 ]
             })
             .collect::<Vec<_>>();
-        println!(
+        outln!(
             "{}",
             render_table(&["Path", "Kind", "Language", "Indexed"], &rows, no_color)
         );
     }
     print_shared_declared_files(api, path, &graph.uses, no_color)?;
     if !graph.used_by.is_empty() {
-        println!("Used by:");
+        outln!("Used by:");
         print_script_table(&graph.used_by, no_color);
     }
     Ok(())
@@ -116,8 +116,8 @@ fn print_shared_declared_files(
         }
     }
     if !rows.is_empty() {
-        println!("Shared with other scripts (declared files not in the catalog):");
-        println!(
+        outln!("Shared with other scripts (declared files not in the catalog):");
+        outln!(
             "{}",
             render_table(&["File", "Here", "Other script", "There"], &rows, no_color)
         );
@@ -156,8 +156,8 @@ fn cmd_deps_declared_file(
         return;
     }
 
-    println!("{path} is not a cataloged script; it is declared in script headers.");
-    println!("Declared by:");
+    outln!("{path} is not a cataloged script; it is declared in script headers.");
+    outln!("Declared by:");
     let rows = declared_by
         .iter()
         .map(|row| {
@@ -169,7 +169,7 @@ fn cmd_deps_declared_file(
             ]
         })
         .collect::<Vec<_>>();
-    println!(
+    outln!(
         "{}",
         render_table(&["Script", "Role", "Owner", "Purpose"], &rows, no_color)
     );
@@ -204,7 +204,7 @@ fn cmd_deps_tree(
     }
 
     if uses.children.is_empty() && used_by.children.is_empty() {
-        println!("No dependencies found for {path}.");
+        outln!("No dependencies found for {path}.");
         return Ok(());
     }
 
@@ -217,11 +217,11 @@ fn cmd_deps_tree(
         if tree.children.is_empty() {
             continue;
         }
-        println!("{heading} (depth ≤ {depth}):");
+        outln!("{heading} (depth ≤ {depth}):");
         for line in render_tree_lines(tree) {
-            println!("{line}");
+            outln!("{line}");
         }
-        println!();
+        outln!();
         legend_repeat |= tree_has(tree, &|n| n.repeated);
         legend_cycle |= tree_has(tree, &|n| n.cycle);
         legend_truncated |= tree_has(tree, &|n| n.truncated);
@@ -229,19 +229,19 @@ fn cmd_deps_tree(
         legend_declared |= tree_has(tree, &|n| n.via_kind.as_deref().is_some_and(is_declared));
     }
     if legend_ref {
-        println!("(ref) referenced by path (copied/executed/manifested), not imported");
+        outln!("(ref) referenced by path (copied/executed/manifested), not imported");
     }
     if legend_declared {
-        println!("(input/output/parent/child/param) declared in an @…file header");
+        outln!("(input/output/parent/child/param) declared in an @…file header");
     }
     if legend_repeat {
-        println!("(*) subtree already shown above");
+        outln!("(*) subtree already shown above");
     }
     if legend_cycle {
-        println!("(cycle) path depends on itself through this chain");
+        outln!("(cycle) path depends on itself through this chain");
     }
     if legend_truncated {
-        println!("(…) children beyond the depth limit; raise with --depth");
+        outln!("(…) children beyond the depth limit; raise with --depth");
     }
     Ok(())
 }

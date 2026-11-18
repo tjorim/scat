@@ -36,10 +36,10 @@ pub fn cmd_audit(
     if json {
         print_json(&result);
     } else {
-        println!("scat audit — {} findings", result.findings.len());
-        println!();
+        outln!("scat audit — {} findings", result.findings.len());
+        outln!();
         for finding in &result.findings {
-            println!(
+            outln!(
                 "{:<5} {:<16} {} — {}",
                 finding.severity.to_uppercase(),
                 finding.check,
@@ -48,11 +48,13 @@ pub fn cmd_audit(
             );
         }
         if !result.findings.is_empty() {
-            println!();
+            outln!();
         }
-        println!(
+        outln!(
             "Summary: {} error, {} warn, {} info",
-            result.summary.error, result.summary.warn, result.summary.info
+            result.summary.error,
+            result.summary.warn,
+            result.summary.info
         );
     }
 

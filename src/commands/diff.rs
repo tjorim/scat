@@ -82,7 +82,7 @@ fn print_script_diff(result: &ScriptDiffResult, json: bool) {
     if json {
         print_json(result);
     } else {
-        print!("{}", render_diff_text(result));
+        out!("{}", render_diff_text(result));
     }
 }
 
@@ -125,9 +125,9 @@ pub fn cmd_diff(
 }
 
 fn print_catalog_diff(diff: &CatalogDiff) {
-    println!("Added ({})", diff.added.len());
+    outln!("Added ({})", diff.added.len());
     for row in &diff.added {
-        println!(
+        outln!(
             "  + {}  {}  {}",
             row.logical_path,
             json_display(&row.language),
@@ -135,9 +135,9 @@ fn print_catalog_diff(diff: &CatalogDiff) {
         );
     }
 
-    println!("\nRemoved ({})", diff.removed.len());
+    outln!("\nRemoved ({})", diff.removed.len());
     for row in &diff.removed {
-        println!(
+        outln!(
             "  - {}  {}  {}",
             row.logical_path,
             json_display(&row.language),
@@ -145,23 +145,23 @@ fn print_catalog_diff(diff: &CatalogDiff) {
         );
     }
 
-    println!("\nChanged ({})", diff.changed.len());
+    outln!("\nChanged ({})", diff.changed.len());
     for row in &diff.changed {
-        println!("  ~ {}", row.logical_path);
+        outln!("  ~ {}", row.logical_path);
         for (field, values) in &row.fields {
-            println!(
+            outln!(
                 "      {field}: {}  ->  {}",
                 json_display(&values[0]),
                 json_display(&values[1])
             );
         }
         if !row.deps_added.is_empty() {
-            println!("      deps added:   {}", row.deps_added.join(", "));
+            outln!("      deps added:   {}", row.deps_added.join(", "));
         }
         if !row.deps_removed.is_empty() {
-            println!("      deps removed: {}", row.deps_removed.join(", "));
+            outln!("      deps removed: {}", row.deps_removed.join(", "));
         }
-        println!();
+        outln!();
     }
 }
 

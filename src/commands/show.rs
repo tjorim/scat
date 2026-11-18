@@ -51,7 +51,7 @@ pub fn cmd_show(
             return Ok(());
         }
         if fns.is_empty() {
-            println!("No function definitions indexed for {resolved_path}.");
+            outln!("No function definitions indexed for {resolved_path}.");
             return Ok(());
         }
         let rows: Vec<Vec<String>> = fns
@@ -67,7 +67,7 @@ pub fn cmd_show(
                 ]
             })
             .collect();
-        println!(
+        outln!(
             "{}",
             render_table(&["Name", "Kind", "Line", "Docstring"], &rows, false)
         );
@@ -170,11 +170,11 @@ pub fn cmd_show(
     }
 
     if let Some(ref target) = symlink_note {
-        println!("{path}");
-        println!("  symlink → {target}");
-        println!();
+        outln!("{path}");
+        outln!("  symlink → {target}");
+        outln!();
     }
-    println!("{}", dash_or_empty(view.logical_path()));
+    outln!("{}", dash_or_empty(view.logical_path()));
 
     let needs_deps = effective.iter().any(|f| *f == "uses" || *f == "used_by");
     let graph = needs_deps
@@ -191,13 +191,13 @@ pub fn cmd_show(
 
     for field in &effective {
         match *field {
-            "language" => println!("  Language     : {}", dash_or_empty(view.language())),
-            "owner" => println!("  Owner        : {}", dash_or_empty(view.owner())),
-            "purpose" => println!("  Purpose      : {}", dash_or_empty(view.purpose())),
-            "checkout" => println!("  Checkout     : {}", view.checkout_label()),
-            "size" => println!("  Size         : {}", size_field(view)),
-            "indexed" => println!("  Indexed      : {}", dash_or_empty(view.indexed_at())),
-            "symlink" => println!("  Symlink      : {}", dash_or_empty(view.symlink_target())),
+            "language" => outln!("  Language     : {}", dash_or_empty(view.language())),
+            "owner" => outln!("  Owner        : {}", dash_or_empty(view.owner())),
+            "purpose" => outln!("  Purpose      : {}", dash_or_empty(view.purpose())),
+            "checkout" => outln!("  Checkout     : {}", view.checkout_label()),
+            "size" => outln!("  Size         : {}", size_field(view)),
+            "indexed" => outln!("  Indexed      : {}", dash_or_empty(view.indexed_at())),
+            "symlink" => outln!("  Symlink      : {}", dash_or_empty(view.symlink_target())),
             "linked_by" => {
                 let paths = linked_by.as_deref().unwrap_or_default();
                 let joined = paths
@@ -205,45 +205,45 @@ pub fn cmd_show(
                     .map(|row| ScriptView::new(row).logical_path())
                     .collect::<Vec<_>>()
                     .join(", ");
-                println!("  Linked by    : {}", dash_or_empty(&joined));
+                outln!("  Linked by    : {}", dash_or_empty(&joined));
             }
             "uses" => {
                 if let Some(g) = &graph {
-                    println!("  Uses         : {}", g.uses.len());
+                    outln!("  Uses         : {}", g.uses.len());
                 }
             }
             "used_by" => {
                 if let Some(g) = &graph {
-                    println!("  Used by      : {}", g.used_by.len());
+                    outln!("  Used by      : {}", g.used_by.len());
                 }
             }
-            "folder" => println!("  Folder       : {}", dash_or_empty(view.parent_dir())),
+            "folder" => outln!("  Folder       : {}", dash_or_empty(view.parent_dir())),
             "siblings" => {
                 if let Some(s) = &siblings {
-                    println!("  Siblings     : {}", s.len());
+                    outln!("  Siblings     : {}", s.len());
                 }
             }
-            "mtime" => println!("  Modified     : {}", mtime_field(view)),
-            "tags" => println!(
+            "mtime" => outln!("  Modified     : {}", mtime_field(view)),
+            "tags" => outln!(
                 "  Tags         : {}",
                 list_field_display(view, ListField::Tags)
             ),
             "entry_points" => {
-                println!(
+                outln!(
                     "  Entries      : {}",
                     list_field_display(view, ListField::EntryPoints)
                 );
             }
-            "related" => println!(
+            "related" => outln!(
                 "  Related      : {}",
                 list_field_display(view, ListField::Related)
             ),
             "contributors" => {
                 let contribs = view.contributors();
-                println!("  Contributors : {}", contribs.join(", "));
+                outln!("  Contributors : {}", contribs.join(", "));
             }
-            "usage" => println!("  Usage        : {}", block_field_display(view, "usage")),
-            "description" => println!(
+            "usage" => outln!("  Usage        : {}", block_field_display(view, "usage")),
+            "description" => outln!(
                 "  Description  : {}",
                 block_field_display(view, "description")
             ),
@@ -251,10 +251,10 @@ pub fn cmd_show(
         }
     }
     if vc_configured && !revisions.is_empty() {
-        println!();
-        println!("Revisions");
+        outln!();
+        outln!("Revisions");
         for line in render_revision_lines(revisions) {
-            println!("{line}");
+            outln!("{line}");
         }
     }
     Ok(())

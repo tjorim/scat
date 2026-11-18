@@ -25,77 +25,77 @@ pub fn cmd_stats(
         return Ok(());
     }
 
-    println!("Total scripts: {}", data.total_scripts);
-    println!("\nBy language:");
+    outln!("Total scripts: {}", data.total_scripts);
+    outln!("\nBy language:");
     let by_language = data
         .by_language
         .iter()
         .map(|row| vec![row.language.clone(), row.count.to_string()])
         .collect::<Vec<_>>();
-    println!(
+    outln!(
         "{}",
         render_table(&["Language", "Count"], &by_language, no_color)
     );
-    println!("\nBy owner:");
+    outln!("\nBy owner:");
     let by_owner = data
         .by_owner
         .iter()
         .map(|row| vec![row.owner.clone(), row.count.to_string()])
         .collect::<Vec<_>>();
-    println!("{}", render_table(&["Owner", "Count"], &by_owner, no_color));
+    outln!("{}", render_table(&["Owner", "Count"], &by_owner, no_color));
     if !data.most_depended_upon.is_empty() {
-        println!("\nMost depended-upon:");
+        outln!("\nMost depended-upon:");
         let most_depended_upon = data
             .most_depended_upon
             .iter()
             .map(|row| vec![row.logical_path.clone(), row.count.to_string()])
             .collect::<Vec<_>>();
-        println!(
+        outln!(
             "{}",
             render_table(&["Path", "Dependents"], &most_depended_upon, no_color)
         );
     }
     if !data.top_tags.is_empty() {
-        println!("\nTop tags:");
+        outln!("\nTop tags:");
         let top_tags = data
             .top_tags
             .iter()
             .map(|row| vec![row.tag.clone(), row.count.to_string()])
             .collect::<Vec<_>>();
-        println!("{}", render_table(&["Tag", "Count"], &top_tags, no_color));
+        outln!("{}", render_table(&["Tag", "Count"], &top_tags, no_color));
     }
     if !data.most_functions.is_empty() {
-        println!("\nMost functions:");
+        outln!("\nMost functions:");
         let most_functions = data
             .most_functions
             .iter()
             .map(|row| vec![row.logical_path.clone(), row.count.to_string()])
             .collect::<Vec<_>>();
-        println!(
+        outln!(
             "{}",
             render_table(&["Path", "Functions"], &most_functions, no_color)
         );
     }
     if !data.checkout_by_os.is_empty() {
-        println!("\nCheckouts by OS:");
+        outln!("\nCheckouts by OS:");
         let checkout_by_os = data
             .checkout_by_os
             .iter()
             .map(|row| vec![row.os_flavor.clone(), row.count.to_string()])
             .collect::<Vec<_>>();
-        println!(
+        outln!(
             "{}",
             render_table(&["OS", "Checkouts"], &checkout_by_os, no_color)
         );
     }
     if !data.most_active_checkout_users.is_empty() {
-        println!("\nMost active checkout users:");
+        outln!("\nMost active checkout users:");
         let most_active_checkout_users = data
             .most_active_checkout_users
             .iter()
             .map(|row| vec![row.user.clone(), row.count.to_string()])
             .collect::<Vec<_>>();
-        println!(
+        outln!(
             "{}",
             render_table(
                 &["User", "Checkouts"],
@@ -108,13 +108,13 @@ pub fn cmd_stats(
     // never structurally empty — check whether anything actually landed in
     // a bucket instead, same "nothing to show" reasoning as the rankings.
     if data.size_histogram.iter().any(|b| b.count > 0) {
-        println!("\nScript size distribution:");
+        outln!("\nScript size distribution:");
         let size_histogram = data
             .size_histogram
             .iter()
             .map(|row| vec![row.label.clone(), row.count.to_string()])
             .collect::<Vec<_>>();
-        println!(
+        outln!(
             "{}",
             render_table(&["Size", "Scripts"], &size_histogram, no_color)
         );
@@ -124,13 +124,13 @@ pub fn cmd_stats(
         .iter()
         .any(|b| b.count > 0)
     {
-        println!("\nCheckout staleness distribution:");
+        outln!("\nCheckout staleness distribution:");
         let checkout_staleness_histogram = data
             .checkout_staleness_histogram
             .iter()
             .map(|row| vec![row.label.clone(), row.count.to_string()])
             .collect::<Vec<_>>();
-        println!(
+        outln!(
             "{}",
             render_table(
                 &["Age", "Checkouts"],
@@ -140,13 +140,13 @@ pub fn cmd_stats(
         );
     }
     if !data.findings_by_check.is_empty() {
-        println!("\nAudit findings by check:");
+        outln!("\nAudit findings by check:");
         let findings_by_check = data
             .findings_by_check
             .iter()
             .map(|row| vec![row.check.clone(), row.count.to_string()])
             .collect::<Vec<_>>();
-        println!(
+        outln!(
             "{}",
             render_table(&["Check", "Findings"], &findings_by_check, no_color)
         );
@@ -159,15 +159,15 @@ pub fn cmd_stats(
         let busiest_note = busiest
             .map(|b| format!(", busiest {} ({} checkouts)", b.date, b.count))
             .unwrap_or_default();
-        println!(
+        outln!(
             "\nCheckout activity: {} day(s) with recorded checkouts{busiest_note}",
             data.checkout_activity_by_day.len()
         );
     }
     if let Some(revisions) = &data.revisions {
-        println!("\nRevision statistics");
+        outln!("\nRevision statistics");
         for line in render_revision_stats_lines(revisions) {
-            println!("{line}");
+            outln!("{line}");
         }
     }
     Ok(())
