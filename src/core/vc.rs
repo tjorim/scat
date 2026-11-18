@@ -6,7 +6,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::core::db::{JsonRow, row_str};
 use crate::error::Result;
@@ -888,13 +888,21 @@ pub fn infer_warnings(conn: &Connection) -> Result<Vec<VcWarning>> {
         warning_count = warnings.len(),
         "completed vc warning inference"
     );
+    // A real catalog yields thousands of these on every nightly build: one
+    // summary line per kind at `info`, the individual warnings (which are
+    // also stored on each script) at `debug`.
+    let mut by_kind: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
     for warning in &warnings {
-        warn!(
+        *by_kind.entry(warning.kind.as_str()).or_default() += 1;
+        debug!(
             logical_path = %warning.logical_path,
             kind = %warning.kind,
             message = %warning.message,
             "generated vc warning"
         );
+    }
+    for (kind, count) in by_kind {
+        info!(kind, count, "generated vc warnings");
     }
 
     Ok(warnings)

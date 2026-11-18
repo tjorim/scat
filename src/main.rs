@@ -7,7 +7,7 @@ use scat_core::core::cache::{CacheOptions, catalog_read_path};
 use scat_core::core::resolve::PathResolver;
 use scat_core::core::search::open_search_api;
 use scat_core::core::vc::load_vc_config;
-use tracing::{error, warn};
+use tracing::{debug, warn};
 
 mod cli;
 mod commands;
@@ -35,7 +35,11 @@ fn main() {
     init_tracing(cli.verbose);
 
     if let Err(e) = run(cli) {
-        error!(error = ?e, "command failed");
+        // Plain stderr, not the logger: `RUST_LOG=off` (or any filter above
+        // `error`) must not turn a failure into a silent exit 1. The full
+        // chain is on one line; `-v` adds the debug representation.
+        eprintln!("error: {e:#}");
+        debug!(error = ?e, "command failed");
         process::exit(1);
     }
 }

@@ -468,6 +468,12 @@ pub(super) fn populate(
         rusqlite::params![build_ts, SCHEMA_VERSION, fingerprint.to_string(),],
     )?;
 
+    result.dependencies_total = tx
+        .query_row("SELECT COUNT(*) FROM dependencies", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .map(|count| count as usize)?;
+
     if let Some(pb) = &finalize_pb {
         pb.finish_and_clear();
     }

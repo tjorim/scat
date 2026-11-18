@@ -36,8 +36,12 @@ pub struct IndexResult {
     /// they were already present and unchanged — from an incrementally
     /// seeded previous build, or from an interrupted attempt being resumed.
     pub scripts_reused: usize,
-    /// Number of dependency edges recorded.
+    /// Number of dependency edges recorded for scripts extracted by this run
+    /// (not counting those carried over with reused scripts).
     pub dependencies_indexed: usize,
+    /// Number of dependency edges in the finished catalog, reused scripts
+    /// included. This is what a summary of "the catalog" should report.
+    pub dependencies_total: usize,
     /// Output database path (the would-be target for a dry run, which
     /// publishes nothing and deletes its scratch database).
     pub db_path: PathBuf,
@@ -235,6 +239,7 @@ pub fn build_index(
         scripts_indexed: 0,
         scripts_reused: 0,
         dependencies_indexed: 0,
+        dependencies_total: 0,
         db_path: tmp_path.clone(),
         dry_run: opts.dry_run,
         errors: Vec::new(),

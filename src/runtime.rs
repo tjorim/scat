@@ -38,6 +38,8 @@ pub fn cmd_vc(args: &[String], json: bool, vc_executable: Option<PathBuf>) -> Re
     let vc_exe = vc_executable.or_else(which_vc);
 
     let Some(vc_exe) = vc_exe else {
+        // Same status in both forms, so a script can tell "vc is not
+        // installed" from "vc ran fine"; the catalog commands stay usable.
         if json {
             print_json(&serde_json::json!({
                 "available": false,
@@ -46,15 +48,15 @@ pub fn cmd_vc(args: &[String], json: bool, vc_executable: Option<PathBuf>) -> Re
                 "stderr": "vc not found on PATH"
             }));
         } else {
-            println!("vc is unavailable; scat remains in read-only catalog mode.");
+            eprintln!("vc is unavailable; scat remains in read-only catalog mode.");
         }
-        return Ok(());
+        process::exit(1);
     };
 
     let mut cmd = process::Command::new(vc_exe);
     cmd.args(args);
     let output = cmd.output()?;
-    let returncode = output.status.code().unwrap_or(1);
+    let returncode = exit_status_code(output.status);
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
 
@@ -78,6 +80,17 @@ pub fn cmd_vc(args: &[String], json: bool, vc_executable: Option<PathBuf>) -> Re
         process::exit(returncode);
     }
     Ok(())
+}
+
+/// The exit status to report for a finished child: its own code, or `128 +
+/// signal` (the shell convention) when a signal killed it, so "vc crashed" is
+/// distinguishable from "vc exited 1".
+pub fn exit_status_code(status: process::ExitStatus) -> i32 {
+    use std::os::unix::process::ExitStatusExt;
+    status
+        .code()
+        .or_else(|| status.signal().map(|signal| 128 + signal))
+        .unwrap_or(1)
 }
 
 pub fn init_tracing(verbose: u8) {
