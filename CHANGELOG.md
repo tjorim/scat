@@ -6,6 +6,14 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Embeddings (#192). `scat-embed` is incremental: each vector records a hash of the text it
+  was computed from, and a run reuses every unchanged script's vector from `--previous`
+  (default: the existing `--output`) and embeds only the rest, in batches of
+  `--batch-size` with a progress line; a killed run resumes from the batches it committed,
+  and a run with nothing to embed never loads the model. Data files (csv/text/lst) are
+  skipped unless `--include-data-files`. On the `scat` side, vectors are normalised once at
+  load (a similarity is a dot product), the pairwise `near-duplicates` and `outliers`
+  checks run on all cores, and path lookups are hash lookups. No sidecar format bump.
 - The host-local catalog cache is bounded and manageable (#191). `scat cache status`,
   `prune` and `clear` list, tidy and empty it; entries record their last use and
   published path, and a refresh drops entries unused for 14 days and abandoned scratch

@@ -58,6 +58,12 @@ Embeddings sidecar format (`SIDECAR_FORMAT_VERSION` in `src/core/embeddings.rs`)
 |--------|--------|-------|
 | 1 | current | Includes sidecars written before `embedding_metadata` existed (no provenance) |
 
+`scat-embed` also records a nullable `text_hash` column in `script_embeddings`
+(a hash of the exact text that was embedded) so later runs can reuse unchanged
+vectors. It is additive: clients select the columns they need by name, so it
+needs no format bump, and a sidecar without it (written by an earlier
+`scat-embed`) simply has nothing reused.
+
 A test fails if either table stops listing the compiled-in version as
 `current`, so a bump cannot merge without updating this document.
 
