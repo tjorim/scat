@@ -134,6 +134,18 @@ made its first WAL-mode access, which is why `create_build_db` sets it before
 the `journal_mode` switch and `apply_bulk_build_pragmas` sets it before
 anything else on a resumed build's reopened connection.
 
+**Lifecycle and cleanup.** The WIP database is always `<db>.wip`, built in
+place and never renamed, so SQLite's `-wal`/`-journal` sidecars can't be
+separated from it. A build holds an exclusive `flock` on `<db>.lock` (a second
+build fails fast; the lock file is left in place). On every exit path the
+scratch files are removed (`indexer::scratch::ScratchGuard`) except after an
+interrupt, which keeps `<db>.wip` plus `<db>.wip.ckpt` for the next run to
+resume (re-checking each checkpointed file's size/mtime/content). A dry run
+builds in a private `.scat-dryrun-*` directory beside the catalog and deletes
+it; it takes no lock and never touches a real build's resume state. At the
+start of a real build, `.tmpXXXXXX` leftovers of earlier versions and killed
+dry runs older than a day are swept.
+
 **Rule:** `create_db` stays in normal locking mode. Only the indexer's own
 WIP connections are exclusive; a general caller holding a write connection
 must still be able to open the same file again.

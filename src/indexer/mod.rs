@@ -11,5 +11,7 @@ pub mod extractor;
 mod scan_tree;
 /// File-system scanner and language detection.
 pub mod scanner;
+/// Build lock, scratch-file cleanup guard and abandoned-file sweep.
+pub mod scratch;
 /// Tree-sitter based dependency extraction for Python and shell.
 pub mod treesitter_deps;

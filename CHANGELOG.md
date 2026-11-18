@@ -6,6 +6,19 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Interrupted `scat catalog build` runs now actually resume. The work-in-progress
+  database was rejected as corrupt on every re-run (its metadata row is only written
+  at the end of a build) and renamed while its WAL was still open; it is now built in
+  place at `<db>.wip`, validated by integrity check only, and the checkpointed files
+  are re-checked against the disk before being reused. A Ctrl-C that arrives during
+  the final phase publishes the finished build instead of discarding it. Fixes #176.
+- Builds no longer leak scratch databases next to the published catalog: `--dry-run`
+  builds in a private directory and deletes it, every failure path removes the work
+  files and their `-wal`/`-journal` sidecars, and leftovers of earlier versions
+  (`.tmpXXXXXX`, older than a day) are swept at the start of a build. Two overlapping
+  builds of the same catalog can no longer collide: the second one fails fast on an
+  exclusive lock (`<db>.lock`). A dry run no longer deletes a real build's resume
+  state, and its summary names the path a real run would publish to. Fixes #180.
 - Piping scat into a command that closes the pipe early (`scat search … | head`,
   `| less` then `q`) no longer panics, or aborts with `SIGABRT` in release builds;
   scat now ends quietly like other Unix filters. Fixes #181.

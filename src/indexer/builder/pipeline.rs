@@ -29,6 +29,15 @@ use super::IndexResult;
 /// while still giving each batch enough work to spread well across cores.
 const EXTRACT_BATCH_SIZE: usize = 200;
 
+#[cfg(test)]
+thread_local! {
+    /// Test hook: raise the shutdown flag once this many scripts have been
+    /// newly extracted in phase 2, so interrupt/resume paths can be exercised
+    /// deterministically (there is no other way to land a Ctrl-C mid-phase).
+    pub(super) static INTERRUPT_AFTER_SCRIPTS: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
 thread_local! {
     // One TreeSitterExtractor per worker thread, reused across every batch
     // for that thread's lifetime rather than rebuilt (two fresh parsers)
@@ -133,13 +142,18 @@ pub(super) fn populate(
     // re-extraction"; they share `already_indexed` since only one applies on
     // any given run (incremental seeding only happens on a fresh, non-resume
     // attempt — see the caller).
-    let mut already_indexed = resume_checkpoint
-        .as_ref()
-        .map(|c| c.indexed.clone())
-        .unwrap_or_default();
-
-    if incremental {
+    let resuming = resume_checkpoint.is_some();
+    let mut already_indexed: HashSet<String> = HashSet::new();
+    if incremental || resuming {
         seed_from_existing_database(&tx, &records, &mut already_indexed)?;
+    }
+    // A checkpoint only vouches for the paths it lists, and only while their
+    // size/mtime/content still match the stored rows: files can change
+    // between the interrupted attempt and this one. Rows carried over from an
+    // incremental seed that the interrupted run never re-extracted aren't in
+    // the checkpoint either, so they are extracted now.
+    if let Some(ckpt) = &resume_checkpoint {
+        already_indexed.retain(|path| ckpt.indexed.contains(path));
     }
 
     // Count how many we are actually going to process.
@@ -176,7 +190,7 @@ pub(super) fn populate(
     // When resuming or building incrementally, `scripts` already has rows
     // from before this run started, so seed the display counters from it —
     // otherwise the "python N shell M" progress message would undercount.
-    let (mut python_count, mut shell_count) = if resume_checkpoint.is_some() || incremental {
+    let (mut python_count, mut shell_count) = if resuming || incremental {
         let mut py_count = 0usize;
         let mut sh_count = 0usize;
         {
@@ -205,7 +219,7 @@ pub(super) fn populate(
         // Check for Ctrl-C interrupt before starting the next batch's
         // (parallel, not itself interruptible mid-flight) extraction.
         if shutdown.load(Ordering::SeqCst) {
-            checkpoint_for_resume(tx, db_path, result, newly_indexed, dry_run)?;
+            checkpoint_for_resume(tx, db_path, newly_indexed, dry_run)?;
             return Err(Error::Interrupted);
         }
 
@@ -226,7 +240,7 @@ pub(super) fn populate(
         for (record, extraction) in extracted {
             // Check for Ctrl-C interrupt.
             if shutdown.load(Ordering::SeqCst) {
-                checkpoint_for_resume(tx, db_path, result, newly_indexed, dry_run)?;
+                checkpoint_for_resume(tx, db_path, newly_indexed, dry_run)?;
                 return Err(Error::Interrupted);
             }
 
@@ -245,6 +259,12 @@ pub(super) fn populate(
                     result.scripts_indexed += 1;
                     result.dependencies_indexed += dep_count;
                     newly_indexed.insert(record.physical_path.clone());
+                    #[cfg(test)]
+                    if INTERRUPT_AFTER_SCRIPTS.get()
+                        == Some(result.scripts_indexed - result.scripts_reused)
+                    {
+                        shutdown.store(true, Ordering::SeqCst);
+                    }
                     match record.language.as_str() {
                         "python" => python_count += 1,
                         "shell" => shell_count += 1,
@@ -281,7 +301,7 @@ pub(super) fn populate(
     // instead of waiting for phase 3 (which has no per-record progress of
     // its own) to run to completion first.
     if shutdown.load(Ordering::SeqCst) {
-        checkpoint_for_resume(tx, db_path, result, newly_indexed, dry_run)?;
+        checkpoint_for_resume(tx, db_path, newly_indexed, dry_run)?;
         return Err(Error::Interrupted);
     }
 
@@ -462,10 +482,13 @@ pub(super) fn populate(
 /// Commit the in-progress transaction and write a resume checkpoint so a
 /// subsequent run can skip already-indexed scripts. Used both when Ctrl-C
 /// fires mid-loop in phase 2 and when it fires between phase 2 and phase 3.
+///
+/// The build database already lives at `<db>.wip` (see `build_index`), so
+/// committing is all it takes for its content to be consistent; the caller
+/// drops the connection (checkpointing the `-wal`) when `populate` returns.
 fn checkpoint_for_resume(
     tx: rusqlite::Transaction<'_>,
     db_path: &Path,
-    result: &IndexResult,
     newly_indexed: HashSet<String>,
     dry_run: bool,
 ) -> Result<()> {
@@ -476,13 +499,6 @@ fn checkpoint_for_resume(
         };
         if let Err(e) = write_checkpoint(db_path, &ckpt) {
             warn!(error = %e, "failed to write resume checkpoint — progress cannot be resumed");
-        }
-        // Rename tmp_path → wip_path so the resume logic can find it.
-        let wip = crate::indexer::checkpoint::wip_path(db_path);
-        if result.db_path != wip
-            && let Err(e) = std::fs::rename(&result.db_path, &wip)
-        {
-            warn!(error = %e, "failed to rename WIP database — resume may not work");
         }
     }
     Ok(())
