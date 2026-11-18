@@ -7,6 +7,8 @@ pub mod builder;
 pub mod checkpoint;
 /// Metadata extraction from script headers and docstrings.
 pub mod extractor;
+/// Fingerprint of a build's inputs, for skip, reuse and resume decisions.
+pub mod fingerprint;
 /// Live multi-line directory tree view for interactive scan progress.
 mod scan_tree;
 /// File-system scanner and language detection.

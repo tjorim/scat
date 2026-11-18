@@ -28,6 +28,11 @@ use crate::error::Result;
 pub struct Checkpoint {
     /// Physical paths that have already been written to the WIP database.
     pub indexed: HashSet<String>,
+    /// [`BuildFingerprint`](crate::indexer::fingerprint::BuildFingerprint) of
+    /// the interrupted build. A run with different inputs must not continue
+    /// it. Empty in checkpoints written by older versions, which never match.
+    #[serde(default)]
+    pub fingerprint: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -122,6 +127,7 @@ mod tests {
             ]
             .into_iter()
             .collect(),
+            fingerprint: "fp".to_string(),
         };
 
         write_checkpoint(&db_path, &ckpt).unwrap();

@@ -1490,12 +1490,8 @@ fn build_respects_catignore_and_explicit_ignore_files() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn max_mtime_returns_none_for_no_files() {
-    let dir = tempfile::TempDir::new().unwrap();
-    // Empty directory — no files present at all.
-    let mtime =
-        scat_core::indexer::scanner::max_mtime_in_roots(&[dir.path().to_path_buf()], &[], &[])
-            .unwrap();
+fn max_mtime_returns_none_for_no_roots() {
+    let mtime = scat_core::indexer::scanner::max_mtime_in_roots(&[], &[], &[]).unwrap();
     assert!(mtime.is_none());
 }
 

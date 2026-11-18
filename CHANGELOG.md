@@ -6,6 +6,15 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- `scat catalog build` no longer reports "catalog is up to date" while the catalog is
+  stale. The check now notices deleted scripts, files moved in with an old mtime
+  (directory mtimes count), added or removed DEVELOP/ARCHIVE checkouts, and changes to
+  scan roots, ignore files or patterns, checkout directory names, `--head-lines` or the vc
+  manifest, via a fingerprint of the build inputs recorded in the catalog. The same
+  fingerprint stops incremental builds from reusing rows extracted by a different scat
+  version or `--head-lines`, so extractor improvements reach unchanged scripts, and keeps
+  a resumed build from continuing a checkpoint made with other inputs. The first build
+  after upgrading is therefore a full one. No schema change. Fixes #177.
 - Configuration mistakes are no longer ignored silently. A `--config` / `SCAT_CONFIG`
   path that does not exist is an error (it used to run with defaults, losing `db_path`,
   bookmarks and scan roots when a share was unmounted); unknown keys, at any level,

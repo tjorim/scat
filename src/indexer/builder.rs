@@ -13,6 +13,7 @@ use crate::indexer::atomic::{atomic_swap, rotate_copies};
 use crate::indexer::checkpoint::{
     Checkpoint, ckpt_path, delete_checkpoint, delete_wip_pair, read_checkpoint, wip_path,
 };
+use crate::indexer::fingerprint::BuildFingerprint;
 use crate::indexer::scratch::{
     BuildLock, DRY_RUN_DIR_PREFIX, ScratchGuard, remove_sqlite_files, sweep_abandoned,
 };
@@ -126,6 +127,9 @@ pub fn build_index(
         opts.head_lines
     };
 
+    let fingerprint =
+        BuildFingerprint::compute(scan_roots, head_lines, &opts.ignore_files, &vc_config);
+
     // Determine whether progress output is enabled.
     let use_progress = !opts.quiet && stderr_is_tty();
 
@@ -172,6 +176,10 @@ pub fn build_index(
         // A WIP of a fresh build has no `index_metadata` row yet (that is
         // written when a build completes), so only its integrity is checked.
         let resumable = match read_checkpoint(db_path) {
+            Ok(Some(ckpt)) if ckpt.fingerprint != fingerprint.to_string() => {
+                debug!("checkpoint was made with different build inputs, starting fresh");
+                None
+            }
             Ok(Some(ckpt)) if wip.exists() => match validate_integrity(&wip) {
                 Ok(()) => Some(ckpt),
                 Err(e) => {
@@ -215,7 +223,13 @@ pub fn build_index(
         && !opts.dry_run
         && !opts.no_incremental
         && db_path.exists()
-        && crate::core::db::schema_version_of(db_path) == Some(crate::core::db::SCHEMA_VERSION);
+        && crate::core::db::schema_version_of(db_path) == Some(crate::core::db::SCHEMA_VERSION)
+        // Rows of unchanged scripts are only reusable if they were extracted
+        // the way this build would extract them; otherwise improvements to
+        // the extractors would never reach a script until it is edited.
+        && crate::core::db::build_fingerprint_of(db_path)
+            .and_then(|stored| BuildFingerprint::parse(&stored))
+            .is_some_and(|previous| previous.extraction == fingerprint.extraction);
 
     let mut result = IndexResult {
         scripts_indexed: 0,
@@ -291,6 +305,7 @@ pub fn build_index(
             &vc_config,
             db_path,
             resume_checkpoint,
+            &fingerprint,
             &shutdown,
             use_progress,
             opts.dry_run,
@@ -1222,5 +1237,69 @@ mod tests {
 
         build_index(std::slice::from_ref(&root), &db, quiet_opts()).unwrap();
         assert!(!leftover.exists());
+    }
+
+    #[test]
+    fn changed_extraction_settings_stop_incremental_reuse() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = scripts_tree(dir.path(), 5);
+        let db = dir.path().join("c.sqlite");
+        build_index(std::slice::from_ref(&root), &db, quiet_opts()).unwrap();
+
+        let same = build_index(std::slice::from_ref(&root), &db, quiet_opts()).unwrap();
+        assert_eq!(same.scripts_reused, 5, "identical settings still reuse");
+
+        // `head_lines` is part of how every script is read, so the stored
+        // rows can't be trusted for scripts nobody edited.
+        let changed = build_index(
+            std::slice::from_ref(&root),
+            &db,
+            BuildOptions {
+                head_lines: 25,
+                ..quiet_opts()
+            },
+        )
+        .unwrap();
+        assert_eq!(changed.scripts_reused, 0);
+        assert_eq!(changed.scripts_indexed, 5);
+    }
+
+    #[test]
+    fn a_catalog_from_an_older_scat_without_a_fingerprint_is_rebuilt_in_full() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = scripts_tree(dir.path(), 3);
+        let db = dir.path().join("c.sqlite");
+        build_index(std::slice::from_ref(&root), &db, quiet_opts()).unwrap();
+        // What an older scat stored: just the manifest fingerprint.
+        Connection::open(&db)
+            .unwrap()
+            .execute(
+                "UPDATE index_metadata SET manifest_fingerprint = 'abc123'",
+                [],
+            )
+            .unwrap();
+
+        let result = build_index(std::slice::from_ref(&root), &db, quiet_opts()).unwrap();
+        assert_eq!(result.scripts_reused, 0);
+    }
+
+    #[test]
+    fn a_checkpoint_from_different_build_inputs_is_not_resumed() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = scripts_tree(dir.path(), 6);
+        let db = dir.path().join("c.sqlite");
+        interrupted_build(&root, &db, 3);
+
+        let result = build_index(
+            std::slice::from_ref(&root),
+            &db,
+            BuildOptions {
+                head_lines: 25,
+                ..quiet_opts()
+            },
+        )
+        .unwrap();
+        assert_eq!(result.scripts_reused, 0, "the old checkpoint is discarded");
+        assert_eq!(result.scripts_indexed, 6);
     }
 }

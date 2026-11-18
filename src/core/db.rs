@@ -309,6 +309,9 @@ CREATE TABLE IF NOT EXISTS index_metadata (
     id              INTEGER PRIMARY KEY CHECK (id = 1),
     build_timestamp TEXT    NOT NULL,
     schema_version  INTEGER NOT NULL,
+    -- Internal to the indexer: the fingerprint of the build's inputs (see
+    -- `indexer::fingerprint`). The column predates that and held only the vc
+    -- manifest's fingerprint; it keeps its name so the schema is unchanged.
     manifest_fingerprint TEXT NOT NULL DEFAULT ''
 );
 ";
@@ -493,6 +496,19 @@ pub fn schema_version_of(path: &Path) -> Option<i64> {
     let conn = open_readonly(path).ok()?;
     conn.query_row(
         "SELECT schema_version FROM index_metadata WHERE id = 1",
+        [],
+        |row| row.get(0),
+    )
+    .ok()
+}
+
+/// The build fingerprint stored in an existing database's `index_metadata`
+/// row (see `indexer::fingerprint`), or `None` if `path` can't be read or has
+/// no row. Only meaningful for a database of the current schema.
+pub fn build_fingerprint_of(path: &Path) -> Option<String> {
+    let conn = open_readonly(path).ok()?;
+    conn.query_row(
+        "SELECT manifest_fingerprint FROM index_metadata WHERE id = 1",
         [],
         |row| row.get(0),
     )
