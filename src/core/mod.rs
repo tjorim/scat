@@ -1,5 +1,7 @@
 /// Host-local (tmpfs) cache of the shared catalog database.
 pub mod cache;
+/// The configuration file and its environment overrides.
+pub mod config;
 /// SQLite schema and query helpers.
 pub mod db;
 /// Script-level diff: compare active catalog content against vc checkouts or files.

@@ -19,13 +19,10 @@ use tempfile::NamedTempFile;
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Build a config whose single `scan_root` lives under `<parent>/<os>/<root_name>`,
-/// so that `os_flavor` derives to `<os>`.
-fn make_config(scan_root: &std::path::Path) -> VcConfig {
-    VcConfig {
-        scan_roots: vec![scan_root.to_path_buf()],
-        ..Default::default()
-    }
+/// The scan roots and default config for a single `scan_root` that lives under
+/// `<parent>/<os>/<root_name>`, so that `os_flavor` derives to `<os>`.
+fn make_config(scan_root: &std::path::Path) -> (Vec<std::path::PathBuf>, VcConfig) {
+    (vec![scan_root.to_path_buf()], VcConfig::default())
 }
 
 /// Write an empty file whose name follows the checkout convention.
@@ -117,8 +114,8 @@ fn scan_checkouts_finds_develop_at_scan_root_level() {
     touch_checkout(&develop, "health_20240315_1500_alice");
     std::fs::write(develop.join("README.txt"), b"ignored").unwrap();
 
-    let config = make_config(&scan_root);
-    let records = scan_checkouts(&config);
+    let (roots, config) = make_config(&scan_root);
+    let records = scan_checkouts(&roots, &config);
 
     assert_eq!(
         records.len(),
@@ -144,8 +141,8 @@ fn scan_checkouts_skips_hidden_checkout_metadata_file() {
     touch_checkout(&develop, "deploy_20240315_1430_jdoe");
     touch_checkout(&develop, ".deploy_20240315_1430_jdoe");
 
-    let config = make_config(&scan_root);
-    let records = scan_checkouts(&config);
+    let (roots, config) = make_config(&scan_root);
+    let records = scan_checkouts(&roots, &config);
 
     assert_eq!(
         records.len(),
@@ -173,8 +170,8 @@ fn scan_checkouts_skips_merge_conflict_backup_and_merged_files() {
     touch_checkout(&develop, "deploy_20240315_1430_jdoe.org");
     touch_checkout(&develop, "deploy_20240315_1430_jdoe.merged");
 
-    let config = make_config(&scan_root);
-    let records = scan_checkouts(&config);
+    let (roots, config) = make_config(&scan_root);
+    let records = scan_checkouts(&roots, &config);
 
     assert_eq!(
         records.len(),
@@ -193,8 +190,8 @@ fn scan_checkouts_records_user_timestamp_and_os_flavor() {
 
     touch_checkout(&develop, "script_20240315_1430_jdoe");
 
-    let config = make_config(&scan_root);
-    let records = scan_checkouts(&config);
+    let (roots, config) = make_config(&scan_root);
+    let records = scan_checkouts(&roots, &config);
 
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].user, "jdoe");
@@ -216,8 +213,8 @@ fn scan_checkouts_reclassifies_rollback_displaced_develop_entry() {
 
     touch_checkout(&develop, "deploy_20260910_120000_RB_abcd");
 
-    let config = make_config(&scan_root);
-    let records = scan_checkouts(&config);
+    let (roots, config) = make_config(&scan_root);
+    let records = scan_checkouts(&roots, &config);
 
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].revision_type, REVISION_TYPE_ROLLBACK);
@@ -239,8 +236,8 @@ fn scan_checkouts_does_not_reclassify_a_genuine_user_named_rb() {
 
     touch_checkout(&develop, "deploy_20260910_120000_rballoy");
 
-    let config = make_config(&scan_root);
-    let records = scan_checkouts(&config);
+    let (roots, config) = make_config(&scan_root);
+    let records = scan_checkouts(&roots, &config);
 
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].revision_type, REVISION_TYPE_DEVELOP);
@@ -258,8 +255,8 @@ fn scan_checkouts_does_not_reclassify_bare_rb_marker_with_no_abbreviation() {
 
     touch_checkout(&develop, "deploy_20260910_120000_RB_");
 
-    let config = make_config(&scan_root);
-    let records = scan_checkouts(&config);
+    let (roots, config) = make_config(&scan_root);
+    let records = scan_checkouts(&roots, &config);
 
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].revision_type, REVISION_TYPE_DEVELOP);
@@ -281,8 +278,8 @@ fn scan_checkouts_handles_seconds_and_userless_archive_names() {
     touch_checkout(&archive, "update_board_firmware.sh_20240921_135312");
     touch_checkout(&archive, "update_board_firmware.sh_20240610");
 
-    let config = make_config(&scan_root);
-    let mut records = scan_checkouts(&config);
+    let (roots, config) = make_config(&scan_root);
+    let mut records = scan_checkouts(&roots, &config);
     records.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
 
     assert_eq!(records.len(), 3);
@@ -309,8 +306,7 @@ fn scan_checkouts_handles_seconds_and_userless_archive_names() {
 
 #[test]
 fn scan_checkouts_returns_empty_when_no_scan_roots() {
-    let config = VcConfig::default();
-    let records = scan_checkouts(&config);
+    let records = scan_checkouts(&[], &VcConfig::default());
     assert!(records.is_empty());
 }
 
@@ -321,8 +317,8 @@ fn scan_checkouts_returns_empty_when_no_develop_or_archive() {
     std::fs::create_dir_all(&scan_root).unwrap();
     // No DEVELOP or ARCHIVE dirs
 
-    let config = make_config(&scan_root);
-    let records = scan_checkouts(&config);
+    let (roots, config) = make_config(&scan_root);
+    let records = scan_checkouts(&roots, &config);
     assert!(records.is_empty());
 }
 
@@ -343,8 +339,8 @@ fn scan_checkouts_anchors_logical_path_at_scan_root() {
     touch_checkout(&develop, "source_scan.sh_20260729_150613_userA");
     touch_checkout(&archive, "source_scan.sh_20220207_150200");
 
-    let config = make_config(&scan_root);
-    let records = scan_checkouts(&config);
+    let (roots, config) = make_config(&scan_root);
+    let records = scan_checkouts(&roots, &config);
 
     assert_eq!(records.len(), 2);
     let expected = scan_root
@@ -370,8 +366,8 @@ fn scan_checkouts_includes_archive_records() {
 
     touch_checkout(&archive, "tool.py_20240101_0900_bob");
 
-    let config = make_config(&scan_root);
-    let records = scan_checkouts(&config);
+    let (roots, config) = make_config(&scan_root);
+    let records = scan_checkouts(&roots, &config);
 
     assert_eq!(records.len(), 1);
     assert_eq!(
@@ -396,8 +392,8 @@ fn scan_checkouts_finds_develop_in_subfolder() {
 
     touch_checkout(&subdir_develop, "report_20240315_1430_jdoe");
 
-    let config = make_config(&scan_root);
-    let records = scan_checkouts(&config);
+    let (roots, config) = make_config(&scan_root);
+    let records = scan_checkouts(&roots, &config);
 
     assert_eq!(records.len(), 1);
     assert_eq!(
@@ -416,8 +412,8 @@ fn scan_checkouts_finds_archive_in_subfolder() {
 
     touch_checkout(&subdir_archive, "report_20240101_1000_alice");
 
-    let config = make_config(&scan_root);
-    let records = scan_checkouts(&config);
+    let (roots, config) = make_config(&scan_root);
+    let records = scan_checkouts(&roots, &config);
 
     assert_eq!(records.len(), 1);
     assert_eq!(
@@ -439,8 +435,8 @@ fn scan_checkouts_mixed_root_and_subfolder() {
     touch_checkout(&root_develop, "deploy_20240315_1430_jdoe");
     touch_checkout(&sub_develop, "helper_20240315_1430_alice");
 
-    let config = make_config(&scan_root);
-    let records = scan_checkouts(&config);
+    let (roots, config) = make_config(&scan_root);
+    let records = scan_checkouts(&roots, &config);
 
     assert_eq!(records.len(), 2);
     let paths: Vec<&str> = records.iter().map(|r| r.logical_path.as_str()).collect();
@@ -466,11 +462,11 @@ fn scan_checkouts_deduplicates_symlinked_scan_roots() {
     std::os::unix::fs::symlink(&linux_scripts, alt.join("scripts")).unwrap();
     let alt_scripts = alt.join("scripts");
 
+    let roots = vec![linux_scripts, alt_scripts];
     let config = VcConfig {
-        scan_roots: vec![linux_scripts, alt_scripts],
         ..Default::default()
     };
-    let records = scan_checkouts(&config);
+    let records = scan_checkouts(&roots, &config);
 
     assert_eq!(
         records.len(),
@@ -500,8 +496,8 @@ fn scan_checkouts_finds_deeply_nested_develop_and_archive() {
     touch_checkout(&deep_develop, "tool.py_20240315_143044_jdoe");
     touch_checkout(&deep_archive, "old.py_20240101_1000");
 
-    let config = make_config(&scan_root);
-    let mut records = scan_checkouts(&config);
+    let (roots, config) = make_config(&scan_root);
+    let mut records = scan_checkouts(&roots, &config);
     records.sort_by(|a, b| a.logical_path.cmp(&b.logical_path));
 
     assert_eq!(records.len(), 2);
@@ -534,13 +530,13 @@ fn scan_checkouts_uses_configured_develop_dir_names() {
     std::fs::create_dir_all(&working).unwrap();
     touch_checkout(&working, "deploy_20240315_1430_jdoe");
 
+    let roots = vec![scan_root.clone()];
     let config = VcConfig {
-        scan_roots: vec![scan_root.clone()],
         develop_dirs: vec!["WORKING".to_string()],
         archive_dirs: vec![],
         ..Default::default()
     };
-    let records = scan_checkouts(&config);
+    let records = scan_checkouts(&roots, &config);
 
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].revision_type, REVISION_TYPE_DEVELOP);
@@ -559,13 +555,13 @@ fn scan_checkouts_uses_configured_archive_dir_names() {
     std::fs::create_dir_all(&history).unwrap();
     touch_checkout(&history, "tool_20240101_0900_bob");
 
+    let roots = vec![scan_root.clone()];
     let config = VcConfig {
-        scan_roots: vec![scan_root.clone()],
         develop_dirs: vec![],
         archive_dirs: vec!["HISTORY".to_string()],
         ..Default::default()
     };
-    let records = scan_checkouts(&config);
+    let records = scan_checkouts(&roots, &config);
 
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].revision_type, REVISION_TYPE_ARCHIVE);
@@ -584,13 +580,13 @@ fn scan_checkouts_default_dirs_not_discovered_with_custom_config() {
     std::fs::create_dir_all(&develop).unwrap();
     touch_checkout(&develop, "deploy_20240315_1430_jdoe");
 
+    let roots = vec![scan_root];
     let config = VcConfig {
-        scan_roots: vec![scan_root],
         develop_dirs: vec!["WORKING".to_string()],
         archive_dirs: vec![],
         ..Default::default()
     };
-    let records = scan_checkouts(&config);
+    let records = scan_checkouts(&roots, &config);
 
     assert!(
         records.is_empty(),

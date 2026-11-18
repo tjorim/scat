@@ -53,22 +53,43 @@ thread_local! {
 // rusqlite's `FromSql` isn't implemented for `usize` (its width is
 // platform-dependent), so counts must be read as `i64` and cast, not read
 // directly as `usize`.
-#[allow(clippy::too_many_arguments, clippy::needless_type_cast)]
+/// Everything one `populate` run needs besides the database connection and the
+/// result it fills in.
+pub(super) struct Populate<'a> {
+    pub scan_roots: &'a [PathBuf],
+    pub head_lines: usize,
+    pub ignore_files: &'a [PathBuf],
+    pub vc_config: &'a VcConfig,
+    /// The published catalog's path (checkpoints live next to it).
+    pub db_path: &'a Path,
+    pub resume_checkpoint: Option<Checkpoint>,
+    pub fingerprint: &'a BuildFingerprint,
+    pub shutdown: &'a AtomicBool,
+    pub use_progress: bool,
+    pub dry_run: bool,
+    /// Seeded from the previous completed build.
+    pub incremental: bool,
+}
+
+#[allow(clippy::needless_type_cast)]
 pub(super) fn populate(
     conn: &mut Connection,
-    scan_roots: &[PathBuf],
-    head_lines: usize,
-    ignore_files: &[PathBuf],
     result: &mut IndexResult,
-    vc_config: &VcConfig,
-    db_path: &Path,
-    resume_checkpoint: Option<Checkpoint>,
-    fingerprint: &BuildFingerprint,
-    shutdown: &AtomicBool,
-    use_progress: bool,
-    dry_run: bool,
-    incremental: bool,
+    params: Populate<'_>,
 ) -> Result<()> {
+    let Populate {
+        scan_roots,
+        head_lines,
+        ignore_files,
+        vc_config,
+        db_path,
+        resume_checkpoint,
+        fingerprint,
+        shutdown,
+        use_progress,
+        dry_run,
+        incremental,
+    } = params;
     let build_ts = chrono::Utc::now().to_rfc3339();
 
     // -----------------------------------------------------------------------
@@ -335,13 +356,8 @@ pub(super) fn populate(
 
     set_finalize_msg("Recording checkouts…");
     debug!(phase = "scan_checkouts", "starting scan_checkouts phase");
-    // The roots this build actually scanned, not whatever the config file
-    // lists: `--scan-root` builds have an empty `vc_config.scan_roots`.
-    let checkout_config = VcConfig {
-        scan_roots: scan_roots.to_vec(),
-        ..vc_config.clone()
-    };
-    let checkouts = scan_checkouts(&checkout_config);
+    // The roots this build actually scanned (`--scan-root` or configured).
+    let checkouts = scan_checkouts(scan_roots, vc_config);
     debug!(
         phase = "scan_checkouts",
         checkout_count = checkouts.len(),

@@ -1,5 +1,5 @@
 use super::deps::{cmd_deps, render_tree_lines};
-use super::diff::cmd_script_diff_catalog;
+use super::diff::{ScriptDiffOpts, cmd_script_diff_catalog};
 use super::index::should_skip_catalog_rebuild;
 use super::search::query_looks_like_path;
 use super::show::{cmd_show, render_revision_lines, revisions_to_json};
@@ -270,11 +270,10 @@ fn cmd_script_diff_catalog_selects_revision_by_type_and_narrowing() {
     cmd_script_diff_catalog(
         &api,
         "/catalog/scripts/a.py",
-        None,
-        Some("ARCHIVE"),
-        None,
-        None,
-        false,
+        ScriptDiffOpts {
+            revision_type: Some("ARCHIVE"),
+            ..ScriptDiffOpts::default()
+        },
     )
     .unwrap();
 
@@ -282,11 +281,12 @@ fn cmd_script_diff_catalog_selects_revision_by_type_and_narrowing() {
     cmd_script_diff_catalog(
         &api,
         "/catalog/scripts/a.py",
-        None,
-        Some("ARCHIVE"),
-        None,
-        Some("20240610"),
-        true,
+        ScriptDiffOpts {
+            revision_type: Some("ARCHIVE"),
+            revision_timestamp: Some("20240610"),
+            json: true,
+            ..ScriptDiffOpts::default()
+        },
     )
     .unwrap();
 }
@@ -299,11 +299,10 @@ fn cmd_script_diff_catalog_errors_when_revision_type_absent() {
     let err = cmd_script_diff_catalog(
         &api,
         "/catalog/scripts/a.py",
-        None,
-        Some("ARCHIVE"),
-        None,
-        None,
-        false,
+        ScriptDiffOpts {
+            revision_type: Some("ARCHIVE"),
+            ..ScriptDiffOpts::default()
+        },
     )
     .unwrap_err();
     assert!(err.to_string().contains("Script diff failed"));

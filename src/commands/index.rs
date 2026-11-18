@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use scat_core::core::config::Config;
 use scat_core::indexer::builder::{BuildOptions, build_index};
 use scat_core::indexer::fingerprint::BuildFingerprint;
 use scat_core::indexer::scanner::max_mtime_in_roots_with_shutdown;
@@ -8,26 +9,49 @@ use tracing::warn;
 
 use crate::output::print_json;
 
-// Each bool is an independent CLI flag passed straight through from clap;
-// grouping them into a struct would just move the same list one level over.
-#[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
-pub fn cmd_index(
-    scan_roots: &[PathBuf],
-    db_path: &Path,
-    head_lines: usize,
-    ignore_files: &[PathBuf],
-    keep_copies: usize,
-    dry_run: bool,
-    config: scat_core::core::vc::VcConfig,
-    json: bool,
-    quiet: bool,
-    no_resume: bool,
-    force: bool,
-    no_incremental: bool,
-    threads: Option<usize>,
-) -> Result<()> {
+/// The `scat catalog build` flags.
+#[derive(Debug, Clone, Copy)]
+pub struct IndexOpts<'a> {
+    /// `--scan-root` (empty falls back to the configured roots).
+    pub scan_roots: &'a [PathBuf],
+    /// `--head-lines`.
+    pub head_lines: usize,
+    /// `--ignore-file`.
+    pub ignore_files: &'a [PathBuf],
+    /// `--keep-copies`.
+    pub keep_copies: usize,
+    /// `--dry-run`.
+    pub dry_run: bool,
+    /// `--json`.
+    pub json: bool,
+    /// `--quiet`.
+    pub quiet: bool,
+    /// `--no-resume`.
+    pub no_resume: bool,
+    /// `--force`.
+    pub force: bool,
+    /// `--no-incremental`.
+    pub no_incremental: bool,
+    /// `--threads`.
+    pub threads: Option<usize>,
+}
+
+pub fn cmd_index(opts: IndexOpts<'_>, db_path: &Path, config: &Config) -> Result<()> {
+    let IndexOpts {
+        scan_roots,
+        head_lines,
+        ignore_files,
+        keep_copies,
+        dry_run,
+        json,
+        quiet,
+        no_resume,
+        force,
+        no_incremental,
+        threads,
+    } = opts;
     let effective_scan_roots: Vec<PathBuf> = if scan_roots.is_empty() {
-        config.scan_roots.clone()
+        config.index.scan_roots.clone()
     } else {
         scan_roots.to_vec()
     };
@@ -41,18 +65,19 @@ pub fn cmd_index(
     // inline patterns from the config.  The temp file must stay alive until
     // after build_index returns, so we keep it in scope here.
     let mut effective_ignore: Vec<PathBuf> = ignore_files.to_vec();
-    let _config_ignore_tmp: Option<tempfile::NamedTempFile> = if config.ignore_patterns.is_empty() {
-        None
-    } else {
-        use std::io::Write;
-        let mut tmp =
-            tempfile::NamedTempFile::new().with_context(|| "Failed to create temp ignore file")?;
-        for pattern in &config.ignore_patterns {
-            writeln!(tmp, "{pattern}")?;
-        }
-        effective_ignore.push(tmp.path().to_path_buf());
-        Some(tmp)
-    };
+    let _config_ignore_tmp: Option<tempfile::NamedTempFile> =
+        if config.index.ignore_patterns.is_empty() {
+            None
+        } else {
+            use std::io::Write;
+            let mut tmp = tempfile::NamedTempFile::new()
+                .with_context(|| "Failed to create temp ignore file")?;
+            for pattern in &config.index.ignore_patterns {
+                writeln!(tmp, "{pattern}")?;
+            }
+            effective_ignore.push(tmp.path().to_path_buf());
+            Some(tmp)
+        };
 
     // Register Ctrl-C handler at the application entry point. The same signal
     // is checked by pre-build change detection and the index build itself.
@@ -72,7 +97,7 @@ pub fn cmd_index(
         && db_path.exists()
         && let Some((indexed_at_secs, indexed_fingerprint)) = read_indexed_at(db_path)
     {
-        let checkout_dirs: Vec<&str> = config.all_checkout_dirs().collect();
+        let checkout_dirs: Vec<&str> = config.vc.all_checkout_dirs().collect();
         let max_mtime = max_mtime_in_roots_with_shutdown(
             &effective_scan_roots,
             &effective_ignore,
@@ -88,7 +113,7 @@ pub fn cmd_index(
             &effective_scan_roots,
             head_lines,
             &effective_ignore,
-            &config,
+            &config.vc,
         )
         .to_string();
         if should_skip_catalog_rebuild(
@@ -114,7 +139,7 @@ pub fn cmd_index(
         ignore_files: effective_ignore,
         keep_copies,
         dry_run,
-        vc_config: Some(config),
+        vc_config: Some(config.vc.clone()),
         quiet: quiet || json,
         no_resume,
         no_incremental,
