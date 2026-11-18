@@ -30,12 +30,26 @@ use crate::runtime::{cmd_vc, init_tracing};
 // ---------------------------------------------------------------------------
 
 fn main() {
+    restore_default_sigpipe();
     let cli = Cli::parse();
     init_tracing(cli.verbose);
 
     if let Err(e) = run(cli) {
         error!(error = ?e, "command failed");
         process::exit(1);
+    }
+}
+
+/// Rust ignores `SIGPIPE`, so a closed pipe (`scat … | head`, `| less` then
+/// `q`) turns into an `EPIPE` error from `println!`, which panics and, with
+/// `panic = "abort"` in release builds, ends in `SIGABRT`. Restoring the
+/// default disposition makes scat end quietly like any other Unix filter.
+/// This also stops the ignore setting leaking into `vc` and other children.
+fn restore_default_sigpipe() {
+    // SAFETY: called first thing in `main`, before any thread is spawned;
+    // `signal` with `SIG_DFL` has no preconditions.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
 }
 

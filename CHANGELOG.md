@@ -6,6 +6,9 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Piping scat into a command that closes the pipe early (`scat search … | head`,
+  `| less` then `q`) no longer panics, or aborts with `SIGABRT` in release builds;
+  scat now ends quietly like other Unix filters. Fixes #181.
 - The TUI now restores the terminal (raw mode, alternate screen, mouse capture,
   bracketed paste, cursor) when it is terminated by a panic, `SIGTERM` or `SIGHUP`
   (for example a closed SSH session). Panics restore it before the message is
