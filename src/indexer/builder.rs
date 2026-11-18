@@ -6,8 +6,9 @@ use indicatif::{ProgressBar, ProgressStyle};
 use rusqlite::Connection;
 use tracing::{debug, warn};
 
+use crate::core::config::load_config;
 use crate::core::db::create_build_db;
-use crate::core::vc::{VcConfig, load_vc_config};
+use crate::core::vc::VcConfig;
 use crate::error::{Error, Result};
 use crate::indexer::atomic::{atomic_swap, rotate_copies};
 use crate::indexer::checkpoint::{
@@ -21,7 +22,7 @@ use crate::indexer::scratch::{
 mod pipeline;
 mod resolve;
 
-use self::pipeline::populate;
+use self::pipeline::{Populate, populate};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -122,7 +123,7 @@ pub fn build_index(
 
     let vc_config = match opts.vc_config {
         Some(c) => c,
-        None => load_vc_config(None)?,
+        None => load_config(None)?.vc,
     };
 
     let head_lines = if opts.head_lines == 0 {
@@ -303,18 +304,20 @@ pub fn build_index(
         debug!(phase = "populate", incremental, "starting populate phase");
         populate(
             &mut conn,
-            scan_roots,
-            head_lines,
-            &opts.ignore_files,
             &mut result,
-            &vc_config,
-            db_path,
-            resume_checkpoint,
-            &fingerprint,
-            &shutdown,
-            use_progress,
-            opts.dry_run,
-            incremental,
+            Populate {
+                scan_roots,
+                head_lines,
+                ignore_files: &opts.ignore_files,
+                vc_config: &vc_config,
+                db_path,
+                resume_checkpoint,
+                fingerprint: &fingerprint,
+                shutdown: &shutdown,
+                use_progress,
+                dry_run: opts.dry_run,
+                incremental,
+            },
         )
     };
 

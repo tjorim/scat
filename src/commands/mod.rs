@@ -10,10 +10,10 @@ mod stats;
 mod status;
 mod symlinks;
 
-pub use audit::cmd_audit;
+pub use audit::{AuditOpts, cmd_audit};
 pub use deps::cmd_deps;
-pub use diff::{cmd_diff, cmd_script_diff_catalog, cmd_script_diff_explicit};
-pub use index::cmd_index;
+pub use diff::{ScriptDiffOpts, cmd_diff, cmd_script_diff_catalog, cmd_script_diff_explicit};
+pub use index::{IndexOpts, cmd_index};
 pub use info::cmd_info;
 #[cfg(test)]
 pub use search::collect_results;

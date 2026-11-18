@@ -7,8 +7,8 @@ use crate::{
 use anyhow::Result;
 use scat_core::core::{
     cache::{CacheOptions, inspect_cache},
+    config::load_config,
     resolve::PathResolver,
-    vc::load_vc_config,
 };
 use serde_json::{Value, json};
 use std::{
@@ -255,10 +255,10 @@ fn local_probe(
     }
 }
 fn catalog(cli: &Cli) -> Value {
-    let Ok(config) = load_vc_config(cli.config.as_deref()) else {
+    let Ok(config) = load_config(cli.config.as_deref()) else {
         return json!({"state":"unknown", "reason":"configuration inaccessible or invalid"});
     };
-    let Some(db) = cli.db.as_ref().or(config.db_path.as_ref()) else {
+    let Some(db) = cli.db.as_ref().or(config.catalog.db_path.as_ref()) else {
         return json!({"state":"not_configured"});
     };
     let options = CacheOptions {
@@ -266,7 +266,7 @@ fn catalog(cli: &Cli) -> Value {
             cli.no_cache,
             std::env::var_os("SCAT_NO_CACHE").as_deref(),
         ),
-        root: cli.cache_dir.clone().or(config.cache_dir),
+        root: cli.cache_dir.clone().or(config.catalog.cache_dir),
     };
     let cache = inspect_cache(db, &options);
     let read_path = cache["active_read_path"]

@@ -1626,10 +1626,7 @@ fn build_indexes_a_vc_working_directory_as_one_script_per_tool() {
         BuildOptions {
             head_lines: 10,
             keep_copies: 0,
-            vc_config: Some(VcConfig {
-                scan_roots: vec![root.clone()],
-                ..Default::default()
-            }),
+            vc_config: Some(VcConfig::default()),
             ..Default::default()
         },
     )

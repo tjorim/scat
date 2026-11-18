@@ -7,30 +7,42 @@ use scat_core::core::search::{CatalogDiff, compare_catalogs};
 
 use crate::output::print_json;
 
+/// What `scat diff <path>` compares the catalog script against: at most one of
+/// an explicit file or a revision (clap enforces that), else the newest DEVELOP
+/// checkout.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ScriptDiffOpts<'a> {
+    /// `--against <file>`.
+    pub against: Option<&'a std::path::Path>,
+    /// `--revision-type`, as its `revisions.revision_type` value.
+    pub revision_type: Option<&'a str>,
+    /// `--revision-user`.
+    pub revision_user: Option<&'a str>,
+    /// `--revision-timestamp`.
+    pub revision_timestamp: Option<&'a str>,
+    /// Emit JSON instead of a unified diff.
+    pub json: bool,
+}
+
 /// `scat diff /catalog/foo.py`, `scat diff /catalog/foo.py --against <file>`,
 /// or `scat diff /catalog/foo.py --revision-type <type> [--revision-user
 /// <user>] [--revision-timestamp <ts>]`.
-#[allow(clippy::too_many_arguments)]
 pub fn cmd_script_diff_catalog(
     api: &scat_core::core::search::SearchApi,
     logical_path: &str,
-    against: Option<&std::path::Path>,
-    revision_type: Option<&str>,
-    revision_user: Option<&str>,
-    revision_timestamp: Option<&str>,
-    json: bool,
+    opts: ScriptDiffOpts<'_>,
 ) -> Result<()> {
     let result = diff_result(
         api,
         logical_path,
-        against,
-        revision_type,
-        revision_user,
-        revision_timestamp,
+        opts.against,
+        opts.revision_type,
+        opts.revision_user,
+        opts.revision_timestamp,
     )
     .with_context(|| format!("Script diff failed for '{logical_path}'"))?;
 
-    print_script_diff(&result, json);
+    print_script_diff(&result, opts.json);
     Ok(())
 }
 

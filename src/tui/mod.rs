@@ -348,15 +348,25 @@ pub struct RunOptions {
 /// No-op SIGINT handler: async-signal-safe, and reset to default by `exec`.
 extern "C" fn ignore_sigint(_: libc::c_int) {}
 
+/// A catalog file as the TUI needs to see it: the copy it reads, and the
+/// published original that workflows (which run the CLI as a child) address.
+#[derive(Debug, Clone, Copy)]
+pub struct CatalogFiles<'a> {
+    /// What the TUI reads — the host-local cache copy when one is in use.
+    pub read: &'a Path,
+    /// The published path.
+    pub published: &'a Path,
+}
+
 pub fn run(
-    db_path: &Path,
-    embeddings_path: &Path,
-    source_db: &Path,
-    source_embeddings: &Path,
+    catalog: CatalogFiles<'_>,
+    embeddings: CatalogFiles<'_>,
     source_config: Option<&Path>,
     resolver: PathResolver,
     options: RunOptions,
 ) -> Result<()> {
+    let (db_path, source_db) = (catalog.read, catalog.published);
+    let (embeddings_path, source_embeddings) = (embeddings.read, embeddings.published);
     options.terminal_modes.validate()?;
     // The workers open the catalog on their own threads, where a schema
     // mismatch would only surface as a per-query error inside the fullscreen

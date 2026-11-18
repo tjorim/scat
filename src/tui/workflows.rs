@@ -165,19 +165,19 @@ fn prepare_administration(
             },
     } = cli.command
     {
-        let cfg = scat_core::core::vc::load_vc_config(config)?;
+        let cfg = scat_core::core::config::load_config(config)?;
         let roots = if scan_root.is_empty() {
-            &cfg.scan_roots
+            &cfg.index.scan_roots
         } else {
             scan_root
         };
-        preview.push_str(&format!("Scan roots: {roots:#?}\nHeader lines: {head_lines}; ignore files: {ignore_file:?}\nConfig ignore patterns: {:?}\nCopies retained: {keep_copies}; dry run: {dry_run}; quiet: {quiet}\nNo resume: {no_resume}; force: {force}; no incremental: {no_incremental}\nThreads: {threads:?} (None = logical CPU count); JSON: {json}\n", cfg.ignore_patterns));
+        preview.push_str(&format!("Scan roots: {roots:#?}\nHeader lines: {head_lines}; ignore files: {ignore_file:?}\nConfig ignore patterns: {:?}\nCopies retained: {keep_copies}; dry run: {dry_run}; quiet: {quiet}\nNo resume: {no_resume}; force: {force}; no incremental: {no_incremental}\nThreads: {threads:?} (None = logical CPU count); JSON: {json}\n", cfg.index.ignore_patterns));
     }
     if let Commands::Vc { args, .. } = cli.command {
-        let cfg = scat_core::core::vc::load_vc_config(config)?;
+        let cfg = scat_core::core::config::load_config(config)?;
         preview.push_str(&format!(
             "vc executable: {:?}\nvc argv: {args:#?}\n",
-            cfg.vc_executable.or_else(crate::runtime::which_vc)
+            cfg.vc.vc_executable.or_else(crate::runtime::which_vc)
         ));
     }
     Ok((full, preview))

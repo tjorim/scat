@@ -8,17 +8,36 @@ use scat_core::core::search::AuditOptions;
 use crate::output::print_json;
 use crate::runtime::audit_exit_code;
 
-#[allow(clippy::too_many_arguments)]
+/// The `scat catalog audit` flags.
+#[derive(Debug, Clone, Copy)]
+pub struct AuditOpts<'a> {
+    /// `--check` (empty runs every default check).
+    pub checks: &'a [String],
+    /// `--strict`: warnings fail the run too.
+    pub strict: bool,
+    /// `--stale-days`.
+    pub stale_days: i64,
+    /// `--near-duplicate-threshold`.
+    pub near_duplicate_threshold: f32,
+    /// `--outlier-threshold`.
+    pub outlier_threshold: f32,
+    /// `--json`.
+    pub json: bool,
+}
+
 pub fn cmd_audit(
     api: &scat_core::core::search::SearchApi,
     sidecar_path: &Path,
-    checks: &[String],
-    strict: bool,
-    stale_days: i64,
-    near_duplicate_threshold: f32,
-    outlier_threshold: f32,
-    json: bool,
+    opts: AuditOpts<'_>,
 ) -> Result<()> {
+    let AuditOpts {
+        checks,
+        strict,
+        stale_days,
+        near_duplicate_threshold,
+        outlier_threshold,
+        json,
+    } = opts;
     let selected = (!checks.is_empty()).then_some(checks);
     // Audit works without a sidecar, but an unusable one is said out loud
     // rather than quietly skipping the checks that need it.

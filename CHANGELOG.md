@@ -93,6 +93,14 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- Internal refactor (#190), no behaviour change: command dispatch in `main` is one
+  exhaustive `match` (adding a subcommand is a compile error until handled, and the
+  `unreachable!()` arms are gone); `catalog build`, `catalog audit`, `scat diff` and the
+  indexer's `populate` take small option structs instead of 8–13 positional arguments;
+  the configuration is a typed `core::config::Config { catalog, index, vc, tui, bookmarks }`
+  loaded by `load_config`, and `VcConfig` now only holds the `vc:` section;
+  `scan_checkouts` takes the scan roots explicitly; the TUI's catalog and sidecar paths
+  are grouped (`tui::CatalogFiles`).
 - Small cleanups (#189): dropped the unused `once_cell` dependency and the redundant
   dev-dependencies; the FTS trigger DDL is defined once and shared by the schema and the
   bulk-build restore (a test pins that they match); the vc checkout-name regex uses
