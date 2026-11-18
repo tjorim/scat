@@ -1,6 +1,8 @@
 use std::io;
+use std::mem::MaybeUninit;
 use std::panic;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -10,10 +12,10 @@ use crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
-use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
+use crossterm::{execute, queue};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use ratatui::widgets::ListState;
@@ -384,7 +386,7 @@ pub fn run(
     app.terminal_modes = options.terminal_modes;
     // Keep the parent alive when the foreground child handles Ctrl+C. In raw
     // mode the TUI still receives Ctrl+C as a key and exits normally.
-    // SIGINT only: SIGTERM and SIGHUP keep their default termination.
+    // SIGTERM and SIGHUP restore the terminal, then terminate as usual.
     let handler: extern "C" fn(libc::c_int) = ignore_sigint;
     // SAFETY: the handler is empty, hence async-signal-safe.
     if unsafe { libc::signal(libc::SIGINT, handler as libc::sighandler_t) } == libc::SIG_ERR {
@@ -394,6 +396,7 @@ pub fn run(
         );
     }
     install_terminal_panic_hook();
+    install_terminal_signal_handlers()?;
     let mut terminal = TerminalGuard::enter()?;
 
     #[cfg(feature = "terminal-panic-test")]
@@ -562,6 +565,13 @@ impl TuiApp {
 /// emits fullscreen cleanup while a viewer or editor has the normal screen.
 static TERMINAL_ACTIVE: AtomicBool = AtomicBool::new(false);
 
+/// Terminal attributes from before raw mode, for the signal handler, which
+/// cannot call crossterm (its saved state sits behind a mutex).
+static SAVED_TERMIOS: OnceLock<libc::termios> = OnceLock::new();
+/// Escape sequences that leave fullscreen mode, rendered ahead of time so the
+/// signal handler only has to `write(2)` them.
+static RESTORE_SEQUENCE: OnceLock<Vec<u8>> = OnceLock::new();
+
 struct TerminalGuard {
     terminal: Terminal<CrosstermBackend<io::Stdout>>,
     mouse_capture: bool,
@@ -574,6 +584,7 @@ impl TerminalGuard {
             terminal: Terminal::new(backend)?,
             mouse_capture: false,
         };
+        save_terminal_attributes();
         enable_raw_mode()?;
         TERMINAL_ACTIVE.store(true, Ordering::Release);
         // Construct the guard first so setup failures also restore the terminal.
@@ -688,6 +699,75 @@ fn install_terminal_panic_hook() {
         }
         previous(info);
     }));
+}
+
+/// Remember the cooked-mode attributes of stdin before `enable_raw_mode`.
+fn save_terminal_attributes() {
+    let mut attributes = MaybeUninit::<libc::termios>::zeroed();
+    // SAFETY: `tcgetattr` fills the struct when it returns 0.
+    if unsafe { libc::tcgetattr(libc::STDIN_FILENO, attributes.as_mut_ptr()) } == 0 {
+        // SAFETY: initialised by the successful call above.
+        let _ = SAVED_TERMIOS.set(unsafe { attributes.assume_init() });
+    }
+}
+
+/// Signal handler for SIGTERM and SIGHUP: leave fullscreen mode, then die by
+/// the same signal so the exit status is unchanged. Only async-signal-safe
+/// calls are used (`OnceLock::get` is an atomic load).
+extern "C" fn restore_terminal_and_die(signal: libc::c_int) {
+    if TERMINAL_ACTIVE.swap(false, Ordering::AcqRel) {
+        if let Some(sequence) = RESTORE_SEQUENCE.get() {
+            // SAFETY: write(2) is async-signal-safe; a short write is ignored.
+            unsafe {
+                libc::write(
+                    libc::STDOUT_FILENO,
+                    sequence.as_ptr().cast(),
+                    sequence.len(),
+                );
+            }
+        }
+        if let Some(attributes) = SAVED_TERMIOS.get() {
+            // SAFETY: tcsetattr(3) is async-signal-safe.
+            unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, attributes) };
+        }
+    }
+    // SAFETY: signal(2) and raise(3) are async-signal-safe. The signal is
+    // blocked inside the handler, so the default action runs on return.
+    unsafe {
+        libc::signal(signal, libc::SIG_DFL);
+        libc::raise(signal);
+    }
+}
+
+/// Cover termination by signal, which skips both `Drop` and the panic hook.
+/// A signal that was ignored at startup (for example under `nohup`) stays
+/// ignored.
+fn install_terminal_signal_handlers() -> Result<()> {
+    let mut sequence = Vec::new();
+    queue!(
+        sequence,
+        DisableMouseCapture,
+        DisableBracketedPaste,
+        LeaveAlternateScreen,
+        Show
+    )?;
+    let _ = RESTORE_SEQUENCE.set(sequence);
+    let handler: extern "C" fn(libc::c_int) = restore_terminal_and_die;
+    for signal in [libc::SIGTERM, libc::SIGHUP] {
+        // SAFETY: the handler only uses async-signal-safe calls.
+        let previous = unsafe { libc::signal(signal, handler as libc::sighandler_t) };
+        if previous == libc::SIG_ERR {
+            anyhow::bail!(
+                "Could not install TUI termination handler: {}",
+                io::Error::last_os_error()
+            );
+        }
+        if previous == libc::SIG_IGN {
+            // SAFETY: restoring the original disposition.
+            unsafe { libc::signal(signal, libc::SIG_IGN) };
+        }
+    }
+    Ok(())
 }
 
 fn restore_terminal_modes() {
