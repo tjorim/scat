@@ -6,7 +6,7 @@ on:
       - 'main'
     tags:
       - 'v*'
-    paths:
+    paths: &rust_inputs
       # Rust build, test and packaging inputs. Keep new inputs in this list.
       # Website sources and unrelated prose do not trigger Rust jobs.
       - 'src/**'
@@ -34,31 +34,7 @@ on:
   pull_request:
     branches:
       - 'main'
-    paths:
-      # Rust build, test and packaging inputs. Keep new inputs in this list.
-      # Website sources and unrelated prose do not trigger Rust jobs.
-      - 'src/**'
-      - 'tests/**'
-      - 'benches/**'
-      - 'crates/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'rustfmt.toml'
-      - 'deny.toml'
-      - 'about.toml'
-      - 'about.hbs'
-      - 'packaging/**'
-      - 'LICENSE'
-      - 'NOTICE'
-      - '.gitattributes'
-      # Read by tests/compat.rs and bundled into the RPM.
-      - 'docs/COMPATIBILITY.md'
-      - 'docs/scat.example.yaml'
-      - 'docs/scat-mapping.example.yaml'
-      - 'docs/VENDORING.md'
-      - 'docs/TUI_OPTIONS.md'
-      - '.github/workflows/**'
-      - '!.github/workflows/pages.yml'
+    paths: *rust_inputs
   workflow_dispatch:
 
 permissions:
@@ -117,152 +93,29 @@ jobs:
 
       - name: Create compatibility database
         run: |
-          mkdir -p target/compat
-          # The fixture is stamped with the schema this tree compiles in;
-          # nothing here is hardcoded, so a schema bump cannot leave the
-          # smoke check silently testing the previous version.
-          export SCHEMA_VERSION=$(sed -n 's/^pub const SCHEMA_VERSION: i64 = \([0-9][0-9]*\);$/\1/p' src/core/db.rs)
-          test -n "$SCHEMA_VERSION"
-          python - <<'PY'
-          import os
-          import json
+          set -euo pipefail
+          scat=./target/x86_64-unknown-linux-musl/release/scat
+          mkdir -p target/compat/tree
+          # The fixture is built by the very binary under test, so it always
+          # carries the schema this tree compiles in; there is no second copy
+          # of the schema (or of SCHEMA_VERSION) here to drift from
+          # src/core/db.rs.
+          cat > target/compat/tree/patch_check.py <<'PY'
+          # @purpose Verify patch freeze consistency
+          # @author owner@example.com
+          def main():
+              return 'patch freeze'
+          PY
+          "$scat" --db target/compat/scripts.sqlite --no-cache catalog build \
+            --scan-root target/compat/tree --quiet
+          # Unsupported neighbours of the current schema: one older, one newer.
+          # Only `schema_version` is patched; the rest is a genuine catalog.
+          python3 - <<'PY'
+          import shutil
           import sqlite3
           from pathlib import Path
 
           db = Path("target/compat/scripts.sqlite")
-          conn = sqlite3.connect(db)
-          conn.executescript("""
-          CREATE TABLE scripts (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              logical_path TEXT NOT NULL UNIQUE,
-              language TEXT,
-              size INTEGER,
-              mtime REAL,
-              content_hash TEXT,
-              content TEXT,
-              owner TEXT,
-              purpose TEXT,
-              tags TEXT,
-              entry_points TEXT,
-              related TEXT,
-              symlink_target TEXT,
-              metadata_json TEXT,
-              checkout_user TEXT,
-              checkout_timestamp TEXT,
-              checkout_os TEXT,
-              checkout_age_seconds REAL,
-              vc_warnings TEXT,
-              indexed_at TEXT
-          );
-          CREATE INDEX idx_scripts_symlink_target ON scripts(symlink_target) WHERE symlink_target IS NOT NULL;
-          CREATE VIRTUAL TABLE script_fts USING fts5(
-              logical_path,
-              content,
-              owner,
-              purpose,
-              tags,
-              content='scripts',
-              content_rowid='id'
-          );
-          CREATE TRIGGER scripts_ai AFTER INSERT ON scripts BEGIN
-              INSERT INTO script_fts(rowid, logical_path, content, owner, purpose, tags)
-              VALUES (new.id, new.logical_path, new.content, new.owner, new.purpose, new.tags);
-          END;
-          CREATE TRIGGER scripts_ad AFTER DELETE ON scripts BEGIN
-              INSERT INTO script_fts(script_fts, rowid, logical_path, content, owner, purpose, tags)
-              VALUES ('delete', old.id, old.logical_path, old.content, old.owner, old.purpose, old.tags);
-          END;
-          CREATE TRIGGER scripts_au AFTER UPDATE ON scripts BEGIN
-              INSERT INTO script_fts(script_fts, rowid, logical_path, content, owner, purpose, tags)
-              VALUES ('delete', old.id, old.logical_path, old.content, old.owner, old.purpose, old.tags);
-              INSERT INTO script_fts(rowid, logical_path, content, owner, purpose, tags)
-              VALUES (new.id, new.logical_path, new.content, new.owner, new.purpose, new.tags);
-          END;
-          CREATE TABLE dependencies (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              script_id INTEGER NOT NULL REFERENCES scripts(id) ON DELETE CASCADE,
-              depends_on_path TEXT NOT NULL,
-              resolved_script_id INTEGER REFERENCES scripts(id) ON DELETE SET NULL,
-              kind TEXT NOT NULL DEFAULT 'import',
-              UNIQUE (script_id, depends_on_path, kind)
-          );
-          CREATE INDEX idx_dependencies_resolved_script_id ON dependencies(resolved_script_id);
-          CREATE TABLE vc_checkouts (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              logical_path TEXT NOT NULL,
-              physical_path TEXT NOT NULL,
-              os_flavor TEXT NOT NULL,
-              user TEXT NOT NULL,
-              timestamp TEXT NOT NULL,
-              age_seconds REAL,
-              UNIQUE (physical_path)
-          );
-          CREATE INDEX idx_vc_checkouts_logical_path ON vc_checkouts(logical_path);
-          CREATE TABLE function_definitions (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              script_id INTEGER NOT NULL REFERENCES scripts(id) ON DELETE CASCADE,
-              name TEXT NOT NULL,
-              kind TEXT NOT NULL,
-              line INTEGER NOT NULL,
-              docstring TEXT,
-              decorators TEXT,
-              UNIQUE (script_id, kind, name, line)
-          );
-          CREATE INDEX idx_function_definitions_script_id ON function_definitions(script_id);
-          CREATE INDEX idx_function_definitions_name ON function_definitions(name);
-          CREATE TABLE function_calls (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              script_id INTEGER NOT NULL REFERENCES scripts(id) ON DELETE CASCADE,
-              caller TEXT NOT NULL,
-              callee TEXT NOT NULL,
-              line INTEGER NOT NULL,
-              resolved_target_name TEXT,
-              resolved_target_script_id INTEGER REFERENCES scripts(id) ON DELETE SET NULL
-          );
-          CREATE INDEX idx_function_calls_script_id ON function_calls(script_id);
-          CREATE INDEX idx_function_calls_resolved_target_script_id ON function_calls(resolved_target_script_id);
-          CREATE INDEX idx_function_calls_callee ON function_calls(callee);
-          CREATE INDEX idx_function_calls_resolved_target_name ON function_calls(resolved_target_name);
-          CREATE TABLE index_metadata (
-              id INTEGER PRIMARY KEY CHECK (id = 1),
-              build_timestamp TEXT NOT NULL,
-              schema_version INTEGER NOT NULL,
-              manifest_fingerprint TEXT NOT NULL DEFAULT ''
-          );
-          """)
-          conn.execute(
-              """
-              INSERT INTO scripts
-                  (logical_path, language, size, mtime, content, owner, purpose,
-                   tags, entry_points, related, metadata_json, vc_warnings,
-                   indexed_at)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-              """,
-              (
-                  "/catalog/scripts/patch_check.py",
-                  "python",
-                  42,
-                  0.0,
-                  "def main():\n    return 'patch freeze'\n",
-                  "owner@example.com",
-                  "Verify patch freeze consistency",
-                  json.dumps(["patching"]),
-                  json.dumps(["main"]),
-                  json.dumps([]),
-                  json.dumps({"source": "python-compat-fixture"}),
-                  json.dumps([]),
-                  "2026-05-07T00:00:00Z",
-              ),
-          )
-          conn.execute(
-              "INSERT INTO index_metadata (id, build_timestamp, schema_version) VALUES (1, ?, ?)",
-              ("2026-06-01T00:00:00Z", int(os.environ["SCHEMA_VERSION"])),
-          )
-          conn.commit()
-          conn.close()
-
-          # Unsupported neighbours of the current schema: one older, one newer.
-          import shutil
           for name, delta in (("older", -1), ("newer", 1)):
               target = Path("target/compat") / name
               target.mkdir(exist_ok=True)

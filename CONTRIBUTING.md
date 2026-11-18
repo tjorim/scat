@@ -9,6 +9,10 @@ CI checks the minimum supported Rust version (MSRV) with `cargo check --locked
 --all-targets` and runs formatting, clippy, and tests on the current stable
 toolchain.
 
+The MSRV applies to the `scat` crate. `scat-embed` (a separate workspace member
+that pulls in fastembed and ONNX Runtime) declares no `rust-version` and is built
+and tested on the current stable toolchain only.
+
 The MSRV is a compatibility floor, not a scheduled maintenance target. Keep it
 unchanged while it does not block useful work. It may be raised when dependency
 updates, tooling requirements, or meaningful Rust language/library improvements
