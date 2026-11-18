@@ -10,6 +10,7 @@ use crate::error::{Error, Result};
 mod checkout;
 mod deps;
 mod diff;
+mod python_stdlib;
 mod query;
 mod stats;
 

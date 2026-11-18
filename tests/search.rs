@@ -1582,6 +1582,96 @@ fn audit_broken_deps_reports_missing_targets() {
     );
 }
 
+/// Insert an unresolved dependency edge of the given kind, as the indexer
+/// records one for an import it cannot map to a catalogued script.
+fn insert_unresolved_dep(api: &SearchApi, from_path: &str, target: &str, kind: &str) {
+    api.conn
+        .execute(
+            "INSERT INTO dependencies (script_id, depends_on_path, kind)
+             VALUES ((SELECT id FROM scripts WHERE logical_path = ?1), ?2, ?3)",
+            rusqlite::params![from_path, target, kind],
+        )
+        .unwrap();
+}
+
+#[test]
+fn audit_broken_deps_ignores_stdlib_and_third_party_imports() {
+    let (api, _f) = make_api();
+    insert(&api, "/cat/mylib/helpers.py", "", "python", "a", "p");
+    insert(&api, "/cat/mylib/pkg/inner.py", "", "python", "a", "p");
+    insert(&api, "/cat/tool.py", "", "python", "a", "p");
+    insert(&api, "/cat/run.sh", "", "shell", "a", "p");
+    for dep in ["os", "sys", "json.decoder", "requests", "yaml.constants"] {
+        insert_unresolved_dep(&api, "/cat/tool.py", dep, "import");
+    }
+    // Local-looking and therefore real problems.
+    for dep in ["mylib.missing", "mylib.pkg.gone", ".sibling", "tools/x.py"] {
+        insert_unresolved_dep(&api, "/cat/tool.py", dep, "import");
+    }
+    // A shell `source common.sh` that matches nothing is a gap too.
+    insert_unresolved_dep(&api, "/cat/run.sh", "common.sh", "import");
+    // Declared data files are intentionally unresolved: not dependencies on scripts.
+    insert_unresolved_dep(&api, "/cat/tool.py", "/data/in.csv", "inputfile");
+
+    let checks = vec!["broken-deps".to_string()];
+    let result = api
+        .audit(Some(&checks), 90, AuditOptions::default())
+        .unwrap();
+    let mut reported: Vec<&str> = result.findings.iter().map(|f| f.detail.as_str()).collect();
+    reported.sort_unstable();
+    assert_eq!(
+        reported,
+        [
+            "depends on .sibling (not indexed)",
+            "depends on common.sh (not indexed)",
+            "depends on mylib.missing (not indexed)",
+            "depends on mylib.pkg.gone (not indexed)",
+            "depends on tools/x.py (not indexed)",
+        ]
+    );
+    assert!(result.findings.iter().all(|f| f.severity == "error"));
+}
+
+#[test]
+fn audit_external_deps_lists_third_party_imports_only_when_selected() {
+    let (api, _f) = make_api();
+    insert(&api, "/cat/tool.py", "", "python", "a", "p");
+    for dep in ["os", "requests", "yaml.constants"] {
+        insert_unresolved_dep(&api, "/cat/tool.py", dep, "import");
+    }
+
+    let by_default = api.audit(None, 90, AuditOptions::default()).unwrap();
+    assert!(
+        by_default
+            .findings
+            .iter()
+            .all(|f| f.check != "external-deps"),
+        "informational noise must stay opt-in"
+    );
+    assert!(by_default.findings.iter().all(|f| f.check != "broken-deps"));
+
+    let checks = vec!["external-deps".to_string()];
+    let result = api
+        .audit(Some(&checks), 90, AuditOptions::default())
+        .unwrap();
+    let mut reported: Vec<(&str, &str)> = result
+        .findings
+        .iter()
+        .map(|f| (f.severity.as_str(), f.detail.as_str()))
+        .collect();
+    reported.sort_unstable();
+    assert_eq!(
+        reported,
+        [
+            ("info", "imports requests (external package, not indexed)"),
+            (
+                "info",
+                "imports yaml.constants (external package, not indexed)"
+            ),
+        ]
+    );
+}
+
 #[test]
 fn audit_orphan_checkouts_reports_unindexed_checkout_paths() {
     let (api, _f) = make_api();
