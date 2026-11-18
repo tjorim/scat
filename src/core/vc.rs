@@ -1388,6 +1388,7 @@ mod tests {
 
     #[test]
     fn checkout_timestamps_are_read_in_the_configured_zone() {
+        use chrono::TimeZone;
         let plus2 = TimestampZone::parse("+02:00").unwrap();
         let minus5 = TimestampZone::parse("-0500").unwrap();
         let at = |zone| {
@@ -1400,7 +1401,6 @@ mod tests {
         assert_eq!(at(minus5), "2024-09-21T18:53:12+00:00");
         // `local` is whatever this host is; it must at least parse and agree
         // with chrono's own conversion.
-        use chrono::TimeZone;
         let naive = chrono::NaiveDate::from_ymd_opt(2024, 9, 21)
             .unwrap()
             .and_hms_opt(13, 53, 12)
