@@ -390,7 +390,11 @@ pub enum CatalogCommands {
 
     /// Run catalog health checks and report findings.
     Audit {
-        /// Specific checks to run (repeatable).
+        /// Specific checks to run (repeatable): unowned, no-purpose,
+        /// broken-deps, orphan-checkouts, stale-checkouts, dead-scripts,
+        /// no-description, near-duplicates, outliers. Also accepts
+        /// external-deps (third-party imports, info only), which never runs
+        /// unless selected.
         #[arg(long = "check")]
         checks: Vec<String>,
         /// Treat WARN findings as a non-zero exit.

@@ -326,6 +326,65 @@ impl SearchApi {
         })
     }
 
+    /// Findings for dependency edges that resolve to no indexed script.
+    ///
+    /// Import edges to the standard library or to installed packages can
+    /// never resolve (those are not catalogued), so reporting every
+    /// unresolved row as broken buries the real problems and makes any
+    /// catalog containing `import os` fail the audit. Each unresolved import
+    /// is therefore classified (see [`classify_unresolved_import`]): local
+    /// ones are `broken-deps` errors, third-party ones are `external-deps`
+    /// info, standard-library ones are dropped. Header-declared file edges
+    /// (`@inputfile` …) are deliberately kept unresolved by the indexer — they
+    /// name data files scat does not catalog — and are not dependencies on
+    /// scripts, so they are not reported either.
+    fn unresolved_dependency_findings(
+        &self,
+        broken_deps: bool,
+        external_deps: bool,
+    ) -> Result<Vec<AuditFinding>> {
+        let rows = query_rows(
+            &self.conn,
+            "SELECT src.logical_path AS logical_path, src.language AS language,
+                    d.depends_on_path AS dependency
+             FROM dependencies d
+             JOIN scripts src ON src.id = d.script_id
+             WHERE d.resolved_script_id IS NULL AND d.kind = 'import'
+             ORDER BY src.logical_path, d.depends_on_path",
+            &[],
+        )?;
+        if rows.is_empty() {
+            return Ok(Vec::new());
+        }
+        let local_names = indexed_path_names(&self.conn)?;
+        let mut findings = Vec::new();
+        for row in rows {
+            let dep = row_string(&row, "dependency");
+            let language = row_string(&row, "language");
+            let (check, severity, detail) =
+                match classify_unresolved_import(&language, &dep, &local_names) {
+                    UnresolvedImport::Local if broken_deps => (
+                        "broken-deps",
+                        "error",
+                        format!("depends on {dep} (not indexed)"),
+                    ),
+                    UnresolvedImport::External if external_deps => (
+                        "external-deps",
+                        "info",
+                        format!("imports {dep} (external package, not indexed)"),
+                    ),
+                    _ => continue,
+                };
+            findings.push(AuditFinding {
+                check: check.to_string(),
+                severity: severity.to_string(),
+                logical_path: row_string(&row, "logical_path"),
+                detail,
+            });
+        }
+        Ok(findings)
+    }
+
     /// Run selected audit checks and return findings with summary counts.
     pub fn audit(
         &self,
@@ -337,6 +396,7 @@ impl SearchApi {
             "unowned",
             "no-purpose",
             "broken-deps",
+            "external-deps",
             "orphan-checkouts",
             "stale-checkouts",
             "dead-scripts",
@@ -399,25 +459,15 @@ impl SearchApi {
             }));
         }
 
-        if should_run(selected.as_ref(), "broken-deps") {
-            let rows = query_rows(
-                &self.conn,
-                "SELECT src.logical_path AS logical_path, d.depends_on_path AS dependency
-                 FROM dependencies d
-                 JOIN scripts src ON src.id = d.script_id
-                 WHERE d.resolved_script_id IS NULL
-                 ORDER BY src.logical_path, d.depends_on_path",
-                &[],
-            )?;
-            findings.extend(rows.into_iter().map(|row| {
-                let dep = row_string(&row, "dependency");
-                AuditFinding {
-                    check: "broken-deps".to_string(),
-                    severity: "error".to_string(),
-                    logical_path: row_string(&row, "logical_path"),
-                    detail: format!("depends on {dep} (not indexed)"),
-                }
-            }));
+        // `external-deps` is informational and would add one finding per
+        // third-party import to every default run, so it only runs when asked.
+        let run_broken_deps = should_run(selected.as_ref(), "broken-deps");
+        let run_external_deps = selected
+            .as_ref()
+            .is_some_and(|checks| checks.contains("external-deps"));
+        if run_broken_deps || run_external_deps {
+            findings
+                .extend(self.unresolved_dependency_findings(run_broken_deps, run_external_deps)?);
         }
 
         if should_run(selected.as_ref(), "orphan-checkouts") {
@@ -661,6 +711,65 @@ impl SearchApi {
             total_working_revision_files,
             scripts_checked_out_by_multiple_users,
         }))
+    }
+}
+
+/// What an import edge that resolved to no indexed script refers to.
+#[derive(Debug, PartialEq, Eq)]
+enum UnresolvedImport {
+    /// Looks like it should be in the catalog (a relative or path-like
+    /// reference, or a name matching an indexed directory or script).
+    Local,
+    /// A third-party package: never indexed, nothing to fix.
+    External,
+    /// The standard library.
+    Stdlib,
+}
+
+/// Every directory name and file stem on an indexed logical path, i.e. the
+/// names a local `import` could refer to.
+fn indexed_path_names(conn: &rusqlite::Connection) -> Result<std::collections::HashSet<String>> {
+    let mut names = std::collections::HashSet::new();
+    for row in query_rows(conn, "SELECT logical_path FROM scripts", &[])? {
+        let path = row_string(&row, "logical_path");
+        let mut parts = path.split('/').filter(|p| !p.is_empty()).peekable();
+        while let Some(part) = parts.next() {
+            if parts.peek().is_some() {
+                names.insert(part.to_string());
+            } else {
+                let stem = part.rsplit_once('.').map_or(part, |(stem, _)| stem);
+                names.insert(stem.to_string());
+            }
+        }
+    }
+    Ok(names)
+}
+
+/// Classify one unresolved `import`-kind dependency.
+///
+/// Only Python imports are module names that can be classified; for other
+/// languages (shell `source common.sh`) the edge names a file and an
+/// unresolved one is a real gap. A Python reference is `Local` when it is
+/// relative (`.utils`) or path-like, or when its top-level name matches an
+/// indexed directory or script; otherwise it is standard library or an
+/// external package.
+fn classify_unresolved_import(
+    language: &str,
+    dependency: &str,
+    local_names: &std::collections::HashSet<String>,
+) -> UnresolvedImport {
+    if language != "python" || dependency.starts_with('.') || dependency.contains(['/', '\\']) {
+        return UnresolvedImport::Local;
+    }
+    let top = dependency.split('.').next().unwrap_or_default();
+    if top.is_empty() {
+        UnresolvedImport::Local
+    } else if super::python_stdlib::is_stdlib_module(top) {
+        UnresolvedImport::Stdlib
+    } else if local_names.contains(top) {
+        UnresolvedImport::Local
+    } else {
+        UnresolvedImport::External
     }
 }
 

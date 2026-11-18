@@ -6,6 +6,14 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- `catalog audit` no longer reports every standard-library and third-party import
+  (`import os`, `import requests`) as a `broken-deps` error, which made any catalog
+  with an import fail the audit with exit code 2. Unresolved Python imports are
+  classified: relative or path-like references and names matching an indexed
+  directory or script are still errors, standard-library imports are ignored, and
+  third-party packages are listed as `info` by the new opt-in `external-deps` check.
+  Header-declared data files (`@inputfile` …) are no longer reported either, since
+  they are intentionally not catalogued. Fixes #183.
 - Interrupted `scat catalog build` runs now actually resume. The work-in-progress
   database was rejected as corrupt on every re-run (its metadata row is only written
   at the end of a build) and renamed while its WAL was still open; it is now built in
