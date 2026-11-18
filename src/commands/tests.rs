@@ -1,7 +1,7 @@
 use super::deps::{cmd_deps, render_tree_lines};
 use super::diff::cmd_script_diff_catalog;
 use super::index::should_skip_catalog_rebuild;
-use super::search::query_uses_fts;
+use super::search::query_looks_like_path;
 use super::show::{cmd_show, render_revision_lines, revisions_to_json};
 use super::similar::cmd_similar;
 use super::stats::render_revision_stats_lines;
@@ -105,10 +105,11 @@ fn revisions_to_json_emits_structured_array() {
 }
 
 #[test]
-fn query_uses_fts_excludes_path_like_queries() {
-    assert!(query_uses_fts("checkmc"));
-    assert!(!query_uses_fts("scripts/checkmc"));
-    assert!(!query_uses_fts("checkmc.py"));
+fn query_looks_like_path_detects_path_like_queries() {
+    assert!(!query_looks_like_path("checkmc"));
+    assert!(query_looks_like_path("scripts/checkmc"));
+    assert!(query_looks_like_path("checkmc.py"));
+    assert!(query_looks_like_path("10.0.0.1"));
 }
 
 #[test]
@@ -515,17 +516,11 @@ fn render_tree_lines_draws_branches_and_markers() {
 }
 
 #[test]
-fn query_uses_fts_routes_paths_including_backslashes() {
-    assert!(query_uses_fts("patch"), "plain word → FTS");
-    assert!(
-        !query_uses_fts("jobs/nightly"),
-        "forward-slash path → path search"
-    );
-    assert!(!query_uses_fts("foo.py"), "dotted name → path search");
-    assert!(
-        !query_uses_fts("scripts\\foo"),
-        "Windows backslash path → path search"
-    );
+fn query_looks_like_path_includes_backslashes() {
+    assert!(!query_looks_like_path("patch"), "plain word → FTS only");
+    assert!(query_looks_like_path("jobs/nightly"));
+    assert!(query_looks_like_path("foo.py"));
+    assert!(query_looks_like_path("scripts\\foo"));
 }
 
 #[test]
@@ -552,4 +547,33 @@ fn render_revision_stats_lines_matches_catalog_stats_labels() {
             "  Scripts checked out by >1 user: 2",
         ]
     );
+}
+
+#[test]
+fn search_text_finds_dotted_content_and_filenames() {
+    let (api, _f) = make_api();
+    for (path, content) in [
+        ("/catalog/deploy.sh", "ssh admin@10.0.0.1 uptime"),
+        ("/catalog/config.yaml.sh", "echo hi"),
+        ("/catalog/other.sh", "ping 10.0.0.2"),
+    ] {
+        api.conn
+            .execute(
+                "INSERT INTO scripts (logical_path, language, content, owner, purpose)
+                 VALUES (?1,'shell',?2,'alice','')",
+                rusqlite::params![path, content],
+            )
+            .unwrap();
+    }
+    let paths = |q: &str| -> Vec<String> {
+        super::search::search_text(&api, q, q, 10, None, None, None)
+            .unwrap()
+            .iter()
+            .map(|r| r["logical_path"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(paths("10.0.0.1"), ["/catalog/deploy.sh"], "IP in content");
+    assert_eq!(paths("config.yaml.sh"), ["/catalog/config.yaml.sh"]);
+    // Path hits come first and are not duplicated by the content hit.
+    assert_eq!(paths("deploy.sh"), ["/catalog/deploy.sh"]);
 }

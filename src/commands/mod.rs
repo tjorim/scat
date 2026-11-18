@@ -17,7 +17,7 @@ pub use index::cmd_index;
 pub use info::cmd_info;
 #[cfg(test)]
 pub use search::collect_results;
-pub use search::{SearchOpts, cmd_search, query_uses_fts, sort_by_name_relevance};
+pub use search::{SearchOpts, cmd_search, search_text};
 pub use show::cmd_show;
 pub use similar::cmd_similar;
 pub use similar::load_similar;
