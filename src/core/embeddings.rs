@@ -14,8 +14,10 @@
 //! in <https://github.com/tjorim/scat/issues/73>; this module sidesteps it
 //! rather than answering it.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use rayon::prelude::*;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::Serialize;
 use thiserror::Error;
@@ -67,7 +69,9 @@ pub fn sidecar_path(catalog_path: &Path) -> PathBuf {
     catalog_path.with_file_name(SIDECAR_FILE_NAME)
 }
 
-/// One script and its stored embedding vector.
+/// One script and its stored embedding vector, scaled to unit length when it
+/// is loaded so that the cosine similarity of two embeddings is just their
+/// dot product (see [`similarity`]).
 struct Embedding {
     script_id: i64,
     logical_path: String,
@@ -98,13 +102,17 @@ pub struct NearDuplicatePair {
 
 /// A read-only, fully-loaded view of an `embeddings.sqlite` sidecar.
 ///
-/// Loaded eagerly rather than queried per call: sidecars hold one row per
-/// cataloged script (a few thousand at most), so holding every vector in
-/// memory and scanning it directly is simpler than, and about as fast as,
-/// staging the comparison back through SQLite — and it avoids taking on a
-/// vector-index dependency for a table this size.
+/// Loaded eagerly rather than queried per call: holding every vector in memory
+/// and scanning it directly is simpler than, and about as fast as, staging the
+/// comparison back through SQLite — and it avoids taking on a vector-index
+/// dependency. Vectors are normalised once at load, so a similarity is a dot
+/// product; the pairwise checks (`near_duplicates`, `outliers`) are quadratic
+/// in the number of scripts and run across all cores; lookups by path go
+/// through a hash index.
 pub struct EmbeddingsSidecar {
     embeddings: Vec<Embedding>,
+    /// `logical_path` → position in `embeddings`.
+    by_path: HashMap<String, usize>,
     model: String,
     /// `index_metadata.build_timestamp` of the catalog the sidecar was built
     /// from; `None` for a sidecar written before provenance was recorded.
@@ -141,8 +149,14 @@ impl EmbeddingsSidecar {
             });
         }
         let (embeddings, model) = read_embeddings(&conn).map_err(|e| unreadable(&e))?;
+        let by_path = embeddings
+            .iter()
+            .enumerate()
+            .map(|(index, e)| (e.logical_path.clone(), index))
+            .collect();
         Ok(Some(Self {
             embeddings,
+            by_path,
             model,
             catalog_build_timestamp,
         }))
@@ -212,9 +226,7 @@ impl EmbeddingsSidecar {
     /// True when `logical_path` has a stored embedding.
     #[must_use]
     pub fn contains(&self, logical_path: &str) -> bool {
-        self.embeddings
-            .iter()
-            .any(|e| e.logical_path == logical_path)
+        self.by_path.contains_key(logical_path)
     }
 
     /// The up to `limit` scripts whose embedding is most similar to
@@ -226,10 +238,7 @@ impl EmbeddingsSidecar {
     /// yet", not "no similar scripts".
     #[must_use]
     pub fn nearest(&self, logical_path: &str, limit: usize) -> Option<Vec<SimilarScript>> {
-        let target = self
-            .embeddings
-            .iter()
-            .find(|e| e.logical_path == logical_path)?;
+        let target = &self.embeddings[*self.by_path.get(logical_path)?];
 
         let mut scored: Vec<SimilarScript> = self
             .embeddings
@@ -237,7 +246,7 @@ impl EmbeddingsSidecar {
             .filter(|e| e.script_id != target.script_id)
             .map(|e| SimilarScript {
                 logical_path: e.logical_path.clone(),
-                score: cosine_similarity(&target.vector, &e.vector),
+                score: similarity(&target.vector, &e.vector),
             })
             .collect();
         scored.sort_by(|a, b| b.score.total_cmp(&a.score));
@@ -251,27 +260,28 @@ impl EmbeddingsSidecar {
     /// Each relationship is reported once: `a` is always the
     /// lexicographically smaller of the pair's two logical paths, so a
     /// caller iterating pairs never sees both `(x, y)` and `(y, x)`.
-    /// Quadratic in the sidecar's row count, which is fine at the scale
-    /// `EmbeddingsSidecar` already documents (a few thousand scripts at
-    /// most, held fully in memory).
+    /// Quadratic in the sidecar's row count (every pair is compared), spread
+    /// across all cores; only pairs at or above `threshold` are materialised.
     #[must_use]
     pub fn near_duplicates(&self, threshold: f32) -> Vec<NearDuplicatePair> {
-        let mut pairs = Vec::new();
-        for i in 0..self.embeddings.len() {
-            for j in (i + 1)..self.embeddings.len() {
-                let x = &self.embeddings[i];
-                let y = &self.embeddings[j];
-                let score = cosine_similarity(&x.vector, &y.vector);
-                if score >= threshold {
-                    let (a, b) = if x.logical_path <= y.logical_path {
-                        (x.logical_path.clone(), y.logical_path.clone())
-                    } else {
-                        (y.logical_path.clone(), x.logical_path.clone())
-                    };
-                    pairs.push(NearDuplicatePair { a, b, score });
-                }
-            }
-        }
+        let embeddings = &self.embeddings;
+        let mut pairs: Vec<NearDuplicatePair> = (0..embeddings.len())
+            .into_par_iter()
+            .flat_map_iter(|i| {
+                let x = &embeddings[i];
+                embeddings[i + 1..].iter().filter_map(move |y| {
+                    let score = similarity(&x.vector, &y.vector);
+                    (score >= threshold).then(|| {
+                        let (a, b) = if x.logical_path <= y.logical_path {
+                            (x.logical_path.clone(), y.logical_path.clone())
+                        } else {
+                            (y.logical_path.clone(), x.logical_path.clone())
+                        };
+                        NearDuplicatePair { a, b, score }
+                    })
+                })
+            })
+            .collect();
         pairs.sort_by(|p, q| q.score.total_cmp(&p.score).then_with(|| p.a.cmp(&q.a)));
         pairs
     }
@@ -290,13 +300,13 @@ impl EmbeddingsSidecar {
         }
         let mut results: Vec<SimilarScript> = self
             .embeddings
-            .iter()
+            .par_iter()
             .map(|e| {
                 let best = self
                     .embeddings
                     .iter()
                     .filter(|o| o.script_id != e.script_id)
-                    .map(|o| cosine_similarity(&e.vector, &o.vector))
+                    .map(|o| similarity(&e.vector, &o.vector))
                     .fold(f32::MIN, f32::max);
                 SimilarScript {
                     logical_path: e.logical_path.clone(),
@@ -353,7 +363,7 @@ fn read_embeddings(conn: &Connection) -> rusqlite::Result<(Vec<Embedding>, Strin
             Ok(Embedding {
                 script_id,
                 logical_path,
-                vector: bytes_to_vector(&bytes),
+                vector: normalised(bytes_to_vector(&bytes)),
             })
         })
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -370,27 +380,50 @@ fn bytes_to_vector(bytes: &[u8]) -> Vec<f32> {
         .collect()
 }
 
-/// Cosine similarity between two vectors. Mismatched lengths (a sidecar
-/// mixing embeddings from two different models) or an all-zero vector never
-/// rank as similar, rather than dividing by zero or panicking on a length
-/// mismatch.
-fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+/// `vector` scaled to unit length, so cosine similarity becomes a dot product.
+/// An all-zero (or non-finite) vector is kept as zeros: it has no direction,
+/// and its similarity to anything is 0 either way.
+fn normalised(mut vector: Vec<f32>) -> Vec<f32> {
+    let norm = vector.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm > 0.0 && norm.is_finite() {
+        for x in &mut vector {
+            *x /= norm;
+        }
+    } else {
+        vector.fill(0.0);
+    }
+    vector
+}
+
+/// Cosine similarity of two vectors already scaled by [`normalised`]. Mismatched
+/// lengths (a sidecar mixing embeddings from two different models) or empty
+/// vectors never rank as similar, rather than panicking on a length mismatch.
+fn similarity(a: &[f32], b: &[f32]) -> f32 {
     if a.len() != b.len() || a.is_empty() {
         return f32::MIN;
     }
-    let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
-    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if norm_a == 0.0 || norm_b == 0.0 {
-        return 0.0;
-    }
-    dot / (norm_a * norm_b)
+    a.iter().zip(b).map(|(x, y)| x * y).sum()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    /// Cosine similarity of raw (unnormalised) vectors, the way a sidecar's
+    /// vectors are compared once loaded.
+    fn cos(a: &[f32], b: &[f32]) -> f32 {
+        similarity(&normalised(a.to_vec()), &normalised(b.to_vec()))
+    }
+
+    /// Reference implementation straight from the definition, no
+    /// pre-normalisation: what `similarity` must agree with.
+    fn naive_cosine(a: &[f32], b: &[f32]) -> f32 {
+        let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+        let na = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let nb = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+        dot / (na * nb)
+    }
 
     fn write_sidecar(path: &Path, rows: &[(i64, &str, &[f32])]) {
         let conn = Connection::open(path).unwrap();
@@ -576,21 +609,136 @@ mod tests {
 
     #[test]
     fn cosine_similarity_of_identical_vectors_is_one() {
-        assert!((cosine_similarity(&[1.0, 2.0, 3.0], &[1.0, 2.0, 3.0]) - 1.0).abs() < 1e-6);
+        assert!((cos(&[1.0, 2.0, 3.0], &[1.0, 2.0, 3.0]) - 1.0).abs() < 1e-6);
     }
 
     #[test]
     fn cosine_similarity_of_orthogonal_vectors_is_zero() {
-        assert!(cosine_similarity(&[1.0, 0.0], &[0.0, 1.0]).abs() < 1e-6);
+        assert!(cos(&[1.0, 0.0], &[0.0, 1.0]).abs() < 1e-6);
     }
 
     #[test]
     fn cosine_similarity_handles_zero_vectors_without_dividing_by_zero() {
-        assert!((cosine_similarity(&[0.0, 0.0], &[1.0, 1.0])).abs() < f32::EPSILON);
+        assert!((cos(&[0.0, 0.0], &[1.0, 1.0])).abs() < f32::EPSILON);
     }
 
     #[test]
     fn cosine_similarity_of_mismatched_lengths_never_ranks_as_similar() {
-        assert!(cosine_similarity(&[1.0, 0.0], &[1.0, 0.0, 0.0]) <= f32::MIN);
+        assert!(cos(&[1.0, 0.0], &[1.0, 0.0, 0.0]) <= f32::MIN);
+    }
+
+    /// A deterministic pseudo-random sidecar, to compare the optimised paths
+    /// against the definition.
+    fn random_sidecar(
+        dir: &TempDir,
+        rows: usize,
+        dim: usize,
+    ) -> (EmbeddingsSidecar, Vec<Vec<f32>>) {
+        let mut state = 0x2545_f491_u32;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            (state % 2000) as f32 / 1000.0 - 1.0
+        };
+        let vectors: Vec<Vec<f32>> = (0..rows)
+            .map(|_| (0..dim).map(|_| next()).collect())
+            .collect();
+        let paths: Vec<String> = (0..rows).map(|i| format!("/s/{i:04}.py")).collect();
+        let sidecar_rows: Vec<(i64, &str, &[f32])> = vectors
+            .iter()
+            .zip(&paths)
+            .enumerate()
+            .map(|(i, (v, p))| (i as i64 + 1, p.as_str(), v.as_slice()))
+            .collect();
+        let path = dir.path().join("embeddings.sqlite");
+        write_sidecar(&path, &sidecar_rows);
+        (
+            EmbeddingsSidecar::open_checked(&path).unwrap().unwrap(),
+            vectors,
+        )
+    }
+
+    #[test]
+    fn optimised_similarity_agrees_with_the_definition() {
+        let dir = TempDir::new().unwrap();
+        let (sidecar, vectors) = random_sidecar(&dir, 60, 16);
+
+        // Pairs above a threshold, as the definition would find them.
+        let threshold = 0.4;
+        let mut expected = Vec::new();
+        for i in 0..vectors.len() {
+            for j in (i + 1)..vectors.len() {
+                let score = naive_cosine(&vectors[i], &vectors[j]);
+                if score >= threshold {
+                    expected.push((format!("/s/{i:04}.py"), format!("/s/{j:04}.py"), score));
+                }
+            }
+        }
+        assert!(
+            !expected.is_empty() && expected.len() < 60 * 59 / 2,
+            "a meaningful threshold"
+        );
+        let pairs = sidecar.near_duplicates(threshold);
+        assert_eq!(pairs.len(), expected.len());
+        for pair in &pairs {
+            let (_, _, score) = expected
+                .iter()
+                .find(|(a, b, _)| *a == pair.a && *b == pair.b)
+                .unwrap_or_else(|| panic!("unexpected pair {pair:?}"));
+            assert!((score - pair.score).abs() < 1e-5);
+        }
+        assert!(pairs.windows(2).all(|w| w[0].score >= w[1].score));
+
+        // Nearest neighbours of one script, and the outlier check.
+        let nearest = sidecar.nearest("/s/0007.py", 5).unwrap();
+        let mut reference: Vec<(usize, f32)> = (0..vectors.len())
+            .filter(|&i| i != 7)
+            .map(|i| (i, naive_cosine(&vectors[7], &vectors[i])))
+            .collect();
+        reference.sort_by(|a, b| b.1.total_cmp(&a.1));
+        for (got, (index, score)) in nearest.iter().zip(&reference) {
+            assert_eq!(got.logical_path, format!("/s/{index:04}.py"));
+            assert!((got.score - score).abs() < 1e-5);
+        }
+        let outliers = sidecar.outliers(0.6);
+        for outlier in &outliers {
+            let i: usize = outlier.logical_path[3..7].parse().unwrap();
+            let best = (0..vectors.len())
+                .filter(|&j| j != i)
+                .map(|j| naive_cosine(&vectors[i], &vectors[j]))
+                .fold(f32::MIN, f32::max);
+            assert!((best - outlier.score).abs() < 1e-5);
+            assert!(best < 0.6);
+        }
+        let expected_outliers = (0..vectors.len())
+            .filter(|&i| {
+                (0..vectors.len())
+                    .filter(|&j| j != i)
+                    .map(|j| naive_cosine(&vectors[i], &vectors[j]))
+                    .fold(f32::MIN, f32::max)
+                    < 0.6
+            })
+            .count();
+        assert_eq!(outliers.len(), expected_outliers);
+    }
+
+    #[test]
+    fn lookups_by_path_use_the_index() {
+        let dir = TempDir::new().unwrap();
+        let (sidecar, _) = random_sidecar(&dir, 5, 4);
+        assert!(sidecar.contains("/s/0003.py"));
+        assert!(!sidecar.contains("/s/9999.py"));
+        assert!(sidecar.nearest("/s/9999.py", 3).is_none());
+        assert_eq!(sidecar.nearest("/s/0000.py", 100).unwrap().len(), 4);
+    }
+
+    #[test]
+    fn vectors_are_normalised_once_at_load() {
+        let v = normalised(vec![3.0, 4.0]);
+        assert!((v[0] - 0.6).abs() < 1e-6 && (v[1] - 0.8).abs() < 1e-6);
+        assert_eq!(normalised(vec![0.0, 0.0]), vec![0.0, 0.0]);
+        assert_eq!(normalised(vec![f32::NAN, 1.0]), vec![0.0, 0.0]);
+        assert!(normalised(Vec::new()).is_empty());
     }
 }

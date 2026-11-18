@@ -197,6 +197,16 @@ fn compatibility_doc_and_embed_crate_track_the_code() {
         )),
         "crates/scat-embed must write the sidecar format scat_core reads"
     );
+
+    // Likewise the list of data-file languages scat-embed skips by default.
+    let languages = scat_core::core::db::SAMPLED_CONTENT_LANGUAGES;
+    assert!(
+        embed.contains(&format!(
+            "const SAMPLED_CONTENT_LANGUAGES: [&str; {}] = {languages:?};",
+            languages.len()
+        )),
+        "crates/scat-embed must skip the languages scat_core stores only a sample of"
+    );
 }
 
 // ---------------------------------------------------------------------------
