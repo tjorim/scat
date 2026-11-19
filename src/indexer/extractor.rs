@@ -225,10 +225,10 @@ struct HeaderPattern {
 static HEADER_PATTERNS: std::sync::LazyLock<Vec<HeaderPattern>> = std::sync::LazyLock::new(|| {
     vec![
         HeaderPattern {
-            // Anchored at the start of the comment text (past any decoration
-            // such as `#`, `*`, `-`): unanchored, `brief:` matched inside
-            // `debrief: …` and mid-sentence.
-            re: Regex::new(r"(?i)^[^\w@]*(?:@brief|brief\s*:)\s*(.+)").unwrap(),
+            // On a word boundary: `brief:` must not match inside `debrief:`,
+            // but labelled forms (`Script brief:`, `SCRIPT: x  BRIEF: y`) must.
+            // Anchoring at the start of the comment dropped those.
+            re: Regex::new(r"(?i)(?:@brief|\bbrief\s*:)\s*(.+)").unwrap(),
             field_name: "purpose",
             metadata_key: "brief",
         },
@@ -263,8 +263,8 @@ static HEADER_PATTERNS: std::sync::LazyLock<Vec<HeaderPattern>> = std::sync::Laz
             metadata_key: "scripttype",
         },
         HeaderPattern {
-            // Anchored for the same reason as `brief:` (`Downowner: x`).
-            re: Regex::new(r"(?i)^[^\w@]*owner\s*:\s*(.+)").unwrap(),
+            // On a word boundary for the same reason as `brief:` (`Downowner: x`).
+            re: Regex::new(r"(?i)\bowner\s*:\s*(.+)").unwrap(),
             field_name: "owner",
             metadata_key: "owner",
         },
@@ -1026,16 +1026,22 @@ mod tests {
     }
 
     #[test]
-    fn owner_and_brief_keywords_must_start_the_comment_text() {
+    fn owner_and_brief_keywords_match_on_a_word_boundary() {
         for (line, owner, purpose) in [
             ("# Owner: jdoe", "jdoe", ""),
             ("## owner : jdoe", "jdoe", ""),
             ("#   brief: tidy up", "", "tidy up"),
             ("// @brief tidy up", "", "tidy up"),
+            // Labelled and multi-field headers keep working.
+            ("# Script owner: jdoe", "jdoe", ""),
+            ("# Technical Owner: jdoe", "jdoe", ""),
+            ("# Author/Owner: jdoe", "jdoe", ""),
+            ("# Short brief: tidy up", "", "tidy up"),
+            ("# Script: x   Owner: jdoe", "jdoe", ""),
+            ("# SCRIPT: x   BRIEF: tidy up", "", "tidy up"),
+            // A keyword inside a longer word does not count.
             ("# Downowner: x", "", ""),
             ("# debrief: x", "", ""),
-            ("# the previous owner: x", "", ""),
-            ("# this is a brief: x", "", ""),
         ] {
             let meta = parsed(&format!("#!/bin/sh\n{line}\n"));
             assert_eq!(meta.owner, owner, "{line}");
