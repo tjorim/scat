@@ -24,7 +24,7 @@ use crate::core::vc::{VcConfig, manifest_fingerprint};
 /// Bump when extraction output changes for unchanged inputs without a version
 /// bump of the crate (a new header keyword, a dependency-resolution fix, …),
 /// so unchanged scripts are re-extracted by the next build.
-pub const EXTRACTOR_REVISION: u32 = 1;
+pub const EXTRACTOR_REVISION: u32 = 2;
 
 /// The `head_lines` a build uses when asked for 0.
 const DEFAULT_HEAD_LINES: usize = 10;

@@ -28,6 +28,12 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Owner and purpose were dropped from scripts whose header labels them `Script owner:`,
+  `Technical Owner:` or `Short brief:`, or puts several fields on one line: the `owner:` and
+  `brief:` keywords had been anchored to the start of the comment (#215). They match on a
+  word boundary again (still not inside `debrief:` or `Downowner:`). The extractor revision
+  is bumped, so the next build re-reads scripts that were not edited and restores values
+  lost by that build.
 - Plain-text output no longer passes control characters from indexed files to the
   terminal. A script header such as `# @purpose …<ESC>]0;…` (or a file name) could
   retitle the window, rewrite earlier lines or write to the clipboard on the terminal of
