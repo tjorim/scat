@@ -97,6 +97,8 @@ struct VcSection {
     /// Clock of the timestamps in checkout filenames: `utc` (default),
     /// `local` (this host's zone) or a fixed offset such as `+02:00`.
     timestamp_timezone: Option<String>,
+    /// OS name per scan root, for roots whose parent directory is not the OS.
+    os_by_root: Option<std::collections::BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -270,6 +272,22 @@ pub fn load_config(config_file: Option<&Path>) -> Result<Config> {
         None => TimestampZone::default(),
     };
 
+    let os_by_root = vc
+        .os_by_root
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(root, os)| {
+            let os = os.trim();
+            if os.is_empty() || os.contains(['/', '\\', '\0']) {
+                return Err(crate::error::Error::Validation(format!(
+                    "vc.os_by_root: the OS name for {root:?} must be a plain name such as \
+                     `linux`, not {os:?}"
+                )));
+            }
+            Ok((rel(root), os.to_string()))
+        })
+        .collect::<crate::error::Result<_>>()?;
+
     let defaults = VcConfig::default();
     Ok(Config {
         catalog: CatalogConfig {
@@ -295,6 +313,7 @@ pub fn load_config(config_file: Option<&Path>) -> Result<Config> {
             archive_dirs: vc.archive_dirs.unwrap_or(defaults.archive_dirs),
             manifest_path: vc.manifest_path.map(rel),
             timestamp_zone,
+            os_by_root,
         },
         tui: TuiConfig {
             glyphs: tui.glyphs,
@@ -385,6 +404,41 @@ mod tests {
         );
         assert_eq!(cfg.vc.vc_executable, Some(PathBuf::from("vc")));
         assert_eq!(cfg.vc.manifest_path, Some(dir.path().join("m.lst")));
+    }
+
+    #[test]
+    fn os_by_root_is_read_and_resolved_against_the_config_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config(
+            dir.path(),
+            "c.yaml",
+            "vc:\n  os_by_root:\n    /abs/app/tools: linux\n    rel/tools: solaris\n",
+        );
+        let cfg = load_config(Some(&path)).unwrap();
+        assert_eq!(
+            cfg.vc.os_by_root,
+            [
+                (PathBuf::from("/abs/app/tools"), "linux".to_string()),
+                (dir.path().join("rel/tools"), "solaris".to_string()),
+            ]
+            .into_iter()
+            .collect()
+        );
+        assert!(load_config(None).unwrap().vc.os_by_root.is_empty());
+    }
+
+    #[test]
+    fn os_by_root_rejects_names_that_are_not_plain() {
+        let dir = tempfile::tempdir().unwrap();
+        for bad in ["\"\"", "a/b", "\"  \""] {
+            let path = write_config(
+                dir.path(),
+                "c.yaml",
+                &format!("vc:\n  os_by_root:\n    /r: {bad}\n"),
+            );
+            let err = load_config(Some(&path)).unwrap_err().to_string();
+            assert!(err.contains("os_by_root"), "{bad}: {err}");
+        }
     }
 
     #[test]

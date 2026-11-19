@@ -11,7 +11,7 @@ use tracing::{debug, warn};
 use crate::core::db::SCHEMA_VERSION;
 use crate::core::vc::{
     ProcessedScript, VcConfig, infer_manifest_warnings, infer_warnings_in, load_vc_manifest,
-    scan_checkouts,
+    os_mapping_warnings, scan_checkouts,
 };
 use crate::error::{Error, Result};
 use crate::indexer::ast_deps::AstDependencies;
@@ -19,7 +19,7 @@ use crate::indexer::checkpoint::{Checkpoint, write_checkpoint};
 use crate::indexer::extractor::{ExtractedMetadata, extract};
 use crate::indexer::fingerprint::BuildFingerprint;
 use crate::indexer::scan_tree::ScanTreeView;
-use crate::indexer::scanner::{ScriptRecord, scan_paths_with_revisions_and_tree};
+use crate::indexer::scanner::{ScanLayout, ScriptRecord, scan_paths_with_revisions_and_tree};
 use crate::indexer::treesitter_deps::TreeSitterExtractor;
 
 use super::IndexResult;
@@ -122,7 +122,10 @@ pub(super) fn populate(
         scan_roots,
         head_lines,
         ignore_files,
-        &checkout_dirs,
+        &ScanLayout {
+            checkout_dirs: &checkout_dirs,
+            os_by_root: &vc_config.os_by_root,
+        },
         scan_pb.as_ref(),
         scan_tree.as_mut(),
         shutdown,
@@ -358,6 +361,14 @@ pub(super) fn populate(
     debug!(phase = "scan_checkouts", "starting scan_checkouts phase");
     // The roots this build actually scanned (`--scan-root` or configured).
     let checkouts = scan_checkouts(scan_roots, vc_config);
+    let found: Vec<_> = checkouts
+        .iter()
+        .chain(&working_revisions)
+        .cloned()
+        .collect();
+    for message in os_mapping_warnings(scan_roots, &vc_config.os_by_root, &found) {
+        warn!("{message}");
+    }
     debug!(
         phase = "scan_checkouts",
         checkout_count = checkouts.len(),

@@ -13,7 +13,7 @@ use indicatif::ProgressBar;
 use rayon::prelude::*;
 use tracing::{debug, warn};
 
-use crate::core::vc::CheckoutRecord;
+use crate::core::vc::{CheckoutRecord, OsByRoot, os_flavor_for_root};
 use crate::error::{Error, Result};
 use crate::indexer::scan_tree::ScanTreeView;
 
@@ -79,11 +79,22 @@ pub fn scan_paths_with_revisions(
         roots,
         head_lines,
         ignore_files,
-        checkout_dirs,
+        &ScanLayout {
+            checkout_dirs,
+            os_by_root: &OsByRoot::new(),
+        },
         progress,
         None,
         shutdown,
     )
+}
+
+/// How a build reads the vc layout of the scan roots.
+pub(crate) struct ScanLayout<'a> {
+    /// Directory names of vc checkout containers (empty: the defaults).
+    pub checkout_dirs: &'a [&'a str],
+    /// Explicit OS name per scan root (`vc.os_by_root`).
+    pub os_by_root: &'a OsByRoot,
 }
 
 /// Like [`scan_paths_with_revisions`], but also feeds a live multi-line
@@ -94,7 +105,7 @@ pub(crate) fn scan_paths_with_revisions_and_tree(
     roots: &[PathBuf],
     head_lines: usize,
     ignore_files: &[PathBuf],
-    checkout_dirs: &[&str],
+    layout: &ScanLayout,
     progress: Option<&ProgressBar>,
     tree: Option<&mut ScanTreeView>,
     shutdown: &AtomicBool,
@@ -103,7 +114,7 @@ pub(crate) fn scan_paths_with_revisions_and_tree(
         roots,
         head_lines,
         ignore_files,
-        checkout_dirs,
+        layout,
         progress,
         tree,
         shutdown,
@@ -114,12 +125,16 @@ fn scan_paths_with_revisions_impl(
     roots: &[PathBuf],
     head_lines: usize,
     ignore_files: &[PathBuf],
-    checkout_dirs: &[&str],
+    layout: &ScanLayout,
     progress: Option<&ProgressBar>,
     mut tree: Option<&mut ScanTreeView>,
     shutdown: &AtomicBool,
 ) -> Result<ScanResult> {
     use crate::core::vc::{DEFAULT_ARCHIVE_DIRS, DEFAULT_DEVELOP_DIRS};
+    let ScanLayout {
+        checkout_dirs,
+        os_by_root,
+    } = *layout;
     let default_checkout_dirs: Vec<&str> = DEFAULT_DEVELOP_DIRS
         .iter()
         .chain(DEFAULT_ARCHIVE_DIRS.iter())
@@ -181,14 +196,9 @@ fn scan_paths_with_revisions_impl(
         let mut found_in_root = 0usize;
         let mut skipped_in_root = 0usize;
         let mut candidates: Vec<ScanCandidate> = Vec::new();
-        // Same os_flavor derivation as `scan_checkouts`: the scan_root's
-        // parent directory name (e.g. `linux` from /catalog/linux/scripts).
-        let os_flavor = root
-            .parent()
-            .and_then(|p| p.file_name())
-            .and_then(|n| n.to_str())
-            .unwrap_or("")
-            .to_string();
+        // Same os_flavor derivation as `scan_checkouts` (`vc.os_by_root`, else
+        // the scan_root's parent directory name).
+        let os_flavor = os_flavor_for_root(root, os_by_root);
         let cds = checkout_dirs_set.clone();
         let croots = canonical_roots.clone();
         let vdirs = visited_dirs.clone();
