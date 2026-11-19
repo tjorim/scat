@@ -118,9 +118,6 @@ pub(super) fn populate(
         "starting scan_paths phase"
     );
     let checkout_dirs: Vec<&str> = vc_config.all_checkout_dirs().collect();
-    for message in os_mapping_warnings(scan_roots, &vc_config.os_by_root) {
-        warn!("{message}");
-    }
     let scan_result = scan_paths_with_revisions_and_tree(
         scan_roots,
         head_lines,
@@ -364,6 +361,14 @@ pub(super) fn populate(
     debug!(phase = "scan_checkouts", "starting scan_checkouts phase");
     // The roots this build actually scanned (`--scan-root` or configured).
     let checkouts = scan_checkouts(scan_roots, vc_config);
+    let found: Vec<_> = checkouts
+        .iter()
+        .chain(&working_revisions)
+        .cloned()
+        .collect();
+    for message in os_mapping_warnings(scan_roots, &vc_config.os_by_root, &found) {
+        warn!("{message}");
+    }
     debug!(
         phase = "scan_checkouts",
         checkout_count = checkouts.len(),

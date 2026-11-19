@@ -85,7 +85,9 @@ vc:
   # `scat catalog build`), or a fixed offset such as +02:00. See
   # docs/VC_CONTRACT.md.
   # timestamp_timezone: utc
-  # OS name for a scan root whose parent directory is not the OS. Roots not
+  # OS name for a scan root whose parent directory is not the OS. Only vc
+  # checkouts (DEVELOP/ARCHIVE and checked-in copies) carry an OS name; a
+  # catalog without vc never uses this. Roots not
   # listed keep the default (the parent directory's name). Keys are scan roots
   # as written in `scan_roots`; relative keys resolve against this file.
   # os_by_root:

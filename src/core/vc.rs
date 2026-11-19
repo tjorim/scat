@@ -174,16 +174,28 @@ fn same_directory(a: &Path, b: &Path) -> bool {
         )
 }
 
-/// Problems with how scan roots map to OS names, for the build log: a root
-/// that ends up with no OS name, and `os_by_root` entries that name no scan
-/// root (almost always a typo, so the intended root silently keeps its default).
-pub fn os_mapping_warnings(scan_roots: &[PathBuf], overrides: &OsByRoot) -> Vec<String> {
+/// Problems with how scan roots map to OS names, for the build log.
+///
+/// A root is reported only when checkouts were actually found under it and
+/// recorded without an OS name — a catalog that does not use vc has no
+/// checkouts, so an OS name would mean nothing there. An `os_by_root` entry
+/// that names no scan root is reported too (almost always a typo, so the
+/// intended root silently keeps its default).
+pub fn os_mapping_warnings(
+    scan_roots: &[PathBuf],
+    overrides: &OsByRoot,
+    revisions: &[CheckoutRecord],
+) -> Vec<String> {
     let mut warnings = Vec::new();
     for root in scan_roots {
-        if os_flavor_for_root(root, overrides).is_empty() {
+        let unnamed = os_flavor_for_root(root, overrides).is_empty()
+            && revisions
+                .iter()
+                .any(|r| r.os_flavor.is_empty() && Path::new(&r.physical_path).starts_with(root));
+        if unnamed {
             warnings.push(format!(
-                "scan root {} has no parent directory to take an OS name from; its \
-                 checkouts are recorded without one (set vc.os_by_root to name it)",
+                "checkouts under scan root {} are recorded without an OS name (it has no \
+                 parent directory to take one from); set vc.os_by_root to name it",
                 root.display()
             ));
         }
@@ -1043,21 +1055,47 @@ mod tests {
         assert_eq!(os_flavor_for_root(&alias, &map), "sollnx");
     }
 
+    fn revision_at(path: &str, os: &str) -> CheckoutRecord {
+        CheckoutRecord {
+            logical_path: path.into(),
+            physical_path: path.into(),
+            revision_type: "DEVELOP".into(),
+            os_flavor: os.into(),
+            user: String::new(),
+            timestamp: String::new(),
+            age_seconds: None,
+        }
+    }
+
     #[test]
     fn os_mapping_warnings_flag_unnamed_roots_and_dead_entries() {
         let roots = [PathBuf::from("/c/linux/tools"), PathBuf::from("/tools")];
-        assert_eq!(os_mapping_warnings(&roots, &OsByRoot::new()).len(), 1);
+        let found = [
+            revision_at("/c/linux/tools/DEVELOP/a_20240101_jdoe", "linux"),
+            revision_at("/tools/DEVELOP/b_20240101_jdoe", ""),
+        ];
+        assert_eq!(
+            os_mapping_warnings(&roots, &OsByRoot::new(), &found).len(),
+            1
+        );
 
-        // Naming the root fixes the first warning; a typo'd key adds another.
+        // Naming the root fixes that warning; a typo'd key adds another.
         let fixed = overrides(&[("/tools", "linux")]);
-        assert!(os_mapping_warnings(&roots, &fixed).is_empty());
+        assert!(os_mapping_warnings(&roots, &fixed, &[]).is_empty());
         let typo = overrides(&[("/tool", "linux")]);
-        let warnings = os_mapping_warnings(&roots, &typo);
+        let warnings = os_mapping_warnings(&roots, &typo, &found);
         assert_eq!(warnings.len(), 2, "{warnings:?}");
         assert!(
             warnings.iter().any(|w| w.contains("/tool ")),
             "{warnings:?}"
         );
+    }
+
+    #[test]
+    fn a_catalog_without_vc_checkouts_gets_no_os_warning() {
+        // `/tools` has no OS-named parent, but nothing under it is a checkout.
+        let roots = [PathBuf::from("/tools")];
+        assert!(os_mapping_warnings(&roots, &OsByRoot::new(), &[]).is_empty());
     }
 
     #[test]
