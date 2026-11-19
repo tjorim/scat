@@ -6,6 +6,9 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- `vc.os_by_root` names the OS of a scan root that does not sit under an `<os>` directory.
+  Every other root keeps taking the name of its parent directory. A root left with no OS
+  name, or an entry that matches no scan root, is now reported in the build log.
 - Embeddings (#192). `scat-embed` is incremental: each vector records a hash of the text it
   was computed from, and a run reuses every unchanged script's vector from `--previous`
   (default: the existing `--output`) and embeds only the rest, in batches of

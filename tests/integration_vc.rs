@@ -202,6 +202,33 @@ fn scan_checkouts_records_user_timestamp_and_os_flavor() {
 }
 
 #[test]
+fn scan_checkouts_uses_os_by_root_where_the_parent_is_not_the_os() {
+    let dir = tempfile::TempDir::new().unwrap();
+    // `<os>/<tool>` follows the convention; `data/<tool>/tools` does not.
+    let conventional = dir.path().join("solaris").join("app");
+    let unconventional = dir.path().join("data").join("app").join("tools");
+    for root in [&conventional, &unconventional] {
+        std::fs::create_dir_all(root.join("DEVELOP")).unwrap();
+        touch_checkout(&root.join("DEVELOP"), "script_20240315_1430_jdoe");
+    }
+
+    let config = VcConfig {
+        os_by_root: [(unconventional.clone(), "linux".to_string())].into(),
+        ..VcConfig::default()
+    };
+    let records = scan_checkouts(&[conventional.clone(), unconventional.clone()], &config);
+
+    let os_of = |root: &std::path::Path| {
+        records
+            .iter()
+            .find(|r| r.physical_path.starts_with(root.to_str().unwrap()))
+            .map(|r| r.os_flavor.as_str())
+    };
+    assert_eq!(os_of(&conventional), Some("solaris"));
+    assert_eq!(os_of(&unconventional), Some("linux"));
+}
+
+#[test]
 fn scan_checkouts_reclassifies_rollback_displaced_develop_entry() {
     // A rollback moves the version it displaces into DEVELOP as
     // `<script>_<timestamp>_RB_<abbr>` rather than deleting it — that must not

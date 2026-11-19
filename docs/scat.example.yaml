@@ -50,7 +50,8 @@ db_path: /catalog/scat/scripts.sqlite
 # directory name becomes the vc "os_flavor" for any DEVELOP/ARCHIVE
 # checkouts found under it (e.g. "linux" from /catalog/linux/scripts) —
 # so the OS-specific directory must be the parent, not a child, of the
-# scripts directory itself.
+# scripts directory itself. Roots laid out differently take their OS name from
+# `vc.os_by_root` below.
 scan_roots:
   - /catalog/linux/scripts
   - /catalog/windows/scripts
@@ -84,6 +85,11 @@ vc:
   # `scat catalog build`), or a fixed offset such as +02:00. See
   # docs/VC_CONTRACT.md.
   # timestamp_timezone: utc
+  # OS name for a scan root whose parent directory is not the OS. Roots not
+  # listed keep the default (the parent directory's name). Keys are scan roots
+  # as written in `scan_roots`; relative keys resolve against this file.
+  # os_by_root:
+  #   /catalog/apps/tools: linux
   # Optional: path to vc's own manifest of every file path it manages (one
   # absolute path per line; name and location are environment-specific).
   # When set, the catalog build cross-references it against what was

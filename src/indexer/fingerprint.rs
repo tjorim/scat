@@ -86,6 +86,15 @@ impl BuildFingerprint {
         for dir in vc_config.all_checkout_dirs() {
             field(&mut inputs, dir.as_bytes());
         }
+        // Only when set, so catalogs built without overrides keep their
+        // fingerprint across the upgrade that introduced the setting.
+        if !vc_config.os_by_root.is_empty() {
+            field(&mut inputs, b"--os-by-root");
+            for (root, os) in &vc_config.os_by_root {
+                field(&mut inputs, root.as_os_str().as_encoded_bytes());
+                field(&mut inputs, os.as_bytes());
+            }
+        }
         field(
             &mut inputs,
             manifest_fingerprint(vc_config.manifest_path.as_deref()).as_bytes(),
@@ -165,10 +174,19 @@ mod tests {
             ..VcConfig::default()
         };
         assert_ne!(base.inputs, compute(&["/r"], 10, &[], &custom).inputs);
+        let named = VcConfig {
+            os_by_root: [(PathBuf::from("/r"), "linux".to_string())].into(),
+            ..VcConfig::default()
+        };
+        assert_ne!(base.inputs, compute(&["/r"], 10, &[], &named).inputs);
         // None of these touch how a single script is extracted.
         assert_eq!(
             base.extraction,
             compute(&["/s"], 10, &[], &custom).extraction
+        );
+        assert_eq!(
+            base.extraction,
+            compute(&["/r"], 10, &[], &named).extraction
         );
     }
 

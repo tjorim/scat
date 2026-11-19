@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
@@ -128,6 +128,75 @@ pub struct VcConfig {
     /// path per line. Name and location are environment-specific. `None`
     /// disables the manifest cross-reference warnings entirely.
     pub manifest_path: Option<PathBuf>,
+    /// OS names for scan roots that do not follow the `<os>/<root>` layout
+    /// (`vc.os_by_root`); every other root takes its parent directory's name.
+    pub os_by_root: OsByRoot,
+}
+
+/// Explicit OS name per scan root (`vc.os_by_root`).
+pub type OsByRoot = BTreeMap<PathBuf, String>;
+
+/// The OS name recorded on the checkouts found under `root`: the explicit
+/// entry in `overrides` when there is one, else the name of the root's parent
+/// directory (`linux` for `/catalog/linux/scripts`), else an empty string.
+pub fn os_flavor_for_root(root: &Path, overrides: &OsByRoot) -> String {
+    if let Some(name) = lookup_override(root, overrides) {
+        return name.to_string();
+    }
+    root.parent()
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_string()
+}
+
+/// `overrides` entry for `root`.
+fn lookup_override<'a>(root: &Path, overrides: &'a OsByRoot) -> Option<&'a str> {
+    if overrides.is_empty() {
+        return None;
+    }
+    if let Some(name) = overrides.get(root) {
+        return Some(name);
+    }
+    overrides
+        .iter()
+        .find(|(key, _)| same_directory(key, root))
+        .map(|(_, name)| name.as_str())
+}
+
+/// Whether two paths name the same directory: equal by component (so a
+/// trailing slash does not matter), or equal once symlinks are resolved.
+fn same_directory(a: &Path, b: &Path) -> bool {
+    a == b
+        || matches!(
+            (std::fs::canonicalize(a), std::fs::canonicalize(b)),
+            (Ok(a), Ok(b)) if a == b
+        )
+}
+
+/// Problems with how scan roots map to OS names, for the build log: a root
+/// that ends up with no OS name, and `os_by_root` entries that name no scan
+/// root (almost always a typo, so the intended root silently keeps its default).
+pub fn os_mapping_warnings(scan_roots: &[PathBuf], overrides: &OsByRoot) -> Vec<String> {
+    let mut warnings = Vec::new();
+    for root in scan_roots {
+        if os_flavor_for_root(root, overrides).is_empty() {
+            warnings.push(format!(
+                "scan root {} has no parent directory to take an OS name from; its \
+                 checkouts are recorded without one (set vc.os_by_root to name it)",
+                root.display()
+            ));
+        }
+    }
+    for key in overrides.keys() {
+        if !scan_roots.iter().any(|root| same_directory(key, root)) {
+            warnings.push(format!(
+                "vc.os_by_root entry {} matches no scan root and has no effect",
+                key.display()
+            ));
+        }
+    }
+    warnings
 }
 
 impl Default for VcConfig {
@@ -144,6 +213,7 @@ impl Default for VcConfig {
                 .collect(),
             timestamp_zone: TimestampZone::default(),
             manifest_path: None,
+            os_by_root: OsByRoot::new(),
         }
     }
 }
@@ -322,8 +392,9 @@ pub fn parse_checkout_filename(filename: &str) -> Option<(String, String, String
 /// deduplicated by their canonicalised real path so that OS-variant symlinks
 /// (e.g. `alt/scripts → linux/scripts`) are not scanned twice, and symlinks resolving
 /// outside all scan_roots are not followed.
-/// The `os_flavor` for each record is derived from the parent directory name of the
-/// scan_root (e.g. `linux` from `/catalog/linux/scripts`).
+/// The `os_flavor` for each record is `vc.os_by_root`'s entry for the scan_root
+/// when there is one, else the parent directory name of the scan_root (e.g.
+/// `linux` from `/catalog/linux/scripts`); see [`os_flavor_for_root`].
 pub fn scan_checkouts(scan_roots: &[PathBuf], config: &VcConfig) -> Vec<CheckoutRecord> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -348,12 +419,7 @@ pub fn scan_checkouts(scan_roots: &[PathBuf], config: &VcConfig) -> Vec<Checkout
     let mut visited: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
 
     for scan_root in scan_roots {
-        let os_flavor = scan_root
-            .parent()
-            .and_then(|p| p.file_name())
-            .and_then(|n| n.to_str())
-            .unwrap_or("")
-            .to_string();
+        let os_flavor = os_flavor_for_root(scan_root, &config.os_by_root);
 
         let mut queue = std::collections::VecDeque::from([scan_root.clone()]);
         while let Some(dir) = queue.pop_front() {
@@ -928,6 +994,71 @@ fn normalize_scripttype(value: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn overrides(entries: &[(&str, &str)]) -> OsByRoot {
+        entries
+            .iter()
+            .map(|(root, os)| (PathBuf::from(root), (*os).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn os_flavor_defaults_to_the_parent_directory_name() {
+        let none = OsByRoot::new();
+        assert_eq!(
+            os_flavor_for_root(Path::new("/c/linux/tools"), &none),
+            "linux"
+        );
+        assert_eq!(os_flavor_for_root(Path::new("/tools"), &none), "");
+        assert_eq!(os_flavor_for_root(Path::new("tools"), &none), "");
+    }
+
+    #[test]
+    fn os_by_root_overrides_the_parent_name_for_that_root_only() {
+        let map = overrides(&[("/c/data/app/tools", "linux")]);
+        assert_eq!(
+            os_flavor_for_root(Path::new("/c/data/app/tools"), &map),
+            "linux"
+        );
+        // A trailing slash is the same directory.
+        assert_eq!(
+            os_flavor_for_root(Path::new("/c/data/app/tools/"), &map),
+            "linux"
+        );
+        // Other roots keep the default.
+        assert_eq!(
+            os_flavor_for_root(Path::new("/c/solaris/app"), &map),
+            "solaris"
+        );
+    }
+
+    #[test]
+    fn os_by_root_matches_a_symlinked_spelling_of_the_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real").join("tools");
+        std::fs::create_dir_all(&real).unwrap();
+        let alias = dir.path().join("alias");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let map = overrides(&[(real.to_str().unwrap(), "sollnx")]);
+        assert_eq!(os_flavor_for_root(&alias, &map), "sollnx");
+    }
+
+    #[test]
+    fn os_mapping_warnings_flag_unnamed_roots_and_dead_entries() {
+        let roots = [PathBuf::from("/c/linux/tools"), PathBuf::from("/tools")];
+        assert_eq!(os_mapping_warnings(&roots, &OsByRoot::new()).len(), 1);
+
+        // Naming the root fixes the first warning; a typo'd key adds another.
+        let fixed = overrides(&[("/tools", "linux")]);
+        assert!(os_mapping_warnings(&roots, &fixed).is_empty());
+        let typo = overrides(&[("/tool", "linux")]);
+        let warnings = os_mapping_warnings(&roots, &typo);
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(
+            warnings.iter().any(|w| w.contains("/tool ")),
+            "{warnings:?}"
+        );
+    }
 
     #[test]
     fn load_vc_manifest_parses_one_path_per_line() {
