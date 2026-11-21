@@ -298,9 +298,9 @@ jobs:
           cargo about generate --locked --fail --target x86_64-pc-windows-msvc --manifest-path crates/scat-embed/Cargo.toml -c about.toml about.hbs -o $notices
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           # fastembed's native ONNX Runtime is separate from the Rust wrapper.
+          # Its notices are vendored in packaging/onnxruntime (see README there).
           foreach ($name in @("LICENSE", "ThirdPartyNotices.txt")) {
-            $text = (Invoke-WebRequest "https://raw.githubusercontent.com/microsoft/onnxruntime/v1.28.0/$name").Content
-            Add-Content -Path $notices -Value $text -Encoding utf8
+            Add-Content -Path $notices -Value (Get-Content -Raw "packaging/onnxruntime/$name") -Encoding utf8
           }
           Copy-Item LICENSE, NOTICE target/release/
           if ((Get-Item $notices).Length -eq 0) { throw "Empty dependency notices" }
